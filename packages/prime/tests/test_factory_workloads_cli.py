@@ -263,11 +263,18 @@ USAGE_NODES = [
             "gpus_used": 8,
             "assigned_to": "slurm",
         }
-        for i in range(3)
+        for i in range(2)
     ),
     {
-        "name": "slurm-down",
-        "state": "offline",
+        "name": "slurm-idle",
+        "state": "ready",
+        "gpus_total": 8,
+        "gpus_used": 0,
+        "assigned_to": "slurm",
+    },
+    {
+        "name": "slurm-draining",
+        "state": "draining",
         "gpus_total": 8,
         "gpus_used": 0,
         "assigned_to": "slurm",
@@ -307,16 +314,38 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
     assert rows[2] == ["slurm", "·", "2", "allocated", "·", "1", "idle", "·", "1", "draining"]
     # Other pools show four-bucket format
     assert rows[7:9] == [["other", *_counts(0, 0, 1, 0)], ["unassigned", *_counts(1, 0, 0, 0)]]
-    assert "slurm allocated/idle = internal Slurm breakdown" in " ".join(rows[-1])
+    assert "slurm allocated/idle/draining = internal Slurm breakdown" in " ".join(rows[-1])
 
 
 def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # When there are no Slurm jobs, all ready Slurm nodes should be idle (gpus_used=0)
+    idle_slurm_nodes = [
+        *(
+            {
+                "name": f"slurm-{i}",
+                "state": "ready",
+                "gpus_total": 8,
+                "gpus_used": 0,
+                "assigned_to": "slurm",
+            }
+            for i in range(3)
+        ),
+        {
+            "name": "slurm-draining",
+            "state": "draining",
+            "gpus_total": 8,
+            "gpus_used": 0,
+            "assigned_to": "slurm",
+        },
+        {"name": "busy", "state": "ready", "gpus_total": 8, "gpus_used": 8},
+        {"name": "idle", "state": "ready", "gpus_total": 8, "gpus_used": 0},
+    ]
     _install(
         monkeypatch,
         _workloads_payload([_workload("training:1", "training")]),
-        nodes_payload=_nodes_payload(USAGE_NODES),
+        nodes_payload=_nodes_payload(idle_slurm_nodes),
     )
 
     rows = _plain_rows("--type", "training")
@@ -325,15 +354,50 @@ def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
     assert rows[2:4] == [["slurm", "·", "0", "allocated", "·", "3", "idle", "·", "1", "draining"], ["training"]]
 
 
-def test_workloads_warns_when_slurm_jobs_are_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Jobs cut from the running Slurm list would count their nodes as idle.
+def test_workloads_omits_draining_when_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When there are no draining nodes, the Slurm header should show only allocated and idle
+    nodes_no_draining = [
+        {
+            "name": "slurm-0",
+            "state": "ready",
+            "gpus_total": 8,
+            "gpus_used": 8,
+            "assigned_to": "slurm",
+        },
+        {
+            "name": "slurm-1",
+            "state": "ready",
+            "gpus_total": 8,
+            "gpus_used": 0,
+            "assigned_to": "slurm",
+        },
+        {"name": "idle", "state": "ready", "gpus_total": 8, "gpus_used": 0},
+    ]
+    _install(
+        monkeypatch,
+        _workloads_payload([_workload("slurm:1", "slurm", allocated_gpus=8)]),
+        nodes_payload=_nodes_payload(nodes_no_draining),
+    )
+
+    rows = _plain_rows()
+
+    # Slurm pool header omits "0 draining": shows only "1 allocated · 1 idle"
+    assert rows[2] == ["slurm", "·", "1", "allocated", "·", "1", "idle"]
+
+
+def test_workloads_no_longer_warns_when_slurm_jobs_are_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Now that we use per-node gpus_used instead of estimating from jobs,
+    # job list truncation does not affect Slurm allocated/idle accuracy.
     payload = _workloads_payload([_workload("slurm:1", "slurm")])
     payload["truncated"] = True
     _install(monkeypatch, payload, nodes_payload=_nodes_payload(USAGE_NODES))
 
     output = " ".join(" ".join(row) for row in _plain_rows())
 
-    assert "allocated Slurm nodes may be undercounted" in output
+    # No warning about undercounted allocated nodes (we use real node data now)
+    assert "may be undercounted" not in output
 
 
 def test_workloads_shows_idle_clusters_with_their_counts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -873,7 +937,8 @@ def test_workloads_unobserved_allocation_row_renders_with_dash(
     rows = _plain_rows()
 
     assert ["training-job", "carol", "running", "-", "30:00", "training:run-5"] in rows
-    assert all("unavailable" not in row for row in rows)  # not degradation
+    # The word "unavailable" appears in capacity counts (4-bucket model), but this isn't degradation
+    assert "results may be incomplete" not in " ".join(" ".join(row) for row in rows)
 
 
 def test_workloads_degradation_computed_on_narrowed_view(

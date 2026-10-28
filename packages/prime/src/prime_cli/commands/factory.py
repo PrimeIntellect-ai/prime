@@ -60,15 +60,10 @@ FACTORY_NODES_JSON_HELP = json_output_help(
     "--team: use a different team than the selected account context",
 )
 
-SLURM_ESTIMATE_NOTE = (
-    "slurm allocated = estimated from running jobs (GPUs/node size); CPU-only jobs not counted"
-)
 SLURM_ALLOCATED_IDLE_NOTE = (
-    "slurm allocated/idle = internal Slurm breakdown; allocated estimated from running jobs "
-    "(GPUs/node size), draining approximated from non-ready node state; CPU-only jobs not counted"
-)
-SLURM_JOBS_TRUNCATED_WARNING = (
-    "running Slurm job list was truncated — allocated Slurm nodes may be undercounted"
+    "slurm allocated/idle/draining = internal Slurm breakdown from per-node state and GPU usage; "
+    "allocated = ready nodes with gpus_used > 0, idle = ready with gpus_used = 0, "
+    "draining = nodes with Slurm drain flag"
 )
 
 
@@ -176,10 +171,10 @@ def _pool_usage(
 ) -> List[Tuple[str, _Usage]]:
     """Split one cluster's nodes into pools; every node lands in exactly one.
 
-    Slurm nodes report no per-node load, so allocated Slurm nodes are estimated
-    from the running jobs' GPUs, capped at the ready Slurm nodes. Ready
-    non-Slurm nodes holding GPUs are attributed to training and inference
-    from the allocation summary; whatever is left over is "other".
+    Uses actual per-node data from the factory nodes API. Slurm breakdown derives
+    from real node state and gpus_used (not estimated from jobs). Ready non-Slurm
+    nodes holding GPUs are attributed to training and inference from the allocation
+    summary; whatever is left over is "other".
     
     Returns pools with _Usage where the four buckets (free/slurm/busy/unavailable)
     are mutually exclusive and sum to nodes. Slurm pools store internal breakdown
@@ -188,19 +183,21 @@ def _pool_usage(
     gpus_per_node = _gpus_per_node(nodes)
 
     slurm = [n for n in nodes if n.assigned_to == "slurm"]
-    slurm_draining = sum(1 for n in slurm if n.state != "ready")
-    slurm_ready = len(slurm) - slurm_draining
-    job_nodes = (
-        sum(math.ceil((job.allocated_gpus or 0) / gpus_per_node) for job in slurm_jobs)
-        if gpus_per_node
-        else 0
-    )
-    slurm_allocated = min(job_nodes, slurm_ready)
-    slurm_idle = slurm_ready - slurm_allocated
+    # Use actual per-node state and gpus_used (not job estimates)
+    slurm_allocated = sum(1 for n in slurm if n.state == "ready" and (n.gpus_used or 0) > 0)
+    slurm_idle = sum(1 for n in slurm if n.state == "ready" and (n.gpus_used or 0) == 0)
+    # Only count nodes with real "draining" state (Slurm drain flag), not all non-ready
+    slurm_draining = sum(1 for n in slurm if n.state == "draining")
+    # Other non-ready Slurm nodes (cordoned/offline/unknown) still in the slurm bucket
+    # but tracked separately for completeness check
+    slurm_other_down = sum(1 for n in slurm if n.state not in ("ready", "draining"))
+    
     names = sorted({job.scheduler_display_name for job in slurm_jobs if job.scheduler_display_name})
     slurm_label = f"slurm ({', '.join(names)})" if names else "slurm"
     # Slurm pool: ALL Slurm nodes go in slurm bucket only (free=0, busy=0, unavailable=0)
     # Internal breakdown stored separately in slurm_* fields (allocated/idle/draining)
+    # Note: slurm_draining only counts real "draining" state; other down states exist but
+    # are not shown (cordoned/offline/unknown on Slurm nodes)
     pools = [(slurm_label, _Usage(len(slurm), 0, len(slurm), 0, 0, slurm_allocated, slurm_idle, slurm_draining))]
 
     direct = [n for n in nodes if n.assigned_to != "slurm"]
@@ -382,10 +379,8 @@ def _render_status_table(
     console.print(table)
     for warning in warnings:
         console.print(f"[yellow]{warning}[/yellow]")
-    if slurm_jobs.truncated:
-        console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
     if verbose:
-        console.print(f"[dim]{SLURM_ESTIMATE_NOTE}[/dim]", highlight=False)
+        console.print(f"[dim]{SLURM_ALLOCATED_IDLE_NOTE}[/dim]", highlight=False)
 
 
 def _fetch_usage_view(
@@ -879,18 +874,24 @@ def _usage_text(usage: _Usage) -> Text:
 def _slurm_usage_text(usage: _Usage) -> Text:
     """Format Slurm pool internal breakdown: `<a> allocated · <i> idle · <d> draining`.
     
-    Matches dashboard order and labels. Uses dedicated slurm_* fields that don't overlap
-    with four-bucket fields.
+    Matches dashboard order and labels. Omits draining when 0 (like dashboard).
+    Uses dedicated slurm_* fields that don't overlap with four-bucket fields.
     """
     text = Text()
+    # Always show allocated and idle; omit draining when 0 (matches dashboard)
     for count, label, style in (
         (usage.slurm_allocated, "allocated", "default"),
         (usage.slurm_idle, "idle", "default"),
-        (usage.slurm_draining, "draining", "red"),
     ):
         if text:
             text.append(" · ", style="dim")
         text.append(f"{count} {label}", style=style if count else "dim")
+    
+    # Show draining only when > 0
+    if usage.slurm_draining > 0:
+        text.append(" · ", style="dim")
+        text.append(f"{usage.slurm_draining} draining", style="red")
+    
     return text
 
 
@@ -1315,8 +1316,6 @@ def factory_workloads(
             # The backend caps the unbounded default window at 200.
             effective = limit if limit is not None else WORKLOAD_LIMIT_MAX
             console.print(f"[dim]{_truncated_note(effective)}[/dim]")
-        if slurm_jobs.truncated:
-            console.print(f"[yellow]{SLURM_JOBS_TRUNCATED_WARNING}[/yellow]")
         shown = {row.cluster_display_name for row in available} | set(idle_clusters)
         if any(usage[name][0][1].nodes for name in shown if name in usage):
             console.print(f"[dim]{SLURM_ALLOCATED_IDLE_NOTE}[/dim]", highlight=False)

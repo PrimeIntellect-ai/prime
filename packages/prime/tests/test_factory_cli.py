@@ -814,7 +814,7 @@ def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(
     # Verify four-bucket invariant for cluster and each pool
     assert all(nodes == free + slurm + busy + unavail 
                for nodes, free, slurm, busy, unavail in [cluster, *pools])
-    assert len(rows) == 7 and "estimated from running jobs" in " ".join(rows[6])
+    assert len(rows) == 7 and "from per-node state and GPU usage" in " ".join(rows[6])
 
 
 def test_factory_status_warns_once_per_offline_or_stale_cluster(
@@ -833,7 +833,8 @@ def test_factory_status_warns_once_per_offline_or_stale_cluster(
 
     assert result.exit_code == 0, result.output
     # The stale cluster keeps its last-known counts; the warning says how old.
-    assert lines[3].split() == ["[3]", "stale", "B300", "1", "1", "0", "0"]
+    # Node: ready, assigned_to=None, gpus_used=8 -> busy (1 node, 0 free, 0 slurm, 1 busy, 0 unavailable)
+    assert lines[3].split() == ["[3]", "stale", "B300", "1", "0", "0", "1", "0"]
     assert lines[4:] == ["[2] dark: offline", "[3] stale: node data last seen 2h ago"]
 
 
@@ -960,7 +961,7 @@ def test_factory_status_compact_duplicate_names_pair_positionally(
     # Duplicate display names make the equal-name identity check blind to
     # replacement between the two requests: both rows degrade to em-dashes
     # instead of risking cross-wired counts.
-    assert output.count("—") == 8
+    assert output.count("—") == 10  # 2 clusters × 5 count columns (NODES/FREE/SLURM/BUSY/UNAVAILABLE)
     assert "[1] twin: node data unavailable" in output
     assert "[2] twin: node data unavailable" in output
 
@@ -968,7 +969,7 @@ def test_factory_status_compact_duplicate_names_pair_positionally(
     selected = runner.invoke(app, ["factory", "status", "--cluster", "2"], env=TEST_ENV)
     selected_output = strip_ansi(selected.output)
     assert selected.exit_code == 0, selected.output
-    assert selected_output.count("—") == 4
+    assert selected_output.count("—") == 5  # 1 cluster × 5 count columns
     assert "[2] twin: node data unavailable" in selected_output
 
 
@@ -1053,7 +1054,7 @@ def test_factory_status_compact_node_join_verifies_cluster_identity(
     # Position 1 pairs with office-a100's node data on cluster-a's row:
     # identity mismatch -> em-dash cells on both rows, never cross-wired
     # counts, and a warning line per cluster.
-    assert output.count("—") == 8
+    assert output.count("—") == 10  # 2 clusters × 5 count columns (NODES/FREE/SLURM/BUSY/UNAVAILABLE)
     assert "[1] cluster-a: node data unavailable" in output
     assert "[2] office-a100: node data unavailable" in output
 
@@ -1233,7 +1234,7 @@ def test_factory_status_compact_nodes_snapshot_duplicates_disable_join(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert output.count("—") == 4  # never attach either duplicate's counts
+    assert output.count("—") == 5  # 1 cluster × 5 count columns; never attach either duplicate's counts
     assert "twin: node data unavailable" in output
 
 

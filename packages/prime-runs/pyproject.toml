@@ -20,7 +20,7 @@ authors = [
 dependencies = [
     "httpx>=0.25.0",
     "orjson>=3.10.0",
-    "prime-traces>=0.0.3",
+    "prime-traces>=0.0.11",
 ]
 keywords = ["evals", "evaluations", "training", "runs", "traces", "observability"]
 classifiers = [

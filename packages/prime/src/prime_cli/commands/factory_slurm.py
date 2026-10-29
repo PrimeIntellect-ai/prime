@@ -1,6 +1,5 @@
 """`prime factory slurm` — the team's Slurm deployment roster."""
 
-import getpass
 import re
 import time
 from pathlib import Path
@@ -329,30 +328,99 @@ def _create_error_hint(error: APIError) -> Optional[str]:
     return None
 
 
-def _get_current_username() -> str:
-    """Get the current system username."""
-    return getpass.getuser()
+def _get_platform_user() -> Optional[Dict[str, str]]:
+    """Get the logged-in platform user from the API.
+
+    Returns dict with 'id' and 'username' (slug sanitized to regex), or None if unavailable.
+    """
+    try:
+        client = APIClient()
+        response = client.get("/user/whoami")
+        data = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(data, dict):
+            return None
+
+        user_id = data.get("id")
+        slug = data.get("slug")
+
+        if not user_id or not slug:
+            return None
+
+        # Sanitize slug to match username regex
+        username = _sanitize_username(slug)
+        if not username:
+            return None
+
+        return {"id": user_id, "username": username}
+    except Exception:
+        return None
 
 
-def _read_ssh_keys(ssh_key_files: Optional[List[str]] = None) -> List[str]:
-    """Read SSH public keys from files or ~/.ssh/*.pub."""
+def _sanitize_username(slug: str) -> Optional[str]:
+    """Sanitize a platform slug to match Slurm username requirements.
+
+    Converts to lowercase, replaces invalid chars with hyphens, ensures it matches
+    ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32.
+    """
+    if not slug:
+        return None
+
+    # Convert to lowercase
+    sanitized = slug.lower()
+
+    # Replace invalid characters with hyphens
+    sanitized = re.sub(r"[^a-z0-9-]", "-", sanitized)
+
+    # Ensure it starts with a letter
+    if not sanitized or not sanitized[0].isalpha():
+        sanitized = "u" + sanitized
+
+    # Ensure it doesn't end with hyphen
+    sanitized = sanitized.rstrip("-")
+    if not sanitized or not sanitized[-1].isalnum():
+        sanitized = sanitized + "0"
+
+    # Truncate to 32 chars max
+    if len(sanitized) > 32:
+        sanitized = (
+            sanitized[:31] + sanitized[-1] if sanitized[-1].isalnum() else sanitized[:31] + "0"
+        )
+
+    # Ensure minimum length
+    if len(sanitized) < 2:
+        sanitized = sanitized + "0"
+
+    # Validate it matches the regex
+    if _validate_username(sanitized):
+        return sanitized
+
+    return None
+
+
+def _read_ssh_keys(key_file: Optional[str] = None) -> List[str]:
+    """Read SSH public keys from a file or ~/.ssh/*.pub.
+
+    Args:
+        key_file: Specific key file to read. If None, reads all ~/.ssh/*.pub files.
+
+    Returns:
+        List of SSH public key strings.
+    """
     keys = []
 
-    if ssh_key_files:
-        # Read from specified files
-        for key_file in ssh_key_files:
-            path = Path(key_file).expanduser()
-            if not path.exists():
-                console.print(f"[yellow]Warning:[/yellow] SSH key file not found: {key_file}")
-                continue
-            try:
-                content = path.read_text().strip()
-                if content:
-                    keys.append(content)
-            except Exception as e:
-                console.print(
-                    f"[yellow]Warning:[/yellow] Could not read {key_file}: {escape(str(e))}"
-                )
+    if key_file:
+        # Read from specified file
+        path = Path(key_file).expanduser()
+        if not path.exists():
+            console.print(f"[yellow]Warning:[/yellow] SSH key file not found: {key_file}")
+            return []
+        try:
+            content = path.read_text().strip()
+            if content:
+                keys.append(content)
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] Could not read {key_file}: {escape(str(e))}")
+            return []
     else:
         # Default: read from ~/.ssh/*.pub
         ssh_dir = Path.home() / ".ssh"
@@ -374,6 +442,33 @@ def _validate_username(username: str) -> bool:
     if not (2 <= len(username) <= 32):
         return False
     return USERNAME_REGEX.match(username) is not None
+
+
+def _parse_member_spec(spec: str, platform_user: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """Parse a member specification in format USER[:KEYFILE].
+
+    Args:
+        spec: Member specification string
+        platform_user: Platform user dict for validation of default member
+
+    Returns:
+        Dict with 'username' and 'keyfile' (optional)
+
+    Raises:
+        ValueError: If the spec is invalid
+    """
+    if ":" in spec:
+        username, keyfile = spec.split(":", 1)
+        return {"username": username, "keyfile": keyfile}
+    else:
+        # Bare username - only valid if it's the caller's own username
+        if platform_user and spec == platform_user["username"]:
+            return {"username": spec, "keyfile": None}
+        else:
+            raise ValueError(
+                f"Member '{spec}' requires a key file. Use --member {spec}:KEYFILE. "
+                f"Only the default member (your platform username) can omit the key file."
+            )
 
 
 def _wait_for_status(
@@ -478,17 +573,16 @@ def create_cluster(
     member: List[str] = typer.Option(
         [],
         "--member",
-        help="Username for SSH access (repeatable). Defaults to current user if not specified.",
-    ),
-    ssh_key_file: List[str] = typer.Option(
-        [],
-        "--ssh-key-file",
-        help="Path to SSH public key file (repeatable). Defaults to ~/.ssh/*.pub if not specified.",
+        help=(
+            "Member in format USER[:KEYFILE] (repeatable). "
+            "Defaults to your platform username with ~/.ssh/*.pub keys if not specified. "
+            "Other members require :KEYFILE."
+        ),
     ),
     sudo: bool = typer.Option(
         False,
         "--sudo",
-        help="Grant sudo privileges to members (applies to all members)",
+        help="Grant sudo privileges to the default member (your platform user)",
     ),
     gpus_per_node: Optional[int] = typer.Option(
         None,
@@ -538,8 +632,9 @@ def create_cluster(
     Requires team admin privileges and an API key with the slurm_clusters:write scope
     (plus slurm_clusters:read for --wait polling).
 
-    At least one member with SSH access is required. If no --member is specified,
-    defaults to the current user with SSH keys from ~/.ssh/*.pub.
+    At least one member with SSH access is required. Members are specified as USER[:KEYFILE].
+    If no --member is given, defaults to your platform username with SSH keys from ~/.ssh/*.pub.
+    Other members must specify a key file (e.g., --member alice:~/.ssh/alice.pub).
     """
     if json_output:
         output = "json"
@@ -555,46 +650,79 @@ def create_cluster(
     if not team_id:
         return
 
+    # Get platform user for default member
+    platform_user = _get_platform_user()
+
     # Build members list
     members_list: List[Dict[str, Any]] = []
+    member_specs = member if member else []
 
-    if not member:
-        # Default to current user
-        username = _get_current_username()
-        if not _validate_username(username):
+    if not member_specs:
+        # Default to platform user
+        if not platform_user:
             err_console.print(
-                f"[red]Error:[/red] Current username '{escape(username)}' is invalid. "
-                "Must match ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32. "
-                "Specify a valid username with --member."
+                "[red]Error:[/red] Could not determine your platform username. "
+                "Please specify members explicitly with --member USER:KEYFILE."
             )
             raise typer.Exit(1)
-        member = [username]
 
-    # Read SSH keys
-    ssh_keys = _read_ssh_keys(ssh_key_file if ssh_key_file else None)
-    if not ssh_keys:
-        err_console.print(
-            "[red]Error:[/red] No SSH keys found. "
-            "Specify keys with --ssh-key-file or ensure ~/.ssh/*.pub files exist."
-        )
-        raise typer.Exit(1)
-
-    # Build members
-    for username in member:
-        # Validate username
-        if not _validate_username(username):
+        # Read default SSH keys for platform user
+        ssh_keys = _read_ssh_keys()
+        if not ssh_keys:
             err_console.print(
-                f"[red]Error:[/red] Invalid username '{escape(username)}'. "
-                "Must match ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32."
+                "[red]Error:[/red] No SSH keys found in ~/.ssh/*.pub. "
+                "Specify a key file with --member USER:KEYFILE."
             )
             raise typer.Exit(1)
 
         member_dict: Dict[str, Any] = {
-            "username": username,
+            "username": platform_user["username"],
             "sshAuthorizedKeys": ssh_keys,
             "sudo": sudo,
+            "linkedUserId": platform_user["id"],
         }
         members_list.append(member_dict)
+    else:
+        # Parse member specifications
+        for spec in member_specs:
+            try:
+                parsed = _parse_member_spec(spec, platform_user)
+            except ValueError as e:
+                err_console.print(f"[red]Error:[/red] {escape(str(e))}")
+                raise typer.Exit(1)
+
+            username = parsed["username"]
+            keyfile = parsed.get("keyfile")
+
+            # Validate username
+            if not _validate_username(username):
+                err_console.print(
+                    f"[red]Error:[/red] Invalid username '{escape(username)}'. "
+                    "Must match ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32."
+                )
+                raise typer.Exit(1)
+
+            # Read SSH keys for this member
+            ssh_keys = _read_ssh_keys(keyfile)
+            if not ssh_keys:
+                err_console.print(
+                    f"[red]Error:[/red] No SSH keys found for member '{escape(username)}'. "
+                    f"Specify a valid key file."
+                )
+                raise typer.Exit(1)
+
+            member_dict: Dict[str, Any] = {
+                "username": username,
+                "sshAuthorizedKeys": ssh_keys,
+                "sudo": False,  # Only default member gets sudo
+            }
+
+            # Set linkedUserId and sudo for platform user
+            if platform_user and username == platform_user["username"]:
+                member_dict["linkedUserId"] = platform_user["id"]
+                member_dict["sudo"] = sudo
+
+            members_list.append(member_dict)
 
     # Show confirmation prompt unless --yes
     if not yes:
@@ -605,7 +733,9 @@ def create_cluster(
         if gpus_per_node:
             err_console.print(f"  GPUs per node:  {gpus_per_node}")
         err_console.print(f"  Members:        {', '.join(m['username'] for m in members_list)}")
-        err_console.print(f"  Sudo:           {'yes' if sudo else 'no'}")
+        if any(m.get("sudo") for m in members_list):
+            sudo_members = [m["username"] for m in members_list if m.get("sudo")]
+            err_console.print(f"  Sudo:           {', '.join(sudo_members)}")
         if containers:
             err_console.print("  Containers:     enabled")
         if home_size:

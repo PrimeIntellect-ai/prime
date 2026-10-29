@@ -3,9 +3,11 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
+from prime_sandboxes import APIError
 from prime_sandboxes.models import (
     CreateSandboxRequest,
     EgressPolicyStatus,
@@ -277,35 +279,53 @@ class TestValidateEgressLists:
         validate_egress_lists(None, None)
 
 
+_AUTH = {"gateway_url": "https://gw/", "user_ns": "ns", "job_id": "job", "token": "tok"}
+_FORWARDS_URL = "https://gw/ns/job/network/local-forwards"
+
+
+def _gateway_response(status, method, **kwargs):
+    return httpx.Response(status, request=httpx.Request(method, _FORWARDS_URL), **kwargs)
+
+
 class TestLocalhostForwardsMethods:
-    @pytest.mark.asyncio
-    async def test_sync_and_async_replace_and_get(self):
-        response = {
-            "forwards": [{"port": 8000, "sandbox_id": "sbx-db"}],
-            "generation": 5,
-            "applied_generation": 4,
-            "applied": False,
-        }
-        sync = _sync_client()
-        sync.client.request.return_value = response
-        status = sync.set_localhost_forwards(
+    def test_sync_set_posts_to_sandboxd(self):
+        client = object.__new__(SandboxClient)
+        client._auth_cache = MagicMock(get_or_refresh=MagicMock(return_value=_AUTH))
+        wire = {"forwards": [{"port": 8000, "peer_sandbox_id": "sbx-db"}]}
+        client._gateway_post = MagicMock(return_value=_gateway_response(200, "POST", json=wire))
+
+        forwards = client.set_localhost_forwards(
             "sbx-1", [LocalhostForward(port=8000, sandbox_id="sbx-db")]
         )
-        sync.client.request.assert_called_once_with(
-            "PUT",
-            "/sandbox/sbx-1/localhost-forwards",
-            json={"forwards": [{"port": 8000, "sandbox_id": "sbx-db"}]},
-        )
-        assert status.forwards[0].sandbox_id == "sbx-db" and not status.applied
 
-        aclient = _async_client()
-        aclient.client.request.return_value = response
-        status = await aclient.get_localhost_forwards("sbx-1")
-        assert aclient.client.request.await_args.args == (
-            "GET",
-            "/sandbox/sbx-1/localhost-forwards",
+        client._gateway_post.assert_called_once_with(
+            _FORWARDS_URL, headers={"Authorization": "Bearer tok"}, timeout=30, json=wire
         )
-        assert status.generation == 5
+        assert forwards == [LocalhostForward(port=8000, sandbox_id="sbx-db")]
+
+    @pytest.mark.parametrize(
+        ("status", "message"), [(409, "port 8000 in use"), (404, "recreate the sandbox")]
+    )
+    def test_sync_errors_raise_api_error(self, status, message):
+        client = object.__new__(SandboxClient)
+        client._auth_cache = MagicMock(get_or_refresh=MagicMock(return_value=_AUTH))
+        client._gateway_get = MagicMock(
+            return_value=_gateway_response(status, "GET", text="port 8000 in use")
+        )
+
+        with pytest.raises(APIError, match=message):
+            client.get_localhost_forwards("sbx-1")
+
+    @pytest.mark.asyncio
+    async def test_async_get_reads_from_sandboxd(self):
+        client = object.__new__(AsyncSandboxClient)
+        client._auth_cache = SimpleNamespace(get_or_refresh=AsyncMock(return_value=_AUTH))
+        client._gateway_get = AsyncMock(
+            return_value=_gateway_response(200, "GET", json={"forwards": []})
+        )
+
+        assert await client.get_localhost_forwards("sbx-1") == []
+        assert client._gateway_get.await_args.args == (_FORWARDS_URL,)
 
     def test_port_range_is_validated(self):
         with pytest.raises(ValidationError):

@@ -20,7 +20,6 @@ from prime_sandboxes import (
     LanNetwork,
     LanRule,
     LocalhostForward,
-    LocalhostForwardsStatus,
     PaymentRequiredError,
     Sandbox,
     SandboxCheckpoint,
@@ -682,19 +681,14 @@ def _parse_localhost_forward(raw: str) -> LocalhostForward:
     return LocalhostForward(port=int(port), sandbox_id=peer.strip())
 
 
-def _print_localhost_forwards(status: LocalhostForwardsStatus, output: str) -> None:
+def _print_localhost_forwards(forwards: List[LocalhostForward], output: str) -> None:
     if output == "json":
-        output_data_as_json(status.model_dump(mode="json"), console)
+        output_data_as_json({"forwards": [f.model_dump() for f in forwards]}, console)
         return
-    if not status.forwards:
+    if not forwards:
         console.print("No localhost forwards.")
-    for f in status.forwards:
+    for f in forwards:
         console.print(f"localhost:{f.port} -> {escape(f.sandbox_id)}.sandbox.internal:{f.port}")
-    if not status.applied:
-        console.print(
-            "[yellow]⚠ Localhost forwards were saved but are not active yet. "
-            "Retrying automatically.[/yellow]"
-        )
 
 
 @network_app.command("localhost", no_args_is_help=True)
@@ -710,7 +704,7 @@ def localhost_forwards(
 ) -> None:
     """Show or replace the localhost forwards of a VM sandbox. Each forward makes the
     sandbox's own 127.0.0.1:PORT and [::1]:PORT reach PEER.sandbox.internal:PORT. The
-    peer must share a LAN network with a rule allowing PORT, or connections are reset."""
+    peer must share a LAN network whose rules allow PORT, or connections are reset."""
     validate_output_format(output, console)
     try:
         if clear and forward:
@@ -721,10 +715,10 @@ def localhost_forwards(
             ports = [f.port for f in forwards]
             if len(ports) != len(set(ports)):
                 raise ValueError("each port can be forwarded only once")
-            status = client.set_localhost_forwards(sandbox_id, forwards)
+            current = client.set_localhost_forwards(sandbox_id, forwards)
         else:
-            status = client.get_localhost_forwards(sandbox_id)
-        _print_localhost_forwards(status, output)
+            current = client.get_localhost_forwards(sandbox_id)
+        _print_localhost_forwards(current, output)
     except (ValueError, APIError) as exc:
         _lan_error(exc)
 

@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 from prime_cli.commands.sandbox import _lan_rule_text, _parse_lan_rule, _parse_localhost_forward
 from prime_cli.main import app
-from prime_sandboxes.models import LanNetwork, LocalhostForwardsStatus
+from prime_sandboxes.models import LanNetwork
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -64,18 +64,13 @@ def test_parse_localhost_forward_rejects_malformed(raw):
 def test_network_localhost_replaces_shows_and_clears(monkeypatch):
     seen: list[Any] = []
 
-    def status(forwards: Any) -> LocalhostForwardsStatus:
-        return LocalhostForwardsStatus(
-            forwards=forwards, generation=2, applied_generation=1, applied=False
-        )
-
     monkeypatch.setattr(
         "prime_cli.commands.sandbox.SandboxClient.set_localhost_forwards",
-        lambda self, sandbox_id, forwards: seen.append((sandbox_id, forwards)) or status(forwards),
+        lambda self, sandbox_id, forwards: seen.append((sandbox_id, forwards)) or forwards,
     )
     monkeypatch.setattr(
         "prime_cli.commands.sandbox.SandboxClient.get_localhost_forwards",
-        lambda self, sandbox_id: status([]),
+        lambda self, sandbox_id: [],
     )
     result = runner.invoke(
         app, ["sandbox", "network", "localhost", "sbx-app", "8000:sbx-api", "5432:sbx-db"]
@@ -85,7 +80,10 @@ def test_network_localhost_replaces_shows_and_clears(monkeypatch):
     assert sandbox_id == "sbx-app"
     assert [(f.port, f.sandbox_id) for f in forwards] == [(8000, "sbx-api"), (5432, "sbx-db")]
     assert "sbx-db.sandbox.internal:5432" in result.output
-    assert "not active yet" in result.output
+    json_result = runner.invoke(
+        app, ["sandbox", "network", "localhost", "sbx-app", "8000:sbx-api", "-o", "json"]
+    )
+    assert '"sandbox_id": "sbx-api"' in json_result.output
 
     result = runner.invoke(app, ["sandbox", "network", "localhost", "sbx-app"])
     assert result.exit_code == 0 and "No localhost forwards" in result.output

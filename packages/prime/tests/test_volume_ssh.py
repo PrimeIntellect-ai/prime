@@ -1108,6 +1108,80 @@ def test_parallel_failure_reports_the_exit_code(monkeypatch, tmp_path):
 # --- warm create, phase-driven wait, routed get/put (ENG-6585) -------------
 
 
+def _upload_size_cases(tmp_path):
+    """(local source, expected _local_upload_bytes) fixtures. One regular
+    file in the tree: two files would take the session-route fallback into
+    _parallel_rsync, which the mocked subprocess.run cannot run."""
+    f = tmp_path / "one.bin"
+    f.write_bytes(b"x" * 100)
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "a.bin").write_bytes(b"x" * 30)
+    (tree / "empty").mkdir()
+    return [(str(f), 100), (str(tree), 30), (str(tree) + "/", 30)]
+
+
+def test_local_upload_bytes(tmp_path):
+    """The size a put reports for the platform's 100Ti cap check: the file
+    itself, or the regular files in the tree; symlinks never count."""
+    for local, expected in _upload_size_cases(tmp_path):
+        assert volumes._local_upload_bytes(local) == expected
+    (tmp_path / "tree" / "link.bin").symlink_to(tmp_path / "one.bin")
+    assert volumes._local_upload_bytes(str(tmp_path / "tree")) == 30
+
+
+def test_put_route_sends_the_upload_size(monkeypatch, tmp_path):
+    """The route request for a put carries sizeBytes (the local tree's
+    size), so the platform can refuse a put over the 100Ti cap; a get never
+    sends one."""
+    _setup(monkeypatch, tmp_path, {"ssh", "rsync"})
+    routed = []
+
+    def route(*a, **kw):
+        routed.append((a, kw))
+        raise NotFoundError("HTTP 404: Not Found")
+
+    session = SimpleNamespace(
+        id="s1",
+        status="RUNNING",
+        read_only=True,
+        error_message=None,
+        ssh_connection="u@host.tailnet.ts.net",
+    )
+    client = SimpleNamespace(
+        create_volume_session=lambda *a, **kw: session,
+        route_volume_transfer=route,
+    )
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    for local, expected in _upload_size_cases(tmp_path):
+        routed.clear()
+        assert _run("put", "data", local, "/").exit_code == 0
+        assert routed[0][1]["size_bytes"] == expected
+    assert _run("get", "data", "x", "out").exit_code == 0
+    get_args, get_kw = routed[-1]
+    assert get_args[1] == "get" and get_kw.get("size_bytes") is None
+
+
+def test_client_route_request_wire_contract_for_size():
+    posted = []
+    route = {
+        "via": "r2",
+        "endpoint": "https://acct.r2.cloudflarestorage.com",
+        "bucket": "b",
+        "prefix": "vol1/",
+        "accessKeyId": "AK",
+        "secretAccessKey": "SK",
+        "sessionToken": "ST",
+        "expiresAt": "2026-10-09T12:00:00Z",
+    }
+    api = SimpleNamespace(post=lambda path, json=None: posted.append(json) or route)
+    client = HostedTrainingClient(api)
+    client.route_volume_transfer("v", "put", "d/", lease_id="L1", size_bytes=4096)
+    client.route_volume_transfer("v", "put", "d/")  # no size: field stays out
+    assert posted[0]["sizeBytes"] == 4096
+    assert "sizeBytes" not in posted[1]
+
+
 def test_client_sends_warm_and_routes_transfers():
     posted = []
     volume = {"name": "v", "status": "PENDING", "clusterId": "", "pvcName": ""}
@@ -1363,7 +1437,7 @@ def _direct(monkeypatch, s3):
 
     routes, scopes = [], {}
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None):
+    def route(name, mode, path, entries=None, team_id=None, lease_id=None, size_bytes=None):
         routes.append((mode, path))
         lease = {}
         if mode == "put":
@@ -1509,7 +1583,7 @@ def test_get_of_runs_with_a_live_session_goes_direct(monkeypatch, tmp_path):
     s3 = FakeS3({"vol1/runs/r1/m": b"m"})
     asked = []
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None):
+    def route(name, mode, path, entries=None, team_id=None, lease_id=None, size_bytes=None):
         asked.append((mode, path))
         live = {
             "via": "session",

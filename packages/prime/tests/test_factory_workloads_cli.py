@@ -173,7 +173,21 @@ def _install(
 
 
 def _counts(free: int, slurm: int, busy: int, unavailable: int) -> List[str]:
-    return ["·", str(free), "free", "·", str(slurm), "in", "slurm", "·", str(busy), "busy", "·", str(unavailable), "unavailable"]
+    return [
+        "·",
+        str(free),
+        "free",
+        "·",
+        str(slurm),
+        "in",
+        "slurm",
+        "·",
+        str(busy),
+        "busy",
+        "·",
+        str(unavailable),
+        "unavailable",
+    ]
 
 
 def _plain_rows(*args: str) -> List[List[str]]:
@@ -301,7 +315,16 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
 
     # The title carries the status row's FREE / SLURM / BUSY / UNAVAILABLE.
     # USAGE_NODES: 1 idle, 4 slurm, 1 busy, 0 unavailable
-    assert status.output.splitlines()[1].split() == ["[1]", "cluster-a", "B300", "6", "1", "4", "1", "0"]
+    assert status.output.splitlines()[1].split() == [
+        "[1]",
+        "cluster-a",
+        "B300",
+        "6",
+        "1",
+        "4",
+        "1",
+        "0",
+    ]
     assert rows[0] == ["[1]", "cluster-a", "·", "B300", *_counts(1, 4, 1, 0)]
     # All Slurm nodes count on one "slurm" row: the API cannot split them
     # between Slurm clusters, so the named groups carry no counts. Pools
@@ -357,7 +380,10 @@ def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
     rows = _plain_rows("--type", "training")
 
     # Slurm pool with no jobs: 0 allocated, 3 idle, 1 draining
-    assert rows[2:4] == [["slurm", "·", "0", "allocated", "·", "3", "idle", "·", "1", "draining"], ["training"]]
+    assert rows[2:4] == [
+        ["slurm", "·", "0", "allocated", "·", "3", "idle", "·", "1", "draining"],
+        ["training"],
+    ]
 
 
 def test_workloads_omits_draining_when_zero(monkeypatch: pytest.MonkeyPatch) -> None:

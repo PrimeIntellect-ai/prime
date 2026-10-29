@@ -11,6 +11,7 @@ from ..models import LineFormat
 from .client import (
     AMBIGUOUS_TRANSPORT_ERRORS,
     DEFAULT_TIMEOUT,
+    GZIP_LEVEL,
     IDEMPOTENT_RETRY_ATTEMPTS,
     BaseTracesAPIClient,
     is_ambiguous_delete_failure,
@@ -95,9 +96,9 @@ class AsyncTracesAPIClient(BaseTracesAPIClient):
         self._check_auth()
 
         # mtime=0 keeps the compressed bytes reproducible across retries.
-        compressed = (
-            await asyncio.to_thread(gzip_module.compress, body, mtime=0) if compress else None
-        )
+        compressed = None
+        if compress:
+            compressed = await asyncio.to_thread(gzip_module.compress, body, GZIP_LEVEL, mtime=0)
         files = self._multipart_files(
             body, schema_version=schema_version, context=context, compressed=compressed
         )

@@ -146,6 +146,17 @@ class EgressPolicyStatus(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class LocalhostForward(BaseModel):
+    """Forward the sandbox's own loopback ``port`` (127.0.0.1 and [::1]) to the same
+    port on peer ``sandbox_id`` (``<sandbox_id>.sandbox.internal``). The peer must
+    share a LAN network whose rules allow ``port``, or connections are reset."""
+
+    port: int = Field(ge=1, le=65535)
+    sandbox_id: str = Field(alias="peer_sandbox_id")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class LanRule(BaseModel):
     """A directed allow rule: members matching ``from`` may connect to members
     matching ``to``. Selectors are ``*`` or ``tag:<name>``; ``ports`` limits the

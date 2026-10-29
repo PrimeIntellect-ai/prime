@@ -84,6 +84,7 @@ from .models import (
     LanNetwork,
     LanNetworkMember,
     LanRule,
+    LocalhostForward,
     ReadFileResponse,
     Sandbox,
     SandboxCheckpoint,
@@ -1951,6 +1952,20 @@ def _raise_sandbox_gone(
     _raise_not_running_error(sandbox_id, ctx, command=command, cause=cause)
 
 
+def _parse_local_forwards(body: Dict[str, Any]) -> List[LocalhostForward]:
+    return [LocalhostForward.model_validate(f) for f in body.get("forwards") or []]
+
+
+def _raise_local_forwards_error(sandbox_id: str, error: httpx.HTTPStatusError) -> NoReturn:
+    status = error.response.status_code
+    if status == 404:
+        raise APIError(
+            f"Sandbox {sandbox_id} does not support localhost forwards; "
+            "recreate the sandbox to use them"
+        ) from error
+    raise APIError(f"Localhost forwards failed (HTTP {status}): {error.response.text}") from error
+
+
 def _raise_not_running_error(
     sandbox_id: str,
     ctx: dict,
@@ -2783,6 +2798,54 @@ class SandboxClient:
             json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
+
+    def get_localhost_forwards(self, sandbox_id: str) -> List[LocalhostForward]:
+        """Get the localhost forwards of a running VM sandbox."""
+        return self._local_forwards_request(sandbox_id, None)
+
+    def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> List[LocalhostForward]:
+        """Replace the localhost forwards of a running VM sandbox; returns the new set.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox. The peer must share a LAN network whose rules allow the port.
+        Each call is a complete replacement, never a merge; an empty list removes
+        all forwards. Applied before this returns.
+        """
+        payload = {"forwards": [f.model_dump(by_alias=True) for f in forwards]}
+        return self._local_forwards_request(sandbox_id, payload)
+
+    def _local_forwards_request(
+        self, sandbox_id: str, payload: Optional[Dict[str, Any]]
+    ) -> List[LocalhostForward]:
+        """GET (payload None) or POST sandboxd's local-forwards through the gateway."""
+        reauthed = False
+        while True:
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/network/local-forwards"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            try:
+                if payload is None:
+                    response = self._gateway_get(url, headers=headers, params={}, timeout=30)
+                else:
+                    response = self._gateway_post(url, headers=headers, timeout=30, json=payload)
+                response.raise_for_status()
+                return _parse_local_forwards(response.json())
+            except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
+                    reauthed = True
+                    continue
+                _raise_local_forwards_error(sandbox_id, e)
+            except httpx.RequestError as e:
+                raise APIError(
+                    f"Localhost forwards request failed: {_format_exception_diagnostic(e)}"
+                ) from e
 
     def bulk_delete(
         self,
@@ -4451,6 +4514,58 @@ class AsyncSandboxClient:
             json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
+
+    async def get_localhost_forwards(self, sandbox_id: str) -> List[LocalhostForward]:
+        """Get the localhost forwards of a running VM sandbox."""
+        return await self._local_forwards_request(sandbox_id, None)
+
+    async def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> List[LocalhostForward]:
+        """Replace the localhost forwards of a running VM sandbox; returns the new set.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox. The peer must share a LAN network whose rules allow the port.
+        Each call is a complete replacement, never a merge; an empty list removes
+        all forwards. Applied before this returns.
+        """
+        payload = {"forwards": [f.model_dump(by_alias=True) for f in forwards]}
+        return await self._local_forwards_request(sandbox_id, payload)
+
+    async def _local_forwards_request(
+        self, sandbox_id: str, payload: Optional[Dict[str, Any]]
+    ) -> List[LocalhostForward]:
+        """GET (payload None) or POST sandboxd's local-forwards through the gateway."""
+        reauthed = False
+        while True:
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/network/local-forwards"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            try:
+                if payload is None:
+                    response = await self._gateway_get(url, headers=headers, params={}, timeout=30)
+                else:
+                    response = await self._gateway_post(
+                        url, headers=headers, timeout=30, json=payload
+                    )
+                response.raise_for_status()
+                return _parse_local_forwards(response.json())
+            except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
+                if e.response.status_code == 401 and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
+                _raise_local_forwards_error(sandbox_id, e)
+            except httpx.RequestError as e:
+                raise APIError(
+                    f"Localhost forwards request failed: {_format_exception_diagnostic(e)}"
+                ) from e
 
     async def bulk_delete(
         self,

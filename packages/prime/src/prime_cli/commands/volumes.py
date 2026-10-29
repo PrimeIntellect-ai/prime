@@ -1334,7 +1334,8 @@ def du(
 ) -> None:
     """Count stored bytes and objects, and compare whole-volume usage with its cap.
 
-    A live read-write session or run's changes appear once it ends.
+    Usage may be stale: data still local to a live read-write session or
+    run is not counted until it ends and syncs.
     """
     validate_output_format(output, err_console)
     with _volume_reads(name, path) as (client, team_id, s3, route, rel):
@@ -1366,6 +1367,9 @@ def du(
             console.print(f"Volume usage: {used} / {limit} ({usage['usedPercent']:.1f}%)")
         else:
             console.print(f"Volume usage: {used} (cap unavailable)")
+        err_console.print(
+            "[dim]Usage may be stale while data is still local to a live session or run.[/dim]"
+        )
 
 
 @app.command("cat", no_args_is_help=True)

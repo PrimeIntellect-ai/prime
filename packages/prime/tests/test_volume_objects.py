@@ -329,6 +329,20 @@ def test_du_human_readable(storage):
     assert "4" in result.stdout and ("KiB" in result.stdout or "Ki" in result.stdout)
 
 
+def test_du_text_notes_usage_may_be_stale(storage):
+    result = _run("du", "data")
+    assert result.exit_code == 0, result.output
+    assert "Usage may be stale" in strip_ansi(result.stderr)
+    assert "live session or run" in result.stderr
+    assert "stale" not in result.stdout
+
+
+def test_du_json_keeps_schema_without_stale_note(storage):
+    usage = _json(_run("du", "data", "-o", "json"))
+    assert usage["bytes"] == 41
+    assert "stale" not in usage
+
+
 @pytest.mark.parametrize("key", ["runs/.sessions/", "runs/.sessions/private/state"])
 @pytest.mark.parametrize("operand", ["runs", "runs/"])
 def test_du_parent_containing_only_internal_metadata(storage, key, operand):

@@ -1,7 +1,10 @@
 """`prime factory slurm` — the team's Slurm deployment roster."""
 
+import getpass
+import re
 import time
-from typing import List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
@@ -326,20 +329,70 @@ def _create_error_hint(error: APIError) -> Optional[str]:
     return None
 
 
+def _get_current_username() -> str:
+    """Get the current system username."""
+    return getpass.getuser()
+
+
+def _read_ssh_keys(ssh_key_files: Optional[List[str]] = None) -> List[str]:
+    """Read SSH public keys from files or ~/.ssh/*.pub."""
+    keys = []
+
+    if ssh_key_files:
+        # Read from specified files
+        for key_file in ssh_key_files:
+            path = Path(key_file).expanduser()
+            if not path.exists():
+                console.print(f"[yellow]Warning:[/yellow] SSH key file not found: {key_file}")
+                continue
+            try:
+                content = path.read_text().strip()
+                if content:
+                    keys.append(content)
+            except Exception as e:
+                console.print(
+                    f"[yellow]Warning:[/yellow] Could not read {key_file}: {escape(str(e))}"
+                )
+    else:
+        # Default: read from ~/.ssh/*.pub
+        ssh_dir = Path.home() / ".ssh"
+        if ssh_dir.exists():
+            for pub_file in sorted(ssh_dir.glob("*.pub")):
+                try:
+                    content = pub_file.read_text().strip()
+                    if content:
+                        keys.append(content)
+                except Exception:
+                    # Silently skip unreadable files
+                    pass
+
+    return keys
+
+
+def _validate_username(username: str) -> bool:
+    """Validate username against Slurm cluster requirements."""
+    if not (2 <= len(username) <= 32):
+        return False
+    return USERNAME_REGEX.match(username) is not None
+
+
 def _wait_for_status(
-    team_id: str, cluster_id: str, target_status: str, err_console: Console, timeout_s: int = 300
+    team_id: str, cluster_id: str, err_console: Console, timeout_s: int = 300
 ) -> None:
-    """Poll the cluster list until it reports the target status; exit 1 on timeout."""
-    err_console.print(f"Waiting for cluster to reach '{target_status}' status...")
+    """Poll the cluster list until RUNNING or FAILED; exit 1 on timeout or failure."""
+    err_console.print("Waiting for cluster to reach RUNNING status...")
     elapsed = 0
     poll_interval_s = 5
     while True:
         try:
             cluster = _find_cluster(team_id, cluster_id, err_console)
             err_console.print(f"  Status: {escape(cluster.status)}")
-            if cluster.status.lower() == target_status.lower():
-                err_console.print(f"[green]✓[/green] Cluster is {target_status}")
+            if cluster.status == "RUNNING":
+                err_console.print("[green]✓[/green] Cluster is RUNNING")
                 return
+            if cluster.status == "FAILED":
+                err_console.print("[red]✗[/red] Cluster deployment FAILED")
+                raise typer.Exit(1)
         except (APIError, ValueError) as e:
             err_console.print(f"[yellow]Warning:[/yellow] Status check failed: {escape(str(e))}")
         if elapsed >= timeout_s:
@@ -348,7 +401,7 @@ def _wait_for_status(
         elapsed += poll_interval_s
 
     err_console.print(
-        f"[yellow]Timeout:[/yellow] Cluster did not reach '{target_status}' "
+        f"[yellow]Timeout:[/yellow] Cluster did not reach RUNNING status "
         f"within {timeout_s} seconds."
     )
     err_console.print(
@@ -358,12 +411,11 @@ def _wait_for_status(
 
 
 CREATE_JSON_HELP = json_output_help(
-    ". = {id, primeClusterId, displayName, status, gpuType?, gpuCount, createdAt, startedAt?}",
+    ". = {id, primeClusterId, status, createdAt}",
     "id: cluster/job identifier for subsequent commands",
     "primeClusterId: target Model Factory or dedicated cluster",
-    "displayName: cluster name",
-    "status: deployment status",
-    "gpuCount: total GPUs in the deployment",
+    "status: deployment status (starts PENDING)",
+    "createdAt: timestamp when the cluster was created",
     "--team: use a different team than the selected account context",
 )
 
@@ -376,16 +428,23 @@ RESIZE_JSON_HELP = json_output_help(
 )
 
 
+USERNAME_REGEX = re.compile(r"^[a-z][a-z0-9-]{0,30}[a-z0-9]$")
+
 CREATE_ERROR_HINTS = {
-    "HTTP 400": (
-        "Ensure cluster ID exists, name is valid, and specify either --nodes or --gpus "
-        "with sufficient resources."
-    ),
     "HTTP 403": (
-        "Creating clusters requires an API key with the factory:write scope "
+        "Creating clusters requires an API key with the slurm_clusters:write scope "
         "and team admin privileges."
     ),
-    "HTTP 409": "A Slurm cluster with this name may already exist for this team.",
+    "HTTP 404": "Prime cluster not found. Check the cluster ID.",
+    "HTTP 409": (
+        "Conflict: A Slurm cluster with this name may already exist, not enough nodes "
+        "are available, or there is a port conflict."
+    ),
+    "HTTP 422": (
+        "Validation error: Check that all fields are valid. Username must match "
+        "^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32, and at least one SSH key "
+        "and member are required."
+    ),
 }
 
 RESIZE_ERROR_HINTS = {
@@ -411,18 +470,46 @@ RESIZE_POLL_INTERVAL_S = 5
 
 @app.command(name="create", no_args_is_help=True, epilog=CREATE_JSON_HELP)
 def create_cluster(
-    cluster: str = typer.Argument(..., help="Target Model Factory or dedicated cluster ID/name"),
-    name: str = typer.Option(..., "--name", "-n", help="Display name for the Slurm deployment"),
-    nodes: Optional[int] = typer.Option(
-        None,
-        "--nodes",
-        help="Number of nodes to deploy (specify either --nodes or --gpus)",
+    prime_cluster_id: str = typer.Argument(
+        ..., help="Target Model Factory or dedicated cluster ID"
     ),
-    gpus: Optional[int] = typer.Option(
+    name: str = typer.Option(..., "--name", "-n", help="Display name for the Slurm cluster"),
+    nodes: int = typer.Option(..., "--nodes", help="Number of nodes to deploy"),
+    member: List[str] = typer.Option(
+        [],
+        "--member",
+        help="Username for SSH access (repeatable). Defaults to current user if not specified.",
+    ),
+    ssh_key_file: List[str] = typer.Option(
+        [],
+        "--ssh-key-file",
+        help="Path to SSH public key file (repeatable). Defaults to ~/.ssh/*.pub if not specified.",
+    ),
+    sudo: bool = typer.Option(
+        False,
+        "--sudo",
+        help="Grant sudo privileges to members (applies to all members)",
+    ),
+    gpus_per_node: Optional[int] = typer.Option(
         None,
-        "--gpus",
-        "-g",
-        help="Number of GPUs to deploy (specify either --nodes or --gpus)",
+        "--gpus-per-node",
+        help="Number of GPUs per node",
+    ),
+    home_size: Optional[str] = typer.Option(
+        None,
+        "--home-size",
+        help="Home directory size (e.g., '100Gi')",
+    ),
+    containers: bool = typer.Option(
+        False,
+        "--containers",
+        help="Enable container support",
+    ),
+    tailscale_auth_key: Optional[str] = typer.Option(
+        None,
+        "--tailscale-auth-key",
+        envvar="TAILSCALE_AUTH_KEY",
+        help="Tailscale auth key (or set TAILSCALE_AUTH_KEY env var)",
     ),
     team: Optional[str] = TEAM_OPTION,
     yes: bool = typer.Option(
@@ -436,8 +523,8 @@ def create_cluster(
         "--wait",
         "-w",
         help=(
-            f"Wait until the cluster status is RUNNING "
-            f"(polls every 5s; exits 1 after {CREATE_WAIT_TIMEOUT_S}s)"
+            f"Wait until RUNNING or FAILED status "
+            f"(polls every 5s; exits 1 after {CREATE_WAIT_TIMEOUT_S}s or on failure)"
         ),
     ),
     json_output: bool = typer.Option(
@@ -448,43 +535,81 @@ def create_cluster(
     """Create a new Slurm cluster deployment.
 
     Deploys a Slurm cluster on the specified Model Factory or dedicated cluster.
-    Requires team admin privileges and an API key with the factory:write scope
+    Requires team admin privileges and an API key with the slurm_clusters:write scope
     (plus slurm_clusters:read for --wait polling).
 
-    Specify the cluster size with either --nodes or --gpus, not both.
+    At least one member with SSH access is required. If no --member is specified,
+    defaults to the current user with SSH keys from ~/.ssh/*.pub.
     """
     if json_output:
         output = "json"
     validate_output_format(output, console)
     err_console = _stderr_console_for(output)
 
-    # Validate that exactly one of nodes or gpus is specified
-    if nodes is None and gpus is None:
-        err_console.print("[red]Error:[/red] Must specify either --nodes or --gpus.")
-        raise typer.Exit(1)
-    if nodes is not None and gpus is not None:
-        err_console.print("[red]Error:[/red] Cannot specify both --nodes and --gpus; choose one.")
-        raise typer.Exit(1)
-
-    # Validate values are positive
-    size_value = nodes if nodes is not None else gpus
-    size_type = "nodes" if nodes is not None else "GPUs"
-    if size_value is not None and size_value <= 0:
-        err_console.print(
-            f"[red]Error:[/red] Cluster size must be positive (got {size_value} {size_type})."
-        )
+    # Validate nodes
+    if nodes <= 0:
+        err_console.print(f"[red]Error:[/red] --nodes must be positive (got {nodes}).")
         raise typer.Exit(1)
 
     team_id = _resolve_team_id(team, err_console)
     if not team_id:
         return
 
+    # Build members list
+    members_list: List[Dict[str, Any]] = []
+
+    if not member:
+        # Default to current user
+        username = _get_current_username()
+        if not _validate_username(username):
+            err_console.print(
+                f"[red]Error:[/red] Current username '{escape(username)}' is invalid. "
+                "Must match ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32. "
+                "Specify a valid username with --member."
+            )
+            raise typer.Exit(1)
+        member = [username]
+
+    # Read SSH keys
+    ssh_keys = _read_ssh_keys(ssh_key_file if ssh_key_file else None)
+    if not ssh_keys:
+        err_console.print(
+            "[red]Error:[/red] No SSH keys found. "
+            "Specify keys with --ssh-key-file or ensure ~/.ssh/*.pub files exist."
+        )
+        raise typer.Exit(1)
+
+    # Build members
+    for username in member:
+        # Validate username
+        if not _validate_username(username):
+            err_console.print(
+                f"[red]Error:[/red] Invalid username '{escape(username)}'. "
+                "Must match ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32."
+            )
+            raise typer.Exit(1)
+
+        member_dict: Dict[str, Any] = {
+            "username": username,
+            "sshAuthorizedKeys": ssh_keys,
+            "sudo": sudo,
+        }
+        members_list.append(member_dict)
+
     # Show confirmation prompt unless --yes
     if not yes:
         err_console.print("[yellow]Create Slurm cluster:[/yellow]")
-        err_console.print(f"  Name:       {escape(name)}")
-        err_console.print(f"  Cluster:    {escape(cluster)}")
-        err_console.print(f"  Size:       {size_value} {size_type}")
+        err_console.print(f"  Name:           {escape(name)}")
+        err_console.print(f"  Prime Cluster:  {escape(prime_cluster_id)}")
+        err_console.print(f"  Nodes:          {nodes}")
+        if gpus_per_node:
+            err_console.print(f"  GPUs per node:  {gpus_per_node}")
+        err_console.print(f"  Members:        {', '.join(m['username'] for m in members_list)}")
+        err_console.print(f"  Sudo:           {'yes' if sudo else 'no'}")
+        if containers:
+            err_console.print("  Containers:     enabled")
+        if home_size:
+            err_console.print(f"  Home size:      {home_size}")
         err_console.print()
     if not confirm_or_skip("Proceed with deployment?", yes, err=output == "json"):
         err_console.print("Deployment cancelled.")
@@ -493,10 +618,14 @@ def create_cluster(
     try:
         response = _client().create_cluster(
             team_id=team_id,
-            cluster_id=cluster,
-            name=name,
+            prime_cluster_id=prime_cluster_id,
+            slurm_cluster_name=name,
             num_nodes=nodes,
-            num_gpus=gpus,
+            members=members_list,
+            gpus_per_node=gpus_per_node,
+            home_size=home_size,
+            tailscale_auth_key=tailscale_auth_key,
+            containers_enabled=containers,
         )
     except APIError as e:
         err_console.print(f"[red]Error:[/red] {escape(str(e))}")
@@ -505,24 +634,23 @@ def create_cluster(
             err_console.print(f"[dim]{hint}[/dim]")
         raise typer.Exit(1)
 
-    # Parse the response to get cluster details
-    try:
-        created = FactorySlurmCluster.model_validate(response)
-    except Exception:
+    # Parse the response to get cluster ID
+    if not isinstance(response, dict) or "id" not in response:
         err_console.print("[red]Error:[/red] Slurm cluster API returned a malformed response body.")
         raise typer.Exit(1)
 
+    cluster_id = response["id"]
+    status = response.get("status", "UNKNOWN")
+
     if output != "json":
-        console.print(f"[green]Slurm cluster '{escape(created.display_name)}' created[/green]")
-        console.print(f"Cluster ID: {escape(created.id)}")
-        console.print(f"Status: {escape(created.status)}")
-        console.print(f"GPUs: {created.gpu_count}")
-        if created.gpu_type:
-            console.print(f"GPU Type: {escape(created.gpu_type)}")
+        console.print(f"[green]Slurm cluster '{escape(name)}' created[/green]")
+        console.print(f"Cluster ID: {escape(cluster_id)}")
+        console.print(f"Status: {escape(status)}")
+        console.print(f"Prime Cluster: {escape(response.get('primeClusterId', prime_cluster_id))}")
 
     if wait:
         err_console.print()
-        _wait_for_status(team_id, created.id, "RUNNING", err_console, CREATE_WAIT_TIMEOUT_S)
+        _wait_for_status(team_id, cluster_id, err_console, CREATE_WAIT_TIMEOUT_S)
 
     if output == "json":
         output_data_as_json(response, console)

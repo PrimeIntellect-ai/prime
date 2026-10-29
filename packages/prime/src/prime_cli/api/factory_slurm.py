@@ -89,6 +89,59 @@ class FactorySlurmClient:
     def remove_member(self, team_id: str, cluster_id: str, username: str) -> None:
         self.client.delete(f"/slurm-clusters/{team_id}/{cluster_id}/members/{username}")
 
+    def create_cluster(
+        self,
+        team_id: str,
+        cluster_id: str,
+        name: str,
+        num_nodes: Optional[int] = None,
+        num_gpus: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Create a new Slurm cluster deployment.
+
+        Platform API: POST /api/v1/slurm-clusters/{team_id}
+        Note: The actual endpoint should be verified against the platform repo's
+        Deploy Slurm flow. This follows the standard REST pattern.
+
+        Args:
+            team_id: The team ID that will own the cluster
+            cluster_id: Target Model Factory or dedicated cluster id
+            name: Display name for the Slurm deployment
+            num_nodes: Number of nodes to deploy (specify either nodes or gpus)
+            num_gpus: Number of GPUs to deploy (specify either nodes or gpus)
+            timeout: Optional request timeout in seconds
+
+        Returns:
+            API response dict with cluster details including:
+            - id: str (cluster/job identifier)
+            - primeClusterId: str
+            - displayName: str
+            - status: str
+            - gpuType: str
+            - gpuCount: int
+            - createdAt: str
+
+        Raises:
+            APIError: If the create request fails
+            - 400: invalid parameters or insufficient resources
+            - 403: API key lacks required scope or not team admin
+            - 409: conflict (e.g., name already exists)
+        """
+        endpoint = f"/slurm-clusters/{team_id}"
+        body: Dict[str, Any] = {
+            "primeClusterId": cluster_id,
+            "displayName": name,
+        }
+        if num_nodes is not None:
+            body["numNodes"] = num_nodes
+        if num_gpus is not None:
+            body["numGpus"] = num_gpus
+        try:
+            return self.client.post(endpoint, json=body, timeout=timeout)
+        except ValueError as exc:
+            raise APIError("Slurm cluster create API returned a malformed response body.") from exc
+
     def resize_cluster(
         self, team_id: str, cluster_id: str, num_nodes: int, timeout: Optional[float] = None
     ) -> Dict[str, Any]:

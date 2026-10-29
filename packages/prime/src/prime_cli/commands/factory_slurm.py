@@ -317,6 +317,56 @@ def remove_member(
     )
 
 
+def _create_error_hint(error: APIError) -> Optional[str]:
+    """Status-code-specific guidance for a failed create request."""
+    error_str = str(error)
+    for status, hint in CREATE_ERROR_HINTS.items():
+        if status in error_str:
+            return hint
+    return None
+
+
+def _wait_for_status(
+    team_id: str, cluster_id: str, target_status: str, err_console: Console, timeout_s: int = 300
+) -> None:
+    """Poll the cluster list until it reports the target status; exit 1 on timeout."""
+    err_console.print(f"Waiting for cluster to reach '{target_status}' status...")
+    elapsed = 0
+    poll_interval_s = 5
+    while True:
+        try:
+            cluster = _find_cluster(team_id, cluster_id, err_console)
+            err_console.print(f"  Status: {escape(cluster.status)}")
+            if cluster.status.lower() == target_status.lower():
+                err_console.print(f"[green]✓[/green] Cluster is {target_status}")
+                return
+        except (APIError, ValueError) as e:
+            err_console.print(f"[yellow]Warning:[/yellow] Status check failed: {escape(str(e))}")
+        if elapsed >= timeout_s:
+            break
+        time.sleep(poll_interval_s)
+        elapsed += poll_interval_s
+
+    err_console.print(
+        f"[yellow]Timeout:[/yellow] Cluster did not reach '{target_status}' "
+        f"within {timeout_s} seconds."
+    )
+    err_console.print(
+        "The deployment may still be in progress. Check status with: prime factory slurm list"
+    )
+    raise typer.Exit(1)
+
+
+CREATE_JSON_HELP = json_output_help(
+    ". = {id, primeClusterId, displayName, status, gpuType?, gpuCount, createdAt, startedAt?}",
+    "id: cluster/job identifier for subsequent commands",
+    "primeClusterId: target Model Factory or dedicated cluster",
+    "displayName: cluster name",
+    "status: deployment status",
+    "gpuCount: total GPUs in the deployment",
+    "--team: use a different team than the selected account context",
+)
+
 RESIZE_JSON_HELP = json_output_help(
     ". = {numNodes, added[], removed[]}",
     "numNodes: new total node count after resize",
@@ -325,6 +375,18 @@ RESIZE_JSON_HELP = json_output_help(
     "--team: use a different team than the selected account context",
 )
 
+
+CREATE_ERROR_HINTS = {
+    "HTTP 400": (
+        "Ensure cluster ID exists, name is valid, and specify either --nodes or --gpus "
+        "with sufficient resources."
+    ),
+    "HTTP 403": (
+        "Creating clusters requires an API key with the factory:write scope "
+        "and team admin privileges."
+    ),
+    "HTTP 409": "A Slurm cluster with this name may already exist for this team.",
+}
 
 RESIZE_ERROR_HINTS = {
     "HTTP 400": ("Ensure numNodes is >= 1 and <= max(64, current size) with sufficient resources."),
@@ -342,8 +404,128 @@ RESIZE_ERROR_HINTS = {
 }
 LOOKUP_403_HINT = "Looking up the cluster requires an API key with the slurm_clusters:read scope."
 
+CREATE_WAIT_TIMEOUT_S = 300
 RESIZE_WAIT_TIMEOUT_S = 300
 RESIZE_POLL_INTERVAL_S = 5
+
+
+@app.command(name="create", no_args_is_help=True, epilog=CREATE_JSON_HELP)
+def create_cluster(
+    cluster: str = typer.Argument(..., help="Target Model Factory or dedicated cluster ID/name"),
+    name: str = typer.Option(..., "--name", "-n", help="Display name for the Slurm deployment"),
+    nodes: Optional[int] = typer.Option(
+        None,
+        "--nodes",
+        help="Number of nodes to deploy (specify either --nodes or --gpus)",
+    ),
+    gpus: Optional[int] = typer.Option(
+        None,
+        "--gpus",
+        "-g",
+        help="Number of GPUs to deploy (specify either --nodes or --gpus)",
+    ),
+    team: Optional[str] = TEAM_OPTION,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompt",
+    ),
+    wait: bool = typer.Option(
+        False,
+        "--wait",
+        "-w",
+        help=(
+            f"Wait until the cluster status is RUNNING "
+            f"(polls every 5s; exits 1 after {CREATE_WAIT_TIMEOUT_S}s)"
+        ),
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the API response as JSON (same as --output json)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Create a new Slurm cluster deployment.
+
+    Deploys a Slurm cluster on the specified Model Factory or dedicated cluster.
+    Requires team admin privileges and an API key with the factory:write scope
+    (plus slurm_clusters:read for --wait polling).
+
+    Specify the cluster size with either --nodes or --gpus, not both.
+    """
+    if json_output:
+        output = "json"
+    validate_output_format(output, console)
+    err_console = _stderr_console_for(output)
+
+    # Validate that exactly one of nodes or gpus is specified
+    if nodes is None and gpus is None:
+        err_console.print("[red]Error:[/red] Must specify either --nodes or --gpus.")
+        raise typer.Exit(1)
+    if nodes is not None and gpus is not None:
+        err_console.print("[red]Error:[/red] Cannot specify both --nodes and --gpus; choose one.")
+        raise typer.Exit(1)
+
+    # Validate values are positive
+    size_value = nodes if nodes is not None else gpus
+    size_type = "nodes" if nodes is not None else "GPUs"
+    if size_value is not None and size_value <= 0:
+        err_console.print(
+            f"[red]Error:[/red] Cluster size must be positive (got {size_value} {size_type})."
+        )
+        raise typer.Exit(1)
+
+    team_id = _resolve_team_id(team, err_console)
+    if not team_id:
+        return
+
+    # Show confirmation prompt unless --yes
+    if not yes:
+        err_console.print("[yellow]Create Slurm cluster:[/yellow]")
+        err_console.print(f"  Name:       {escape(name)}")
+        err_console.print(f"  Cluster:    {escape(cluster)}")
+        err_console.print(f"  Size:       {size_value} {size_type}")
+        err_console.print()
+    if not confirm_or_skip("Proceed with deployment?", yes, err=output == "json"):
+        err_console.print("Deployment cancelled.")
+        raise typer.Exit(0)
+
+    try:
+        response = _client().create_cluster(
+            team_id=team_id,
+            cluster_id=cluster,
+            name=name,
+            num_nodes=nodes,
+            num_gpus=gpus,
+        )
+    except APIError as e:
+        err_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        hint = _create_error_hint(e)
+        if hint:
+            err_console.print(f"[dim]{hint}[/dim]")
+        raise typer.Exit(1)
+
+    # Parse the response to get cluster details
+    try:
+        created = FactorySlurmCluster.model_validate(response)
+    except Exception:
+        err_console.print("[red]Error:[/red] Slurm cluster API returned a malformed response body.")
+        raise typer.Exit(1)
+
+    if output != "json":
+        console.print(f"[green]Slurm cluster '{escape(created.display_name)}' created[/green]")
+        console.print(f"Cluster ID: {escape(created.id)}")
+        console.print(f"Status: {escape(created.status)}")
+        console.print(f"GPUs: {created.gpu_count}")
+        if created.gpu_type:
+            console.print(f"GPU Type: {escape(created.gpu_type)}")
+
+    if wait:
+        err_console.print()
+        _wait_for_status(team_id, created.id, "RUNNING", err_console, CREATE_WAIT_TIMEOUT_S)
+
+    if output == "json":
+        output_data_as_json(response, console)
 
 
 def _resize_error_hint(error: APIError) -> Optional[str]:

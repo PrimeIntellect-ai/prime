@@ -388,3 +388,221 @@ def test_slurm_add_member_non_json_success_body_is_clean_error(
     assert "malformed response body" in output
     assert "ValueError" not in result.output
     assert "Traceback" not in result.output
+
+
+def test_slurm_create_validates_nodes_or_gpus_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch)
+
+    # Neither --nodes nor --gpus
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test-cluster"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "Must specify either --nodes or --gpus" in output
+
+    # Both --nodes and --gpus
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "slurm",
+            "create",
+            "pc-1",
+            "--name",
+            "test-cluster",
+            "--nodes",
+            "2",
+            "--gpus",
+            "16",
+        ],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "Cannot specify both --nodes and --gpus" in output
+
+
+def test_slurm_create_validates_positive_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "0"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "must be positive" in output
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--gpus", "-1"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "must be positive" in output
+
+
+def test_slurm_create_calls_api_with_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _cluster(
+        "job-456",
+        displayName="new-cluster",
+        status="PENDING",
+        gpuCount=16,
+    )
+
+    class _CreateClient:
+        def __init__(self):
+            self.post_calls = []
+
+        def post(self, endpoint, json=None, timeout=None):
+            self.post_calls.append({"endpoint": endpoint, "json": json})
+            if "/slurm-clusters/" in endpoint and "/resize" not in endpoint:
+                return created
+            body = dict(json or {})
+            body.setdefault("uid", 1001)
+            body.setdefault("sudo", False)
+            body.setdefault("status", "ACTIVE")
+            return body
+
+        def get(self, endpoint, params=None, timeout=None):
+            return _clusters_payload([created])
+
+    client = _CreateClient()
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: client)
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "new-cluster", "--nodes", "2", "--yes"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "new-cluster" in output and "created" in output
+    assert "job-456" in output
+    assert len(client.post_calls) == 1
+    assert "/slurm-clusters/team-123" in client.post_calls[0]["endpoint"]
+    body = client.post_calls[0]["json"]
+    assert body["primeClusterId"] == "pc-1"
+    assert body["displayName"] == "new-cluster"
+    assert body["numNodes"] == 2
+    assert "numGpus" not in body
+
+
+def test_slurm_create_calls_api_with_gpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _cluster("job-789", displayName="gpu-cluster", gpuCount=32)
+
+    class _CreateClient:
+        def __init__(self):
+            self.post_calls = []
+
+        def post(self, endpoint, json=None, timeout=None):
+            self.post_calls.append({"endpoint": endpoint, "json": json})
+            if "/slurm-clusters/" in endpoint and "/resize" not in endpoint:
+                return created
+            return {}
+
+        def get(self, endpoint, params=None, timeout=None):
+            return _clusters_payload([created])
+
+    client = _CreateClient()
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: client)
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-2", "--name", "gpu-cluster", "--gpus", "32", "--yes"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "gpu-cluster" in output
+    assert len(client.post_calls) == 1
+    body = client.post_calls[0]["json"]
+    assert body["numGpus"] == 32
+    assert "numNodes" not in body
+
+
+def test_slurm_create_confirms_and_cancels(monkeypatch: pytest.MonkeyPatch) -> None:
+    dummy = _install(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "2"],
+        env=TEST_ENV,
+        input="n\n",
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "Deployment cancelled" in output
+    assert len(dummy.post_calls) == 0
+
+
+def test_slurm_create_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _cluster("job-999", displayName="json-cluster")
+
+    class _CreateClient:
+        def post(self, endpoint, json=None, timeout=None):
+            if "/slurm-clusters/" in endpoint and "/resize" not in endpoint:
+                return created
+            return {}
+
+        def get(self, endpoint, params=None, timeout=None):
+            return _clusters_payload([created])
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: _CreateClient())
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "slurm",
+            "create",
+            "pc-1",
+            "--name",
+            "json-cluster",
+            "--nodes",
+            "1",
+            "--yes",
+            "--json",
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.stdout)
+    assert parsed["id"] == "job-999"
+    assert parsed["displayName"] == "json-cluster"
+
+
+def test_slurm_create_malformed_response_is_clean_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BadPostClient:
+        def post(self, endpoint, json=None, timeout=None):
+            if "/slurm-clusters/" in endpoint and "/resize" not in endpoint:
+                return {"unexpected": "shape"}
+            return {}
+
+        def get(self, endpoint, params=None, timeout=None):
+            return {"data": []}
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: _BadPostClient())
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "1", "--yes"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "malformed response body" in output
+    assert "ValidationError" not in result.output

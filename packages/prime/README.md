@@ -247,7 +247,7 @@ not a resumption of a failed transfer.
 
 ### Volume contents
 
-Inspect stored files without starting an SSH session:
+Inspect a volume's files:
 
 ```bash
 prime volumes list                         # List volumes
@@ -268,9 +268,14 @@ whole volume with its cap, even when a file or subtree is selected.
 Directory marker objects count toward the object total; internal SSH sync
 metadata is excluded. These commands report usage without enforcing the cap.
 
-Reads use the stored copy. Read-write SSH changes appear after the next
-sync, normally about 60 seconds later. This freshness note is printed to
-stderr; `cat` writes only the file's bytes to stdout, without adding a newline.
+While a run or read-write session holds the volume, `ls`, `du`, `cat` and
+`get` read it live, as that writer has it right now: the CLI starts (or
+reuses) a read-only SSH view of the writer's volume and runs the read there,
+so a run's checkpoints are visible and downloadable mid-run. This needs your
+SSH key (`prime config set-ssh-key-path`); the view stops after 30 minutes
+idle. Otherwise, and while a finished writer is still syncing back, reads use
+the stored copy. Notes about the source go to stderr; `cat` writes only the
+file's bytes to stdout, without adding a newline.
 
 ### Team Management
 

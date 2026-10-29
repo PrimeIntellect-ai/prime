@@ -199,6 +199,9 @@ class VolumeSession(BaseModel):
     phase: Optional[str] = None
     # The latest rclone stats line while the session copies data in (staging).
     progress: Optional[str] = None
+    # A live view (platform ENG-7113): the run or read-write session whose
+    # volume this read-only session mounts as it is now. Absent otherwise.
+    live_view_of: Optional[str] = Field(None, alias="liveViewOf")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -220,6 +223,8 @@ class VolumeTransferRoute(BaseModel):
     # A put's upload lease (platform#6358): sent back on refresh, released
     # when the put ends. Absent on gets and from older backends.
     lease_id: Optional[str] = Field(None, alias="leaseId")
+    # A live get that still reads R2: why (e.g. the run is syncing back).
+    note: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -391,13 +396,18 @@ class HostedTrainingClient:
         *,
         team_id: Optional[str] = None,
         lease_id: Optional[str] = None,
+        live: bool = False,
     ) -> VolumeTransferRoute:
         """POST …/volumes/{name}/transfer with mode "get" or "put" and the
         volume-relative path ("" = root): the get source or the put
         destination. A root put also sends `entries`, the top-level names it
         writes; a put's credential refresh sends its `lease_id` to extend
-        that lease. Raises NotFoundError on backends without the route."""
+        that lease. A `live` get reads a volume a run or read-write session
+        holds through a read-only live view of it (older backends ignore
+        it). Raises NotFoundError on backends without the route."""
         payload: Dict[str, Any] = {"mode": mode, "path": path}
+        if live:
+            payload["live"] = True
         if entries is not None:
             payload["entries"] = entries
         if lease_id:

@@ -672,7 +672,7 @@ def lan_rules(
 
 
 def _parse_localhost_forward(raw: str) -> LocalhostForward:
-    """Parse ``PORT:PEER_SANDBOX_ID``, e.g. ``8000:sbx-db``."""
+    """Parse ``PORT:PEER_SANDBOX_ID``, e.g. ``5432:sbx-db``."""
     port, sep, peer = raw.partition(":")
     if not sep or not port.strip().isdigit() or not peer.strip():
         raise ValueError(f"invalid forward {raw!r}: expected PORT:PEER_SANDBOX_ID")
@@ -696,7 +696,8 @@ def localhost_forwards(
     sandbox_id: str,
     forward: Optional[List[str]] = typer.Argument(
         None,
-        help="PORT:PEER_SANDBOX_ID, e.g. 8000:sbx-db. Replaces all forwards.",
+        help="PORT:PEER_SANDBOX_ID, e.g. 5432:sbx-db makes localhost:5432 reach "
+        "sbx-db's port 5432. Replaces all forwards.",
         show_default=False,
     ),
     clear: bool = typer.Option(False, "--clear", help="Remove all localhost forwards"),

@@ -205,11 +205,11 @@ prime sandbox get SANDBOX_ID [--output json]
 prime sandbox network SANDBOX_ID
 prime sandbox network SANDBOX_ID --allow api.openai.com,10.0.0.0/8
 
-# Show or replace localhost forwards: localhost:PORT reaches PEER.sandbox.internal:PORT
-# over a shared LAN network whose rules allow PORT
-prime sandbox network localhost SANDBOX_ID
-prime sandbox network localhost SANDBOX_ID 8000:PEER_ID 5432:DB_PEER_ID
-prime sandbox network localhost SANDBOX_ID --clear
+# Localhost forwards: inside APP_ID, localhost:5432 reaches DB_ID's port 5432
+# (both sandboxes must share a LAN network whose rules allow port 5432)
+prime sandbox network localhost APP_ID 5432:DB_ID
+prime sandbox network localhost APP_ID          # show
+prime sandbox network localhost APP_ID --clear  # remove all
 
 # Delete sandboxes (by ID, by label, or all)
 prime sandbox delete SANDBOX_ID

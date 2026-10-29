@@ -696,16 +696,21 @@ def test_factory_status_default_table_counts_nodes(monkeypatch: pytest.MonkeyPat
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    for header in ("CLUSTER", "GPU", "NODES", "IN USE", "FREE", "DOWN"):
+    for header in ("CLUSTER", "GPU", "NODES", "FREE", "IN SLURM", "BUSY", "UNAVAILABLE"):
         assert header in output
     for dropped in ("TOTAL", "HELD", "UNUSED", "STATUS", "DATA"):
         assert dropped not in output
-    # Two ready Slurm nodes and no running jobs: both free. Without
-    # --verbose or degraded data there are no sub-rows, notes, or warnings.
-    assert _plain_status_rows() == [
-        ["CLUSTER", "GPU", "NODES", "IN", "USE", "FREE", "DOWN"],
-        ["cluster-a", "B300", "2", "0", "2", "0"],
+    # Two ready Slurm nodes and no running jobs: 0 free, 2 in slurm (idle), 0 busy, 0 unavailable.
+    # Without --verbose or degraded data there are no sub-rows, notes, or warnings.
+    rows = _plain_status_rows()
+    assert rows == [
+        ["CLUSTER", "GPU", "NODES", "FREE", "IN", "SLURM", "BUSY", "UNAVAILABLE"],
+        ["cluster-a", "B300", "2", "0", "2", "0", "0"],
     ]
+    # Verify four-bucket invariant: FREE + IN_SLURM + BUSY + UNAVAILABLE == NODES
+    # Note: rows[1] has 7 data elements (cluster, gpu, nodes, free, in_slurm, busy, unavailable)
+    # but rows[0] header has 8 elements because "IN SLURM" splits into ["IN", "SLURM"]
+    assert int(rows[1][3]) + int(rows[1][4]) + int(rows[1][5]) + int(rows[1][6]) == int(rows[1][2])
 
 
 def test_factory_status_counts_nodes_by_state_and_running_slurm_jobs(
@@ -735,9 +740,12 @@ def test_factory_status_counts_nodes_by_state_and_running_slurm_jobs(
         workloads_payload=_workloads_payload(*jobs),
     )
 
-    # NODES 10 = IN USE (2 Slurm + 2 busy) + FREE (1 Slurm + 1 idle)
-    # + DOWN (cordoned, draining, offline, unknown).
-    assert _plain_status_rows()[1] == ["cluster-a", "B300", "10", "4", "2", "4"]
+    # NODES 10 = FREE (1 idle direct) + SLURM (5 total: 3 ready + cordoned + draining)
+    # + BUSY (2 direct busy) + UNAVAILABLE (2 direct: offline + unknown).
+    rows = _plain_status_rows()
+    assert rows[1] == ["cluster-a", "B300", "10", "1", "5", "2", "2"]
+    # Verify four-bucket invariant
+    assert int(rows[1][3]) + int(rows[1][4]) + int(rows[1][5]) + int(rows[1][6]) == int(rows[1][2])
 
 
 def test_factory_status_slurm_estimate_is_capped_at_ready_slurm_nodes(
@@ -755,7 +763,8 @@ def test_factory_status_slurm_estimate_is_capped_at_ready_slurm_nodes(
         workloads_payload=_workloads_payload(_slurm_job(64)),
     )
 
-    assert _plain_status_rows()[1] == ["cluster-a", "B300", "3", "2", "0", "1"]
+    # 3 nodes: 0 free, 3 slurm (all Slurm nodes), 0 busy, 0 unavailable
+    assert _plain_status_rows()[1] == ["cluster-a", "B300", "3", "0", "3", "0", "0"]
 
 
 def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(
@@ -789,18 +798,25 @@ def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(
     rows = _plain_status_rows("--verbose")
 
     # The all-zero inference pool is omitted; one note closes the view.
+    # Cluster: 8 nodes = 1 free + 3 slurm + 3 busy + 1 unavailable
+    # Slurm pool shows four-bucket: 3 nodes, all in slurm bucket (internal breakdown separate)
     assert rows[1:6] == [
-        ["cluster-a", "B300", "8", "5", "1", "2"],
-        ["slurm", "(slurm-a,", "slurm-b)", "3", "2", "0", "1"],
-        ["training", "1", "1", "0", "0"],
-        ["other", "2", "2", "0", "0"],
-        ["unassigned", "2", "0", "1", "1"],
+        ["cluster-a", "B300", "8", "1", "3", "3", "1"],  # nodes, free, slurm, busy, unavailable
+        ["slurm", "(slurm-a,", "slurm-b)", "3", "0", "3", "0", "0"],  # Slurm: all in slurm bucket
+        ["training", "1", "0", "0", "1", "0"],  # training: 1 busy node
+        ["other", "2", "0", "0", "2", "0"],  # other: 2 busy nodes
+        ["unassigned", "2", "1", "0", "0", "1"],  # unassigned: 1 free, 1 unavailable
     ]
-    cluster = [int(cell) for cell in rows[1][-4:]]
-    pools = [[int(cell) for cell in row[-4:]] for row in rows[2:6]]
+    # Verify arithmetic: last 5 columns are nodes, free, slurm, busy, unavailable
+    cluster = [int(cell) for cell in rows[1][-5:]]
+    pools = [[int(cell) for cell in row[-5:]] for row in rows[2:6]]
     assert [sum(column) for column in zip(*pools)] == cluster
-    assert all(in_use + free + down == total for total, in_use, free, down in [cluster, *pools])
-    assert len(rows) == 7 and "estimated from running jobs" in " ".join(rows[6])
+    # Verify four-bucket invariant for cluster and each pool
+    assert all(
+        nodes == free + slurm + busy + unavail
+        for nodes, free, slurm, busy, unavail in [cluster, *pools]
+    )
+    assert len(rows) == 7 and "uses explicit per-node slurm_bucket" in " ".join(rows[6])
 
 
 def test_factory_status_warns_once_per_offline_or_stale_cluster(
@@ -819,7 +835,9 @@ def test_factory_status_warns_once_per_offline_or_stale_cluster(
 
     assert result.exit_code == 0, result.output
     # The stale cluster keeps its last-known counts; the warning says how old.
-    assert lines[3].split() == ["[3]", "stale", "B300", "1", "1", "0", "0"]
+    # Node: ready, assigned_to=None, gpus_used=8 -> busy
+    # (1 node, 0 free, 0 slurm, 1 busy, 0 unavailable)
+    assert lines[3].split() == ["[3]", "stale", "B300", "1", "0", "0", "1", "0"]
     assert lines[4:] == ["[2] dark: offline", "[3] stale: node data last seen 2h ago"]
 
 
@@ -946,7 +964,8 @@ def test_factory_status_compact_duplicate_names_pair_positionally(
     # Duplicate display names make the equal-name identity check blind to
     # replacement between the two requests: both rows degrade to em-dashes
     # instead of risking cross-wired counts.
-    assert output.count("—") == 8
+    # 2 clusters × 5 count columns (NODES/FREE/SLURM/BUSY/UNAVAILABLE)
+    assert output.count("—") == 10
     assert "[1] twin: node data unavailable" in output
     assert "[2] twin: node data unavailable" in output
 
@@ -954,7 +973,7 @@ def test_factory_status_compact_duplicate_names_pair_positionally(
     selected = runner.invoke(app, ["factory", "status", "--cluster", "2"], env=TEST_ENV)
     selected_output = strip_ansi(selected.output)
     assert selected.exit_code == 0, selected.output
-    assert selected_output.count("—") == 4
+    assert selected_output.count("—") == 5  # 1 cluster × 5 count columns
     assert "[2] twin: node data unavailable" in selected_output
 
 
@@ -1039,7 +1058,8 @@ def test_factory_status_compact_node_join_verifies_cluster_identity(
     # Position 1 pairs with office-a100's node data on cluster-a's row:
     # identity mismatch -> em-dash cells on both rows, never cross-wired
     # counts, and a warning line per cluster.
-    assert output.count("—") == 8
+    # 2 clusters × 5 count columns (NODES/FREE/SLURM/BUSY/UNAVAILABLE)
+    assert output.count("—") == 10
     assert "[1] cluster-a: node data unavailable" in output
     assert "[2] office-a100: node data unavailable" in output
 
@@ -1219,7 +1239,8 @@ def test_factory_status_compact_nodes_snapshot_duplicates_disable_join(
     output = strip_ansi(result.output)
 
     assert result.exit_code == 0, result.output
-    assert output.count("—") == 4  # never attach either duplicate's counts
+    # 1 cluster × 5 count columns; never attach either duplicate's counts
+    assert output.count("—") == 5
     assert "twin: node data unavailable" in output
 
 

@@ -153,8 +153,12 @@ class _DummyAPIClient:
             "/factory/status": _status_payload(),
             "/factory/nodes": nodes_payload or _nodes_payload(),
         }
-        if utilization_payload is not None:
-            self._payloads["/factory/utilization"] = utilization_payload
+        # Unless a test says otherwise, every cluster has no Slurm nodes allocated.
+        self._payloads["/factory/utilization"] = (
+            utilization_payload
+            if utilization_payload is not None
+            else _utilization_payload(**{name: 0 for name in CLUSTERS})
+        )
         self.calls: List[Dict[str, Any]] = []
 
     def get(
@@ -305,7 +309,12 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
         _workload("slurm:1", "slurm", allocated_gpus=16, scheduler_display_name="slurm-a"),
         _workload("slurm:2", "slurm", allocated_gpus=0, scheduler_display_name="slurm-b"),
     ]
-    _install(monkeypatch, _workloads_payload(jobs), nodes_payload=_nodes_payload(USAGE_NODES))
+    _install(
+        monkeypatch,
+        _workloads_payload(jobs),
+        nodes_payload=_nodes_payload(USAGE_NODES),
+        utilization_payload=_utilization_payload(**{"cluster-a": 2, "office-a100": 2}),
+    )
 
     status = runner.invoke(app, ["factory", "status", "--plain"], env=TEST_ENV)
     rows = _plain_rows()
@@ -325,29 +334,38 @@ def test_workloads_titles_and_pool_headers_count_nodes_like_status(
     ]
     assert rows[2] == ["slurm", *_counts(2, 1, 1)]
     assert rows[7:9] == [["other", *_counts(1, 0, 0)], ["unassigned", *_counts(0, 1, 0)]]
-    assert "slurm active/idle = estimated from running jobs" in " ".join(rows[-1])
 
 
 def test_workloads_counts_busy_slurm_nodes_from_utilization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # CPU-only jobs hold nodes: the scheduler's count replaces the estimate.
-    payload = _workloads_payload([_workload("slurm:1", "slurm", allocated_gpus=0)])
-    payload["truncated"] = True
+    # CPU-only jobs hold nodes too: the scheduler's allocated count covers them.
     _install(
         monkeypatch,
-        payload,
+        _workloads_payload([_workload("slurm:1", "slurm", allocated_gpus=0)]),
         nodes_payload=_nodes_payload(USAGE_NODES),
         utilization_payload=_utilization_payload(**{"cluster-a": 3}),
     )
 
     rows = _plain_rows()
-    output = " ".join(" ".join(row) for row in rows)
 
     assert rows[0] == ["[1]", "cluster-a", "·", "B300", *_counts(4, 1, 1)]
     assert rows[2] == ["slurm", *_counts(3, 0, 1)]
-    assert "estimated from running jobs" not in output
-    assert "busy Slurm nodes may be undercounted" not in output
+
+
+def test_workloads_unknown_slurm_usage_shows_no_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(
+        monkeypatch,
+        _workloads_payload([_workload("slurm:1", "slurm")]),
+        nodes_payload=_nodes_payload(USAGE_NODES),
+        utilization_payload=_utilization_payload(),
+    )
+
+    rows = _plain_rows("--cluster", "cluster-a")
+
+    assert rows[0] == ["[1]", "cluster-a", "·", "B300"]
+    assert not any("active" in row for row in rows)
+    assert rows[-1] == ["cluster-a:", "slurm", "node", "usage", "unavailable"]
 
 
 def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
@@ -362,17 +380,6 @@ def test_workloads_slurm_counts_head_the_table_without_slurm_jobs(
     rows = _plain_rows("--type", "training")
 
     assert rows[2:4] == [["slurm", *_counts(0, 3, 1)], ["training"]]
-
-
-def test_workloads_warns_when_slurm_jobs_are_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Jobs cut from the running Slurm list would count their nodes as idle.
-    payload = _workloads_payload([_workload("slurm:1", "slurm")])
-    payload["truncated"] = True
-    _install(monkeypatch, payload, nodes_payload=_nodes_payload(USAGE_NODES))
-
-    output = " ".join(" ".join(row) for row in _plain_rows())
-
-    assert "busy Slurm nodes may be undercounted" in output
 
 
 def test_workloads_shows_idle_clusters_with_their_counts(monkeypatch: pytest.MonkeyPatch) -> None:

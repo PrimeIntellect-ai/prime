@@ -159,12 +159,19 @@ class _DummyAPIClient:
         utilization_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._payload = payload
-        self._utilization_payload = utilization_payload
         self._nodes_payload = (
             nodes_payload if nodes_payload is not None else _default_nodes_payload()
         )
         self._workloads_payload = (
             workloads_payload if workloads_payload is not None else _workloads_payload()
+        )
+        # Unless a test says otherwise, every cluster has no Slurm nodes allocated.
+        self._utilization_payload = (
+            utilization_payload
+            if utilization_payload is not None
+            else _utilization_payload(
+                **{c["display_name"]: 0 for c in self._nodes_payload["clusters"]}
+            )
         )
         self.calls: list[Dict[str, Any]] = []
 
@@ -177,8 +184,6 @@ class _DummyAPIClient:
         if endpoint == "/factory/workloads":
             return self._workloads_payload
         if endpoint == "/factory/utilization":
-            if self._utilization_payload is None:
-                raise APIError("Not found")
             return self._utilization_payload
         return self._payload
 
@@ -737,7 +742,7 @@ def test_factory_status_default_table_counts_nodes(monkeypatch: pytest.MonkeyPat
     ]
 
 
-def test_factory_status_counts_nodes_by_state_and_running_slurm_jobs(
+def test_factory_status_counts_nodes_by_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     nodes = [
@@ -752,16 +757,11 @@ def test_factory_status_counts_nodes_by_state_and_running_slurm_jobs(
         _node("offline", state="offline", gpus_used=None),
         _node("unknown", state="unknown", gpus_used=0),
     ]
-    jobs = [
-        _slurm_job(12),  # spans 2 nodes
-        _slurm_job(0),  # CPU-only: no node
-        _slurm_job(64, cluster="elsewhere"),
-    ]
     _install(
         monkeypatch,
         _status_payload(),
         nodes_payload=_nodes_payload(("cluster-a", nodes)),
-        workloads_payload=_workloads_payload(*jobs),
+        utilization_payload=_utilization_payload(**{"cluster-a": 2}),
     )
 
     # NODES 10 = IN USE (2 Slurm + 2 busy) + FREE (1 Slurm + 1 idle)
@@ -769,29 +769,11 @@ def test_factory_status_counts_nodes_by_state_and_running_slurm_jobs(
     assert _plain_status_rows()[1] == ["cluster-a", "B300", "10", "4", "2", "4"]
 
 
-def test_factory_status_slurm_estimate_is_capped_at_ready_slurm_nodes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    nodes = [
-        _node("slurm-1", assigned_to="slurm"),
-        _node("slurm-2", assigned_to="slurm"),
-        _node("slurm-offline", state="offline", assigned_to="slurm"),
-    ]
-    _install(
-        monkeypatch,
-        _status_payload(),
-        nodes_payload=_nodes_payload(("cluster-a", nodes)),
-        workloads_payload=_workloads_payload(_slurm_job(64)),
-    )
-
-    assert _plain_status_rows()[1] == ["cluster-a", "B300", "3", "2", "0", "1"]
-
-
 def test_factory_status_counts_busy_slurm_nodes_from_utilization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # CPU-only jobs hold Slurm nodes too: the scheduler's allocated count
-    # replaces the GPU estimate (which would count 0 busy here).
+    # covers them, though they hold no GPUs.
     nodes = [
         _node("slurm-1", assigned_to="slurm"),
         _node("slurm-2", assigned_to="slurm"),
@@ -806,10 +788,7 @@ def test_factory_status_counts_busy_slurm_nodes_from_utilization(
         utilization_payload=_utilization_payload(**{"cluster-a": 2}),
     )
 
-    rows = _plain_status_rows("--verbose")
-
-    assert rows[1] == ["cluster-a", "B300", "4", "2", "1", "1"]
-    assert not any("estimated" in " ".join(row) for row in rows)
+    assert _plain_status_rows()[1] == ["cluster-a", "B300", "4", "2", "1", "1"]
 
 
 def test_factory_status_utilization_is_capped_at_ready_slurm_nodes(
@@ -830,22 +809,57 @@ def test_factory_status_utilization_is_capped_at_ready_slurm_nodes(
     assert _plain_status_rows()[1] == ["cluster-a", "B300", "2", "1", "0", "1"]
 
 
-def test_factory_status_unreadable_utilization_falls_back_to_the_estimate(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("allocated", [{"cluster-a": None}, {}])
+def test_factory_status_unknown_slurm_usage_shows_no_counts(
+    monkeypatch: pytest.MonkeyPatch, allocated: Dict[str, Optional[int]]
 ) -> None:
-    nodes = [_node("slurm-1", assigned_to="slurm"), _node("slurm-2", assigned_to="slurm")]
+    # An unreadable latest bucket, or a cluster missing from utilization:
+    # its busy Slurm nodes are unknown, so the row shows no counts.
+    nodes = [_node("slurm-1", assigned_to="slurm"), _node("other-1")]
+    other = [_node("gpu-1", gpus_used=0)]
     _install(
         monkeypatch,
-        _status_payload(),
-        nodes_payload=_nodes_payload(("cluster-a", nodes)),
-        workloads_payload=_workloads_payload(_slurm_job(8)),
-        utilization_payload=_utilization_payload(**{"cluster-a": None}),
+        {
+            **_status_payload(),
+            "clusters": [
+                _status_payload()["clusters"][0],
+                _status_payload(display_name="cluster-b")["clusters"][0],
+            ],
+        },
+        nodes_payload=_nodes_payload(("cluster-a", nodes), ("cluster-b", other)),
+        utilization_payload=_utilization_payload(**allocated),
     )
 
-    rows = _plain_status_rows("--verbose")
+    rows = _plain_status_rows()
 
-    assert rows[1] == ["cluster-a", "B300", "2", "1", "1", "0"]
-    assert "estimated from running jobs" in " ".join(rows[-1])
+    # cluster-b has no Slurm nodes, so it needs no allocation count.
+    assert rows[1:] == [
+        ["[1]", "cluster-a", "B300", "—", "—", "—", "—"],
+        ["[2]", "cluster-b", "B300", "1", "0", "1", "0"],
+        ["[1]", "cluster-a:", "slurm", "node", "usage", "unavailable"],
+    ]
+
+
+def test_factory_status_utilization_failure_shows_no_slurm_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NoUtilizationClient(_DummyAPIClient):
+        def get(self, endpoint, params=None, timeout=None):
+            if endpoint == "/factory/utilization":
+                raise APIError("Not found")
+            return super().get(endpoint, params, timeout)
+
+    _install(monkeypatch, _status_payload())
+    monkeypatch.setattr(
+        "prime_cli.commands.factory.APIClient", lambda: _NoUtilizationClient(_status_payload())
+    )
+
+    rows = _plain_status_rows()
+
+    assert rows[1:] == [
+        ["cluster-a", "B300", "—", "—", "—", "—"],
+        ["cluster-a:", "slurm", "node", "usage", "unavailable"],
+    ]
 
 
 def test_factory_client_get_utilization_calls_frozen_endpoint() -> None:
@@ -895,11 +909,12 @@ def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(
         payload,
         nodes_payload=_nodes_payload(("cluster-a", nodes)),
         workloads_payload=_workloads_payload(*jobs),
+        utilization_payload=_utilization_payload(**{"cluster-a": 2}),
     )
 
     rows = _plain_status_rows("--verbose")
 
-    # The all-zero inference pool is omitted; one note closes the view.
+    # The all-zero inference pool is omitted.
     assert rows[1:6] == [
         ["cluster-a", "B300", "8", "5", "1", "2"],
         ["slurm", "(slurm-a,", "slurm-b)", "3", "2", "0", "1"],
@@ -911,7 +926,7 @@ def test_factory_status_verbose_pool_rows_add_up_to_the_cluster_row(
     pools = [[int(cell) for cell in row[-4:]] for row in rows[2:6]]
     assert [sum(column) for column in zip(*pools)] == cluster
     assert all(in_use + free + down == total for total, in_use, free, down in [cluster, *pools])
-    assert len(rows) == 7 and "estimated from running jobs" in " ".join(rows[6])
+    assert len(rows) == 6
 
 
 def test_factory_status_warns_once_per_offline_or_stale_cluster(

@@ -81,6 +81,7 @@ from .models import (
     DeleteSandboxCheckpointsResponse,
     EgressPolicyStatus,
     FileUploadResponse,
+    HeaderRule,
     LanNetwork,
     LanNetworkMember,
     LanRule,
@@ -93,6 +94,7 @@ from .models import (
     SandboxStatusSnapshot,
     SSHSession,
     validate_egress_lists,
+    validate_header_rules,
 )
 from .process import AsyncSandboxProcess
 from .rpc_command_session import (
@@ -442,27 +444,40 @@ def _lease_command_client(
 
 
 def _network_update_payload(
-    allow: Optional[List[str]], deny: Optional[List[str]]
-) -> Dict[str, Optional[List[str]]]:
+    allow: Optional[List[str]],
+    deny: Optional[List[str]],
+    rules: Optional[Dict[str, HeaderRule]] = None,
+) -> Dict[str, Any]:
+    """Build the full-replacement egress policy payload.
+
+    The caller supplies the allow/deny selection and the header rules together;
+    rules left as None are part of the replacement and clear any stored rules.
+    """
     if (allow is None) == (deny is None):
         raise ValueError("exactly one of allow or deny must be provided")
 
     entries = list(allow if allow is not None else deny or [])
     if not entries:
         raise ValueError("allow or deny must contain at least one destination")
+    payload: Dict[str, Any]
     if "*" in entries:
         if entries != ["*"]:
             raise ValueError("'*' must be the only destination")
-        return (
+        payload = (
             {"allowlist": None, "denylist": []}
             if allow is not None
             else {"allowlist": [], "denylist": None}
         )
+    else:
+        allowlist = entries if allow is not None else None
+        denylist = entries if deny is not None else None
+        validate_egress_lists(allowlist, denylist)
+        payload = {"allowlist": allowlist, "denylist": denylist}
 
-    allowlist = entries if allow is not None else None
-    denylist = entries if deny is not None else None
-    validate_egress_lists(allowlist, denylist)
-    return {"allowlist": allowlist, "denylist": denylist}
+    canonical_rules = validate_header_rules(rules)
+    if canonical_rules is not None:
+        payload["rules"] = {host: rule.model_dump() for host, rule in canonical_rules.items()}
+    return payload
 
 
 # Response-read failures: the server may have already processed the request
@@ -2792,15 +2807,18 @@ class SandboxClient:
         *,
         allow: Optional[List[str]] = None,
         deny: Optional[List[str]] = None,
+        rules: Optional[Dict[str, HeaderRule]] = None,
     ) -> EgressPolicyStatus:
         """Replace the network rules of a running VM sandbox.
 
         Exactly one of ``allow`` or ``deny`` must be provided. Each call is a
         complete replacement, never a merge; use ``["*"]`` to allow or deny
-        all destinations. New connections follow the replacement once
-        ``applied`` is true; established flows are not revoked.
+        all destinations. ``rules`` (per-host HTTPS header substitution rules)
+        joins the same complete replacement: pass the full set or None to
+        clear them. New connections follow the replacement once ``applied``
+        is true; established flows are not revoked.
         """
-        payload = _network_update_payload(allow, deny)
+        payload = _network_update_payload(allow, deny, rules)
 
         response = self.client.request(
             "PUT",
@@ -4518,15 +4536,18 @@ class AsyncSandboxClient:
         *,
         allow: Optional[List[str]] = None,
         deny: Optional[List[str]] = None,
+        rules: Optional[Dict[str, HeaderRule]] = None,
     ) -> EgressPolicyStatus:
         """Replace the network rules of a running VM sandbox.
 
         Exactly one of ``allow`` or ``deny`` must be provided. Each call is a
         complete replacement, never a merge; use ``["*"]`` to allow or deny
-        all destinations. New connections follow the replacement once
-        ``applied`` is true; established flows are not revoked.
+        all destinations. ``rules`` (per-host HTTPS header substitution rules)
+        joins the same complete replacement: pass the full set or None to
+        clear them. New connections follow the replacement once ``applied``
+        is true; established flows are not revoked.
         """
-        payload = _network_update_payload(allow, deny)
+        payload = _network_update_payload(allow, deny, rules)
 
         response = await self.client.request(
             "PUT",

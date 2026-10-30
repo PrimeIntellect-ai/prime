@@ -451,25 +451,36 @@ def waiter_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return sleeps
 
 
+def test_publish_wait_is_keyword_only():
+    # The old third positional argument was `force`; keyword-only wait turns
+    # a stale positional call into a loud TypeError instead of silently
+    # meaning wait=False.
+    client = RoutingAPIClient(lambda method, path, json: _checkpoint_response())
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError):
+        volumes.publish("sb-1", "dataset", False)
+
+
 def test_publish_sends_exact_post_path_and_body():
     client = RoutingAPIClient(lambda method, path, json: _checkpoint_response())
     volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
 
     checkpoint = volumes.publish("sb-1", "dataset", wait=False)
 
-    assert client.calls == [("POST", "/sandbox/sb-1/volumes/dataset/publish", {"force": False})]
+    assert client.calls == [("POST", "/sandbox/sb-1/volumes/dataset/publish", {})]
     assert isinstance(checkpoint, SandboxCheckpoint)
     assert checkpoint.id == "ckpt-1"
     assert checkpoint.state == "PENDING"
 
 
-def test_publish_force_true_quotes_name_in_path():
+def test_publish_quotes_name_in_path():
     client = RoutingAPIClient(lambda method, path, json: _checkpoint_response())
     volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
 
-    volumes.publish("sb-1", "a/b", force=True, wait=False)
+    volumes.publish("sb-1", "a/b", wait=False)
 
-    assert client.calls == [("POST", "/sandbox/sb-1/volumes/a%2Fb/publish", {"force": True})]
+    assert client.calls == [("POST", "/sandbox/sb-1/volumes/a%2Fb/publish", {})]
 
 
 def test_publish_wait_true_polls_until_durable(waiter_clock):
@@ -521,16 +532,27 @@ def _async_publish_client(handler: Any) -> tuple[AsyncSandboxClient, list[tuple[
     return client, calls
 
 
+def test_async_publish_wait_is_keyword_only():
+    client, _ = _async_publish_client(lambda method, path, json: _checkpoint_response())
+
+    async def scenario() -> None:
+        async with client:
+            await client.volumes.publish("sb-1", "dataset", False)
+
+    with pytest.raises(TypeError):
+        asyncio.run(scenario())
+
+
 def test_async_publish_sends_exact_post_path_and_body():
     client, calls = _async_publish_client(lambda method, path, json: _checkpoint_response())
 
     async def scenario() -> SandboxCheckpoint:
         async with client:
-            return await client.volumes.publish("sb-1", "dataset", force=True, wait=False)
+            return await client.volumes.publish("sb-1", "dataset", wait=False)
 
     checkpoint = asyncio.run(scenario())
 
-    assert calls == [("POST", "/sandbox/sb-1/volumes/dataset/publish", {"force": True})]
+    assert calls == [("POST", "/sandbox/sb-1/volumes/dataset/publish", {})]
     assert checkpoint.id == "ckpt-1"
 
 
@@ -569,7 +591,7 @@ def test_async_publish_wait_timeout_raises_timeout_error(waiter_clock):
     asyncio.run(scenario())
 
 
-def test_publish_conflict_surfaces_api_error_even_with_force():
+def test_publish_conflict_surfaces_api_error():
     from prime_sandboxes.core.client import APIClient as CoreAPIClient
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -581,7 +603,7 @@ def test_publish_conflict_surfaces_api_error_even_with_force():
     api_client.client = httpx.Client(transport=httpx.MockTransport(handler))
 
     with pytest.raises(APIError, match="409"):
-        SandboxClient(api_client).volumes.publish("sb-1", "dataset", force=True)
+        SandboxClient(api_client).volumes.publish("sb-1", "dataset")
 
 
 def test_publish_batch_get_fallback_uses_get_checkpoints():
@@ -601,6 +623,25 @@ def test_publish_batch_get_fallback_uses_get_checkpoints():
     checkpoint = SandboxClient(api_client).volumes.publish("sb-1", "dataset")
 
     assert checkpoint.state == "DURABLE"
+
+
+def test_publish_wait_polls_until_merge_not_pending(waiter_clock):
+    def handler(method: str, path: str, json: dict[str, Any] | None) -> dict[str, Any]:
+        if method == "POST" and path == "/sandbox/sb-1/volumes/dataset/publish":
+            return _checkpoint_response()
+        assert method == "POST" and path == "/sandbox/checkpoints:batchGet"
+        row = _checkpoint_response("DURABLE")
+        row["merge"] = "pending" if len(client.calls) == 2 else "merged"
+        return {"checkpoints": [row], "errors": []}
+
+    client = RoutingAPIClient(handler)
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    checkpoint = volumes.publish("sb-1", "dataset")
+
+    assert checkpoint.state == "DURABLE"
+    assert checkpoint.merge == "merged"
+    assert len(client.calls[1:]) == 2
 
 
 def test_async_sandbox_client_closes_owned_api_client():

@@ -296,6 +296,10 @@ class SandboxCheckpoint(BaseModel):
     # 0 for grandfathered pre-measurement records; older responses omit it.
     occupied_bytes: int = 0
     error: Optional[str] = None
+    # Volume-publish merge status; None on other checkpoints and on servers
+    # without volume merges (D29). "failed" carries merge_error.
+    merge: Optional[Literal["merged", "pending", "failed"]] = None
+    merge_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

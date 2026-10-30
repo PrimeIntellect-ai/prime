@@ -7,10 +7,15 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from prime_sandboxes import APIError, SandboxCheckpoint, StartCommand
+from prime_sandboxes import APIError, HeaderRule, SandboxCheckpoint, StartCommand
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def _flat(text: str) -> str:
+    """Collapse terminal wrapping so assertions check semantics, not layout."""
+    return " ".join(text.split())
 
 
 def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -439,7 +444,7 @@ def test_sandbox_network_flags_replace_rules(
     result = runner.invoke(app, ["sandbox", "network", "sbx-1", *arguments])
 
     assert result.exit_code == 0, result.output
-    assert captured == {"sandbox_id": "sbx-1", **expected}
+    assert captured == {"sandbox_id": "sbx-1", "rules": None, **expected}
 
 
 def test_sandbox_network_rejects_multiple_modes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -491,8 +496,8 @@ def test_sandbox_network_replaces_instead_of_accumulating(
     assert "generation" not in strip_ansi(first.output).lower()
     assert "Access limited to: google.com" in strip_ansi(second.output)
     assert calls == [
-        {"sandbox_id": "sbx-1", "allow": ["example.com"], "deny": None},
-        {"sandbox_id": "sbx-1", "allow": ["google.com"], "deny": None},
+        {"sandbox_id": "sbx-1", "allow": ["example.com"], "deny": None, "rules": None},
+        {"sandbox_id": "sbx-1", "allow": ["google.com"], "deny": None, "rules": None},
     ]
 
 
@@ -1332,3 +1337,348 @@ def test_pause_and_resume_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resumed.exit_code == 0, resumed.output
     assert "becomes RUNNING" in strip_ansi(resumed.output)
     assert calls == [("pause", "sandbox-1"), ("resume", "sandbox-1")]
+
+
+def _network_status_with_rules(
+    *, allowlist: list[str] | None = None, denylist: list[str] | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        policy=SimpleNamespace(
+            allowlist=allowlist,
+            denylist=denylist,
+            rules={"api.example.com": HeaderRule(headers={"Authorization": "Bearer tok"})},
+        ),
+        generation=2,
+        applied_generation=2,
+        applied=True,
+    )
+
+
+def test_sandbox_network_inject_header_joins_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_set_network(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
+        captured.clear()
+        captured["sandbox_id"] = sandbox_id
+        captured.update(kwargs)
+        return _network_status(allowlist=["*"])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.set_network", mock_set_network)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "*",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: Bearer ${prime.secrets.OPENAI_KEY}",
+            "--inject-header",
+            "api.example.com",
+            "X-Api-Key: k",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["allow"] == ["*"]
+    assert captured["rules"] == {
+        "api.example.com": HeaderRule(
+            headers={
+                "Authorization": "Bearer ${prime.secrets.OPENAI_KEY}",
+                "X-Api-Key": "k",
+            }
+        )
+    }
+
+
+def test_sandbox_network_inject_header_requires_destinations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    set_network = {}
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.set_network",
+        lambda self, sandbox_id, **kwargs: set_network.update(kwargs),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: Bearer ${prime.secrets.OPENAI_KEY}",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "complete" in output
+
+
+def test_sandbox_network_rejects_duplicate_header_for_one_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "*",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: a",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: b",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "set twice" in output
+
+
+def test_sandbox_network_rejects_malformed_inject_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "*",
+            "--inject-header",
+            "api.example.com",
+            "no-colon",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "expects" in output
+
+
+def test_sandbox_network_policy_file_replaces_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+    policy = {
+        "allow": ["api.example.com"],
+        "rules": {
+            "api.example.com": {
+                "headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+            }
+        },
+    }
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps(policy))
+
+    def mock_set_network(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
+        captured.clear()
+        captured["sandbox_id"] = sandbox_id
+        captured.update(kwargs)
+        return _network_status(allowlist=["api.example.com"])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.set_network", mock_set_network)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--network-policy", str(policy_file)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "sandbox_id": "sbx-1",
+        "allow": ["api.example.com"],
+        "deny": None,
+        "rules": {
+            "api.example.com": {
+                "headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+            }
+        },
+    }
+
+
+def test_sandbox_network_policy_file_rejects_unknown_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps({"allow": ["*"], "extra": 1}))
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--network-policy", str(policy_file)],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "unknown network policy keys: extra" in output
+
+
+def test_sandbox_network_policy_file_conflicts_with_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps({"allow": ["*"], "rules": {}}))
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "example.com",
+            "--network-policy",
+            str(policy_file),
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "at most one of --allow and --network-policy allow" in output
+
+
+def test_sandbox_network_policy_file_rejects_both_lists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps({"allow": ["*"], "deny": ["a.com"], "rules": {}}))
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--network-policy", str(policy_file)],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "at most one of allow and deny" in output
+
+
+def test_sandbox_network_shows_header_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def mock_get_network(self: Any, sandbox_id: str) -> SimpleNamespace:
+        return _network_status_with_rules(denylist=[])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_network", mock_get_network)
+
+    result = runner.invoke(app, ["sandbox", "network", "sbx-1"])
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 0, result.output
+    assert "Header rules: api.example.com: 1 header(s)" in output
+
+
+def test_sandbox_create_accepts_inject_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-rules-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: Bearer ${prime.secrets.OPENAI_KEY}",
+            "--yes",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 0, output
+    assert captured["request"].network_rules == {
+        "api.example.com": HeaderRule(
+            headers={"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+        )
+    }
+    assert "Header Rules: api.example.com: 1 header(s)" in output
+
+
+def test_sandbox_create_rejects_malformed_inject_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--inject-header",
+            "api.example.com",
+            "broken",
+            "--yes",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "expects 'Name: value'" in output
+
+
+def test_sandbox_network_inject_header_conflicts_with_policy_file_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(
+        json.dumps(
+            {
+                "allow": ["*"],
+                "rules": {"api.example.com": {"headers": {"X-Key": "v"}}},
+            }
+        )
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--network-policy",
+            str(policy_file),
+            "--inject-header",
+            "api.example.com",
+            "Authorization: Bearer x",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "also set in --network-policy" in output

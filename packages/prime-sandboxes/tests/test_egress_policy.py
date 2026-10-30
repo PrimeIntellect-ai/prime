@@ -11,8 +11,10 @@ from prime_sandboxes import APIError
 from prime_sandboxes.models import (
     CreateSandboxRequest,
     EgressPolicyStatus,
+    HeaderRule,
     LocalhostForward,
     Sandbox,
+    Secret,
     validate_egress_lists,
 )
 from prime_sandboxes.sandbox import AsyncSandboxClient, SandboxClient
@@ -330,3 +332,205 @@ class TestLocalhostForwardsMethods:
     def test_port_range_is_validated(self):
         with pytest.raises(ValidationError):
             LocalhostForward(port=0, sandbox_id="sbx-db")
+
+
+def _rules(**headers: str) -> dict:
+    return {"api.example.com": HeaderRule(headers=headers)}
+
+
+class TestHeaderRuleValidation:
+    def test_valid_rules_are_canonicalized(self):
+        request = CreateSandboxRequest(
+            name="t",
+            docker_image="img",
+            network_rules={"API.Example.COM": {"headers": {"X-Key": "v"}}},
+        )
+        assert set(request.network_rules) == {"api.example.com"}
+
+    def test_none_rules_stay_none(self):
+        request = CreateSandboxRequest(name="t", docker_image="img")
+        assert request.network_rules is None
+
+    def test_host_cap_enforced(self):
+        from prime_sandboxes.models import MAX_HEADER_RULE_HOSTS
+
+        rules = {
+            f"h{i}.example.com": {"headers": {"X": "v"}}
+            for i in range(MAX_HEADER_RULE_HOSTS + 1)
+        }
+        with pytest.raises(ValidationError, match="at most"):
+            CreateSandboxRequest(name="t", docker_image="img", network_rules=rules)
+
+    def test_case_equivalent_hosts_rejected(self):
+        with pytest.raises(ValidationError, match="differ only by case"):
+            CreateSandboxRequest(
+                name="t",
+                docker_image="img",
+                network_rules={
+                    "api.example.com": {"headers": {"X": "v"}},
+                    "API.EXAMPLE.COM": {"headers": {"Y": "w"}},
+                },
+            )
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "",
+            "*",
+            "a.*.b.com",
+            "a.com:443",
+            "a.com/p",
+            "a b",
+            # IP literals are rejected (wildcard base included): the node
+            # refuses them, so they must never reach a stored policy.
+            "192.0.2.1",
+            "*.192.0.2.1",
+        ],
+    )
+    def test_invalid_hosts_rejected(self, host):
+        with pytest.raises(ValidationError):
+            CreateSandboxRequest(
+                name="t",
+                docker_image="img",
+                network_rules={host: {"headers": {"X": "v"}}},
+            )
+
+    @pytest.mark.parametrize(
+        "host", ["123.example.com", "example.com.456", "1.2.3.4.5"]
+    )
+    def test_numeric_dns_labels_accepted(self, host):
+        request = CreateSandboxRequest(
+            name="t",
+            docker_image="img",
+            network_rules={host: {"headers": {"X": "v"}}},
+        )
+        assert list(request.network_rules) == [host.lower()]
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Host", "host", "Content-Length", "transfer-encoding", "Connection",
+         "Upgrade", "Keep-Alive", "TE", "Trailer", "Proxy-Authorization"],
+    )
+    def test_reserved_headers_rejected(self, name):
+        with pytest.raises(ValidationError, match="reserved"):
+            CreateSandboxRequest(
+                name="t", docker_image="img", network_rules=_rules(**{name: "v"})
+            )
+
+    def test_crlf_value_rejected(self):
+        with pytest.raises(ValidationError, match="CR or LF"):
+            CreateSandboxRequest(
+                name="t",
+                docker_image="img",
+                network_rules=_rules(**{"X": "a\rb"}),
+            )
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("${foo}", "unsupported interpolation"),
+            ("${prime.secrets.OPENAI_KEY", "unterminated reference"),
+            ("${prime.secrets.openai_key}", "invalid secret name"),
+        ],
+    )
+    def test_invalid_references_rejected(self, value, message):
+        with pytest.raises(ValidationError, match=message):
+            CreateSandboxRequest(
+                name="t", docker_image="img", network_rules=_rules(**{"X": value})
+            )
+
+    def test_valid_reference_accepted(self):
+        request = CreateSandboxRequest(
+            name="t",
+            docker_image="img",
+            network_rules=_rules(Authorization="Bearer ${prime.secrets.OPENAI_KEY}"),
+        )
+        assert request.network_rules["api.example.com"].headers["Authorization"] == (
+            "Bearer ${prime.secrets.OPENAI_KEY}"
+        )
+
+
+class TestSecretFill:
+    def test_fill_returns_the_reference_string(self):
+        assert Secret.fill("OPENAI_KEY") == "${prime.secrets.OPENAI_KEY}"
+
+    def test_fill_rejects_invalid_names(self):
+        with pytest.raises(ValueError, match="invalid secret name"):
+            Secret.fill("openai-key")
+
+    def test_fill_composes_into_rules(self):
+        rules = _rules(Authorization=f"Bearer {Secret.fill('OPENAI_KEY')}")
+        request = CreateSandboxRequest(
+            name="t", docker_image="img", network_rules=rules
+        )
+        assert request.network_rules["api.example.com"].headers["Authorization"] == (
+            "Bearer ${prime.secrets.OPENAI_KEY}"
+        )
+
+
+class TestSetNetworkRules:
+    def test_rules_join_the_replacement_payload(self):
+        client = _sync_client()
+        rules = {
+            "API.Example.com": HeaderRule(
+                headers={"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+            )
+        }
+
+        status = client.set_network("sbx-1", allow=["*"], rules=rules)
+
+        payload = client.client.request.call_args.kwargs["json"]
+        assert payload["allowlist"] is None
+        assert payload["denylist"] == []
+        assert payload["rules"] == {
+            "api.example.com": {
+                "headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+            }
+        }
+        assert status.applied
+
+    def test_no_rules_keeps_the_previous_wire_shape(self):
+        client = _sync_client()
+
+        client.set_network("sbx-1", allow=["*"])
+
+        payload = client.client.request.call_args.kwargs["json"]
+        assert payload == {"allowlist": None, "denylist": []}
+
+    def test_invalid_rules_rejected_before_the_request(self):
+        client = _sync_client()
+
+        with pytest.raises(ValueError, match="reserved"):
+            client.set_network(
+                "sbx-1", allow=["*"], rules={"a.com": {"headers": {"Host": "x"}}}
+            )
+
+        client.client.request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_set_network_carries_rules(self):
+        client = _async_client()
+        rules = {"a.com": HeaderRule(headers={"X-Key": "v"})}
+
+        status = await client.set_network("sbx-1", deny=["b.com"], rules=rules)
+
+        payload = client.client.request.await_args.kwargs["json"]
+        assert payload["rules"] == {"a.com": {"headers": {"X-Key": "v"}}}
+        assert status.applied
+
+
+class TestEgressPolicyStatusRules:
+    def test_parses_rules_from_the_status_response(self):
+        status = EgressPolicyStatus.model_validate(
+            {
+                "policy": {
+                    "allowlist": ["api.example.com"],
+                    "denylist": None,
+                    "rules": {"api.example.com": {"headers": {"X-Key": "v"}}},
+                },
+                "generation": 3,
+                "applied_generation": 3,
+                "applied": True,
+            }
+        )
+        assert status.policy.rules["api.example.com"].headers == {"X-Key": "v"}

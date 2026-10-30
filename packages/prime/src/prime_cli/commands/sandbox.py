@@ -6,8 +6,10 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 from inspect import signature
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
+import click
 import typer
 from prime_sandboxes import (
     APIClient,
@@ -17,6 +19,7 @@ from prime_sandboxes import (
     Config,
     CreateSandboxRequest,
     EgressPolicyStatus,
+    HeaderRule,
     LanNetwork,
     LanRule,
     LocalhostForward,
@@ -1036,6 +1039,28 @@ def create(
             "Mutually exclusive with --network-allow."
         ),
     ),
+    # List[Any] boundary annotation: typer rejects list-of-tuple annotations;
+    # click owns the two-argument arity through click_type.
+    inject_header: Optional[List[Any]] = typer.Option(
+        None,
+        "--inject-header",
+        click_type=click.Tuple([str, str]),
+        help=(
+            "Repeatable. Set an HTTPS request header for egress to a host, e.g. "
+            "--inject-header api.example.com 'Authorization: Bearer "
+            "${prime.secrets.OPENAI_KEY}'. Secret references resolve on the "
+            "sandbox's node, never inside the sandbox."
+        ),
+    ),
+    network_policy: Optional[str] = typer.Option(
+        None,
+        "--network-policy",
+        help=(
+            "JSON file with the egress policy: optional 'allow' and 'deny' "
+            "destination lists (exactly one, as with the flags) and 'rules' "
+            "mapping hosts to headers."
+        ),
+    ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     idle_timeout_minutes: Optional[int] = typer.Option(
         None,
@@ -1176,6 +1201,21 @@ def create(
             )
             raise typer.Exit(1)
 
+        try:
+            network_allow, network_deny, network_rules = _resolve_network_policy_lists(
+                allow=network_allow,
+                deny=network_deny,
+                inject_header=inject_header,
+                network_policy=network_policy,
+                require_destinations=False,
+            )
+        except ValueError as exc:
+            console.print(f"[red]Error:[/red] {escape(str(exc))}")
+            raise typer.Exit(1)
+
+        if network_rules is not None:
+            request_kwargs["network_rules"] = network_rules
+
         resolved_start_command: StartCommand | None
         if command:
             resolved_start_command = StartCommand(
@@ -1226,6 +1266,12 @@ def create(
             console.print(
                 f"Egress Denylist: {', '.join(network_deny) if network_deny else '(allow all)'}"
             )
+        if network_rules:
+            rules_summary = ", ".join(
+                f"{host}: {len(rule.headers)} header(s)"
+                for host, rule in sorted(network_rules.items())
+            )
+            console.print(f"Header Rules: {rules_summary}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         # Only show the idle timeout in the summary when the SDK actually
         # accepted it; otherwise we'd display a value the backend never sees.
@@ -1592,7 +1638,7 @@ def network(
         help=(
             "Replace the allowed destinations with a comma-separated list of "
             "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
-            "Use '*' to allow all."
+            "Use '*' to allow all. Required together with header rules."
         ),
     ),
     deny: Optional[str] = typer.Option(
@@ -1601,36 +1647,57 @@ def network(
         help=(
             "Replace the denied destinations with a comma-separated list of "
             "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
-            "Use '*' to deny all."
+            "Use '*' to deny all. Required together with header rules."
+        ),
+    ),
+    # List[Any] boundary annotation: typer rejects list-of-tuple annotations;
+    # click owns the two-argument arity through click_type.
+    inject_header: Optional[List[Any]] = typer.Option(
+        None,
+        "--inject-header",
+        click_type=click.Tuple([str, str]),
+        help=(
+            "Repeatable. Set an HTTPS request header for egress to a host, e.g. "
+            "--inject-header api.example.com 'Authorization: Bearer "
+            "${prime.secrets.OPENAI_KEY}'. Secret references resolve on the "
+            "sandbox's node, never inside the sandbox."
+        ),
+    ),
+    network_policy: Optional[str] = typer.Option(
+        None,
+        "--network-policy",
+        help=(
+            "JSON file with the complete egress policy: optional 'allow' and "
+            "'deny' destination lists (exactly one) and 'rules' mapping hosts "
+            "to headers."
         ),
     ),
 ) -> None:
     """Show or replace the egress rules of a VM sandbox (default subcommand)."""
-    selections = [allow is not None, deny is not None]
-    if sum(selections) > 1:
-        console.print("[red]Error:[/red] provide at most one of --allow or --deny")
-        raise typer.Exit(1)
-
     try:
+        allow_entries, deny_entries, rules = _resolve_network_policy_lists(
+            allow=_parse_network_destinations(allow, "--allow") if allow is not None else None,
+            deny=_parse_network_destinations(deny, "--deny") if deny is not None else None,
+            inject_header=inject_header,
+            network_policy=network_policy,
+            require_destinations=True,
+        )
+
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        if not any(selections):
+        if allow_entries is None and deny_entries is None:
             with console.status("[bold blue]Fetching network rules...", spinner="dots"):
                 status = sandbox_client.get_network(sandbox_id)
         else:
-            allow_entries = (
-                _parse_network_destinations(allow, "--allow") if allow is not None else None
-            )
-            deny_entries = _parse_network_destinations(deny, "--deny") if deny is not None else None
             with console.status("[bold blue]Updating network rules...", spinner="dots"):
                 status = sandbox_client.set_network(
-                    sandbox_id,
-                    allow=allow_entries,
-                    deny=deny_entries,
+                    sandbox_id, allow=allow_entries, deny=deny_entries, rules=rules
                 )
 
-        _print_network_status(sandbox_id, status, updated=any(selections))
+        _print_network_status(
+            sandbox_id, status, updated=allow_entries is not None or deny_entries is not None
+        )
         if not status.applied:
             console.print(
                 "[yellow]⚠ Network rules were saved but are not active yet. "
@@ -1651,6 +1718,106 @@ def network(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+
+
+def _resolve_network_policy_lists(
+    *,
+    allow: Optional[List[str]],
+    deny: Optional[List[str]],
+    inject_header: Optional[List[Any]],
+    network_policy: Optional[str],
+    require_destinations: bool,
+) -> Tuple[Optional[List[str]], Optional[List[str]], Optional[Dict[str, HeaderRule]]]:
+    """Merge destination flags and --network-policy into one egress policy.
+
+    The policy is always a complete replacement, never a merge: flag and file
+    allow/deny selections conflict instead of combining, and header rules
+    combine only within themselves (file rules plus --inject-header entries).
+    With ``require_destinations`` (the live replace command), header rules must
+    travel with an explicit allow/deny selection.
+    """
+    if allow is not None and deny is not None:
+        raise ValueError("provide at most one of --allow and --deny")
+
+    policy_file: Dict[str, Any] = {}
+    if network_policy is not None:
+        policy_file = _load_network_policy_file(network_policy)
+        if policy_file.get("allow") is not None and policy_file.get("deny") is not None:
+            raise ValueError(f"{network_policy}: provide at most one of allow and deny")
+
+    file_allow = policy_file.get("allow")
+    file_deny = policy_file.get("deny")
+    if allow is not None and file_allow is not None:
+        raise ValueError("provide at most one of --allow and --network-policy allow")
+    if deny is not None and file_deny is not None:
+        raise ValueError("provide at most one of --deny and --network-policy deny")
+    if network_policy is not None and not (
+        file_allow is not None or file_deny is not None or policy_file.get("rules")
+    ):
+        raise ValueError(f"{network_policy}: must contain at least one of allow, deny, rules")
+
+    allow_list = allow if allow is not None else file_allow
+    deny_list = deny if deny is not None else file_deny
+    if allow_list is not None and not isinstance(allow_list, list):
+        raise ValueError(f"{network_policy}: allow must be a list of destinations")
+    if deny_list is not None and not isinstance(deny_list, list):
+        raise ValueError(f"{network_policy}: deny must be a list of destinations")
+
+    rules: Optional[Dict[str, Any]] = None
+    file_rules = policy_file.get("rules")
+    inject_rules = _parse_header_injections(inject_header or [])
+    if file_rules is not None and not isinstance(file_rules, dict):
+        raise ValueError(f"{network_policy}: rules must map hosts to headers")
+    if file_rules or inject_rules:
+        rules = dict(file_rules or {})
+        for host, rule in inject_rules.items():
+            if host in rules:
+                raise ValueError(f"--inject-header for {host!r} also set in --network-policy")
+            rules[host] = rule
+    if require_destinations and rules is not None and allow_list is None and deny_list is None:
+        raise ValueError(
+            "the egress replacement is complete: pass --allow or --deny "
+            "(or --network-policy carrying them) alongside the header rules"
+        )
+    return allow_list, deny_list, rules
+
+
+def _parse_header_injections(entries: Optional[List[Any]]) -> Dict[str, HeaderRule]:
+    """Build header substitution rules from repeatable
+    ``--inject-header HOST 'Name: value'`` flags.
+
+    Repeated flags for one host merge their headers; a duplicate header name
+    for the same host is an error rather than a silent override.
+    """
+    rules: Dict[str, HeaderRule] = {}
+    for host, header in entries or []:
+        name, separator, value = header.partition(":")
+        if not separator or not name.strip():
+            raise ValueError(f"--inject-header for {host!r} expects 'Name: value'")
+        rule = rules.setdefault(host, HeaderRule(headers={}))
+        header_name = name.strip()
+        if header_name in rule.headers:
+            raise ValueError(f"--inject-header for {host!r}: header {header_name!r} set twice")
+        rule.headers[header_name] = value.strip()
+    return rules
+
+
+def _load_network_policy_file(path: str) -> Dict[str, Any]:
+    """Load ``--network-policy``: a JSON object with optional ``allow``,
+    ``deny``, and ``rules`` keys, describing the complete egress policy."""
+    file = Path(path)
+    if not file.is_file():
+        raise ValueError(f"--network-policy: no such file: {path}")
+    try:
+        data = json.loads(file.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path}:{exc.lineno}: invalid JSON: {exc.msg}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: the network policy must be a JSON object")
+    unknown = sorted(set(data) - {"allow", "deny", "rules"})
+    if unknown:
+        raise ValueError(f"{path}: unknown network policy keys: {', '.join(unknown)}")
+    return data
 
 
 def _parse_network_destinations(value: str, option: str) -> List[str]:
@@ -1686,6 +1853,12 @@ def _print_network_status(
 
     label, value = _network_policy_summary(status)
     console.print(f"  [cyan]{label}:[/cyan] {escape(value)}")
+    rules = getattr(status.policy, "rules", None)
+    if rules:
+        summary = ", ".join(
+            f"{host}: {len(rule.headers)} header(s)" for host, rule in sorted(rules.items())
+        )
+        console.print(f"  [cyan]Header rules:[/cyan] {escape(summary)}")
 
 
 def _request_pause_or_resume(sandbox_id: str, resume: bool) -> None:

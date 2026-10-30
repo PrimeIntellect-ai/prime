@@ -1,5 +1,7 @@
 """Pydantic models for Prime Sandboxes SDK."""
 
+import ipaddress
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -25,6 +27,59 @@ MAX_EGRESS_POLICY_ENTRIES = 1024
 
 # Domain entries are matched by HTTP Host or TLS SNI, read only on these ports.
 DOMAIN_RULE_PORTS = (80, 443)
+
+# Header substitution rules contract (mirrors the API implementation):
+# SECRET_REFERENCE_PREFIX introduces a "${prime.secrets.<name>}" reference in a
+# header template value; the other constants bound the rules per policy.
+SECRET_REFERENCE_PREFIX = "${prime.secrets."
+MAX_HEADER_RULE_HOSTS = 32
+MAX_HEADER_RULE_BYTES = 8192
+
+_SECRET_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,254}$")
+_RESERVED_RULE_HEADERS = frozenset(
+    {
+        "host",
+        ":authority",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+        "keep-alive",
+        "te",
+        "trailer",
+    }
+)
+_RESERVED_RULE_HEADER_PREFIXES = ("proxy-",)
+
+
+class HeaderRule(BaseModel):
+    """Headers to set on HTTPS requests to one rule host.
+
+    Each value is a template that may contain "${prime.secrets.<name>}"
+    references; a set header replaces any same-name header the sandbox sent.
+    """
+
+    headers: Dict[str, str]
+
+
+class Secret:
+    """Reference helper for platform secrets inside header-rule values.
+
+    Distinct from ``CreateSandboxRequest.secrets``, which are per-sandbox
+    environment values: a platform secret is stored once per user/team and
+    never enters the sandbox; the sandbox's node substitutes its value into
+    the HTTPS request headers named by ``network_rules``.
+    """
+
+    @classmethod
+    def fill(cls, name: str) -> str:
+        """Return the "${prime.secrets.<name>}" reference string for ``name``."""
+        if not _SECRET_NAME_PATTERN.fullmatch(name):
+            raise ValueError(
+                f"invalid secret name {name!r}; must be 1-255 uppercase letters, "
+                "digits, or underscores, starting with a letter"
+            )
+        return f"${{prime.secrets.{name}}}"
 
 
 def _validate_egress_entry(entry: str) -> None:
@@ -128,11 +183,154 @@ def validate_egress_lists(allowlist: Optional[List[str]], denylist: Optional[Lis
                 raise ValueError(f"{name}: {exc}") from exc
 
 
+def _parse_secret_references(value: str) -> List[str]:
+    """Parse one template value into its referenced secret names, in order."""
+    names: List[str] = []
+    while True:
+        start = value.find("${")
+        if start < 0:
+            return names
+        if not value.startswith(SECRET_REFERENCE_PREFIX, start):
+            raise ValueError(
+                f"unsupported interpolation at {value[start : start + 24]!r}; "
+                "only ${prime.secrets.<name>} references are allowed"
+            )
+        rest = value[start + len(SECRET_REFERENCE_PREFIX) :]
+        secret_name, terminator, tail = rest.partition("}")
+        if not terminator:
+            raise ValueError(f"unterminated reference at {value[start:]!r}")
+        if not _SECRET_NAME_PATTERN.fullmatch(secret_name):
+            raise ValueError(
+                f"invalid secret name {secret_name!r} in reference; must be "
+                "1-255 uppercase letters, digits, or underscores, "
+                "starting with a letter"
+            )
+        names.append(secret_name)
+        value = tail
+
+
+def validate_header_rules(
+    rules: Optional[Dict[str, HeaderRule]]
+) -> Optional[Dict[str, HeaderRule]]:
+    """Client-side mirror of the API's header substitution rules contract.
+
+    Rule hosts are an exact DNS name or a single leading ``*.`` wildcard
+    without ports or paths, canonicalized to lowercase with case-equivalent
+    hosts rejected; header names are valid HTTP tokens that are not reserved
+    (Host, :authority, framing, hop-by-hop, Proxy-*); values carry no CR/LF
+    and only ``${prime.secrets.<name>}`` references; one rule host's headers
+    total at most ``MAX_HEADER_RULE_BYTES`` bytes.
+    """
+    if not rules:
+        return rules
+    if len(rules) > MAX_HEADER_RULE_HOSTS:
+        raise ValueError(
+            f"header rules name {len(rules)} hosts; at most {MAX_HEADER_RULE_HOSTS} are allowed"
+        )
+
+    canonical: Dict[str, HeaderRule] = {}
+    for host, rule in rules.items():
+        if not isinstance(rule, HeaderRule):
+            rule = HeaderRule.model_validate(rule)
+        canonical_host = host.lower()
+        if canonical_host in canonical:
+            raise ValueError(
+                f"header rule hosts {host!r} and an earlier entry differ only by case"
+            )
+        _validate_header_rule_host(host)
+        _validate_header_rule_headers(host, rule.headers)
+        canonical[canonical_host] = rule
+    return canonical
+
+
+def _validate_header_rule_host(host: str) -> None:
+    """Mirror the API's rule-host contract: DNS names only — IP literals
+    (wildcard base included) are rejected because header rules match
+    hostnames and the node refuses them; numeric labels stay valid DNS."""
+    domain = host[2:] if host.startswith("*.") else host
+    if not domain:
+        raise ValueError(f"header rule host {host!r} is empty")
+    if "*" in domain:
+        raise ValueError(
+            f"header rule host {host!r}: wildcard is only supported as the leftmost label"
+        )
+    if len(domain) > 253:
+        raise ValueError(f"header rule host {host!r} exceeds 253 characters")
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            f"header rule host {host!r}: IP addresses are not supported; use a DNS name"
+        )
+    for label in domain.split("."):
+        if not 1 <= len(label) <= 63:
+            raise ValueError(
+                f"header rule host {host!r} contains an empty or oversized label"
+            )
+        if label.startswith("-") or label.endswith("-"):
+            raise ValueError(
+                f"header rule host {host!r}: labels must not start or end with a hyphen"
+            )
+        for character in label:
+            if not (character.isascii() and (character.isalnum() or character == "-")):
+                raise ValueError(
+                    f"header rule host {host!r} contains unsupported character {character!r}"
+                )
+
+
+def _validate_header_rule_headers(host: str, headers: Dict[str, str]) -> None:
+    total_bytes = 0
+    for name, value in headers.items():
+        if not _is_valid_header_name(name):
+            raise ValueError(f"header rule for {host!r}: {name!r} is not a valid header name")
+        lower_name = name.lower()
+        if lower_name in _RESERVED_RULE_HEADERS:
+            raise ValueError(
+                f"header rule for {host!r}: {name!r} is a reserved header and cannot be set"
+            )
+        if lower_name.startswith(_RESERVED_RULE_HEADER_PREFIXES):
+            raise ValueError(
+                f"header rule for {host!r}: {name!r} uses the reserved "
+                f"{_RESERVED_RULE_HEADER_PREFIXES[0]!r} prefix and cannot be set"
+            )
+        if "\r" in value or "\n" in value:
+            raise ValueError(
+                f"header rule for {host!r}: header {name!r} value must not contain CR or LF"
+            )
+        try:
+            _parse_secret_references(value)
+        except ValueError as exc:
+            raise ValueError(f"header rule for {host!r}, header {name!r}: {exc}") from exc
+
+        total_bytes += len(name.encode("utf-8")) + len(value.encode("utf-8"))
+    if total_bytes > MAX_HEADER_RULE_BYTES:
+        raise ValueError(
+            f"header rule for {host!r} exceeds {MAX_HEADER_RULE_BYTES} bytes of headers"
+        )
+
+
+def _is_valid_header_name(name: str) -> bool:
+    """One to 255 HTTP token characters: visible ASCII minus separators."""
+    if not 1 <= len(name) <= 255:
+        return False
+    for character in name:
+        if character.isascii() and (
+            character.isalnum() or character in "!#$%&'*+-.^_`|~"
+        ):
+            continue
+        return False
+    return True
+
+
 class SandboxEgressPolicy(BaseModel):
     """The desired egress policy: at most one list is non-null."""
 
     allowlist: Optional[List[str]] = None
     denylist: Optional[List[str]] = None
+    # Per-host HTTPS header substitution rules; absent means none.
+    rules: Optional[Dict[str, HeaderRule]] = None
 
 
 class EgressPolicyStatus(BaseModel):
@@ -418,6 +616,8 @@ class CreateSandboxRequest(BaseModel):
     gpu_type: Optional[str] = None
     network_allowlist: Optional[List[str]] = None
     network_denylist: Optional[List[str]] = None
+    # Per-host HTTPS header substitution rules; a rule never grants egress.
+    network_rules: Optional[Dict[str, HeaderRule]] = None
     timeout_minutes: int = 60
     idle_timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
@@ -458,6 +658,7 @@ class CreateSandboxRequest(BaseModel):
     @model_validator(mode="after")
     def validate_network_lists(self) -> "CreateSandboxRequest":
         validate_egress_lists(self.network_allowlist, self.network_denylist)
+        self.network_rules = validate_header_rules(self.network_rules)
         if self.lan_tags is not None and self.lan_network_id is None:
             raise ValueError("lan_tags requires lan_network_id")
         return self

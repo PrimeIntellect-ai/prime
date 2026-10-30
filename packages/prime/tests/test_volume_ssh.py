@@ -1165,7 +1165,6 @@ def test_create_warm_by_default(monkeypatch, flags, warm):
     result = _run("create", "ckpts", *flags)
     assert result.exit_code == 0, result.output
     assert sent == [warm]
-    assert ("Starting a session in the background" in result.output) is warm
     as_json = _run("create", "ckpts", "-o", "json", *flags)
     assert json.loads(as_json.output)["name"] == "ckpts"
 
@@ -1206,7 +1205,6 @@ def test_ssh_shows_the_phase_and_how_the_session_ends(monkeypatch, tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert "Copying data from bucket... 1.2 GiB / 4 GiB, 30%" in result.output
-    assert "Changes sync to the volume every minute." in result.output
     assert "stops after 30 minutes idle" in result.output
     assert "prime volumes stop data s1" in result.output
 
@@ -1365,7 +1363,7 @@ def _direct(monkeypatch, s3):
 
     routes, scopes = [], {}
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None):
+    def route(name, mode, path, entries=None, team_id=None, lease_id=None, live=False):
         routes.append((mode, path))
         lease = {}
         if mode == "put":
@@ -1511,7 +1509,7 @@ def test_get_of_runs_with_a_live_session_goes_direct(monkeypatch, tmp_path):
     s3 = FakeS3({"vol1/runs/r1/m": b"m"})
     asked = []
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None):
+    def route(name, mode, path, entries=None, team_id=None, lease_id=None, live=False):
         asked.append((mode, path))
         live = {
             "via": "session",

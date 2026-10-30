@@ -14,11 +14,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 import toml
 from prime_cli.api.training import build_payload_from_toml
 from prime_cli.commands.rl import _is_sft, _looks_like_sft
 from prime_cli.main import app
 from typer.testing import CliRunner
+
+pytestmark = pytest.mark.usefixtures("stub_local_schema_validation")
 
 runner = CliRunner()
 
@@ -52,7 +55,7 @@ def _capture_post(monkeypatch) -> dict[str, Any]:
     """Mock the API layer's post and capture the /training/runs payload."""
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
         return {"runId": "run-1", "tokenValue": "tok"}
@@ -144,7 +147,7 @@ def test_train_rejects_fft_flag_on_sft_config(tmp_path: Path, monkeypatch) -> No
     result = runner.invoke(app, ["train", config_path, "--fft", "--yes"], env=TEST_ENV)
 
     assert result.exit_code == 1
-    assert "Use --sft instead" in result.output
+    assert "Use --sft instead" in " ".join(result.output.split())
 
 
 def test_train_rejects_sft_and_fft_flags_together(tmp_path: Path) -> None:
@@ -338,7 +341,7 @@ def test_train_sft_missing_volume_created_with_requested_size(tmp_path: Path, mo
 def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
         return response

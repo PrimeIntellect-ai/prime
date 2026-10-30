@@ -10,9 +10,9 @@ authors = [
     { name = "Prime Intellect", email = "contact@primeintellect.ai" }
 ]
 dependencies = [
-    "prime-sandboxes>=0.4.3",
+    "prime-sandboxes>=0.5.2",
     "prime-evals>=0.2.4",
-    "prime-traces>=0.0.9",
+    "prime-traces>=0.0.10",
     "prime-tunnel>=0.1.11",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
@@ -88,3 +88,11 @@ extend-select = [
     "F",   # pyflakes
     "I",   # isort (import sorting)
 ]
+
+# The schema worker runs inside the selected prime-rl interpreter, not the CLI's;
+# test_worker_imports_only_what_the_schema_interpreter_provides checks its imports.
+[[tool.ty.overrides]]
+include = ["src/prime_cli/utils/training_schema_worker.py"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"

@@ -1,5 +1,5 @@
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import httpx
 
@@ -38,10 +38,25 @@ class NotFoundError(APIError):
     pass
 
 
+class MethodNotAllowedError(APIError):
+    """Raised when API returns 405 method not allowed"""
+
+    pass
+
+
 class PaymentRequiredError(APIError):
     """Raised when API returns 402 payment required"""
 
     pass
+
+
+class ServerError(APIError):
+    """Raised when API returns a 5xx status"""
+
+    pass
+
+
+_STATUS_ERRORS = {404: NotFoundError, 405: MethodNotAllowedError}
 
 
 class APITimeoutError(APIError):
@@ -110,7 +125,7 @@ class APIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
         self._check_auth_required()
@@ -162,7 +177,9 @@ class APIClient:
                 except (ValueError, KeyError):
                     pass
 
-            error_cls = NotFoundError if e.response.status_code == 404 else APIError
+            error_cls = _STATUS_ERRORS.get(
+                e.response.status_code, ServerError if e.response.status_code >= 500 else APIError
+            )
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()
@@ -184,14 +201,19 @@ class APIClient:
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make a GET request to the API"""
         return self.request("GET", endpoint, params=params, timeout=timeout)
 
-    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Make a POST request to the API"""
-        return self.request("POST", endpoint, json=json)
+    def post(
+        self,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
+    ) -> Dict[str, Any]:
+        """Make a POST request to the API (timeout: per-request override)"""
+        return self.request("POST", endpoint, json=json, timeout=timeout)
 
     def patch(
         self,
@@ -260,7 +282,7 @@ class AsyncAPIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make an async request to the API"""
         self._check_auth_required()
@@ -308,7 +330,9 @@ class AsyncAPIClient:
                 except (ValueError, KeyError):
                     pass
 
-            error_cls = NotFoundError if e.response.status_code == 404 else APIError
+            error_cls = _STATUS_ERRORS.get(
+                e.response.status_code, ServerError if e.response.status_code >= 500 else APIError
+            )
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()

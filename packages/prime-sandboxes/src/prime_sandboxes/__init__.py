@@ -58,6 +58,10 @@ from .models import (
     ImageUpdateResult,
     ImageUpdateSource,
     ImageVisibility,
+    LanNetwork,
+    LanNetworkMember,
+    LanRule,
+    LocalhostForward,
     PersonalImageOwner,
     PlatformImageOwner,
     ReadFileResponse,
@@ -74,11 +78,14 @@ from .models import (
     TeamImageOwner,
     UpdateImagesRequest,
     UpdateImagesResponse,
+    Volume,
+    VolumeListResponse,
+    VolumeMount,
 )
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
 
-__version__ = "0.4.3"
+__version__ = "0.5.2"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -108,6 +115,10 @@ __all__ = [
     "BulkDeleteSandboxRequest",
     "BulkDeleteSandboxResponse",
     "EgressPolicyStatus",
+    "LanNetwork",
+    "LanNetworkMember",
+    "LanRule",
+    "LocalhostForward",
     "AdvancedConfigs",
     "BackgroundJob",
     "BackgroundJobStatus",
@@ -142,6 +153,9 @@ __all__ = [
     "ImageUpdateResult",
     "ImageCoordinateState",
     "ImageMutationError",
+    "Volume",
+    "VolumeListResponse",
+    "VolumeMount",
     # Exceptions
     "APIError",
     "BatchStatusUnsupportedError",

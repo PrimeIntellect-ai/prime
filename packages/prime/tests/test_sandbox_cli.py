@@ -7,7 +7,7 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from prime_sandboxes import SandboxCheckpoint, StartCommand
+from prime_sandboxes import APIError, SandboxCheckpoint, StartCommand
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -21,6 +21,8 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
         state="PENDING",
         depth=1,
         docker_image="python:3.11-slim",
+        occupied_bytes=2 * 1024**2,
+        stored_bytes=1024**2,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -50,6 +52,9 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
     assert table.exit_code == 0, table.output
     assert "checkpoint-1" in table.output and "DURABLE" in table.output
+    # Size (quota measure) and Stored (compressed billing metric) both shown.
+    assert "Size" in table.output and "2.0 MiB" in table.output
+    assert "1.0 MiB" in table.output
 
     durable = runner.invoke(
         app,
@@ -67,6 +72,58 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert durable.exit_code == 0, durable.output
     assert json.loads(durable.output)["checkpoints"][0]["state"] == "DURABLE"
     assert listed == [("sandbox-1", None), ("sandbox-1", "checkpoint-1")]
+
+
+def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    states = {
+        "cp-pending": ("PENDING", None),
+        "cp-durable": ("DURABLE", None),
+        "cp-failed": ("FAILED", "upload failed"),
+    }
+    requested: list[str] = []
+
+    def get_checkpoint(self: Any, checkpoint_id: str) -> SandboxCheckpoint:
+        requested.append(checkpoint_id)
+        state, error = states[checkpoint_id]
+        return SandboxCheckpoint(
+            id=checkpoint_id,
+            sandbox_id="sandbox-1",
+            state=state,
+            depth=1,
+            docker_image="python:3.11-slim",
+            occupied_bytes=3 * 1024**2,
+            error=error,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint
+    )
+
+    for checkpoint_id, (state, error) in states.items():
+        result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])
+        assert result.exit_code == 0, result.output
+        output = " ".join(strip_ansi(result.output).split())
+        assert checkpoint_id in output
+        assert state in output
+        assert "Size: 3.0 MiB" in output
+        # Neutral by-id output: a volume checkpoint is never restorable.
+        assert "Restorable" not in output
+        if error:
+            assert error in output
+
+    assert requested == list(states)
+
+    def missing(self: Any, checkpoint_id: str) -> SandboxCheckpoint:
+        raise APIError(f"HTTP 404: Checkpoint {checkpoint_id} not found")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", missing)
+
+    failing = runner.invoke(app, ["sandbox", "checkpoint", "get", "cp-missing"])
+    assert failing.exit_code == 1, failing.output
+    assert "HTTP 404" in strip_ansi(failing.output)
 
 
 def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -645,6 +702,25 @@ def test_sandbox_create_defaults_to_vm_runtime(
     assert result.exit_code == 0, result.output
     assert "Runtime: VM (default)" in output
     assert captured["request"].start_command is None
+
+
+def test_sandbox_create_arm_alias_sends_arm64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-arm")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+    result = runner.invoke(
+        app, ["sandbox", "create", "prime/user/app:arm", "--arch", "arm", "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].arch == "arm64"
 
 
 def test_sandbox_create_gpu_without_docker_image_uses_default(
@@ -1231,3 +1307,28 @@ def test_checkpoint_delete_by_ids_and_sandbox(monkeypatch: pytest.MonkeyPatch) -
     both = runner.invoke(app, ["sandbox", "checkpoint", "delete", "c1", "--sandbox", "sbx-1"])
     assert both.exit_code == 1
     assert calls == ["c1", "c2", "c3", ("sandbox", "sbx-1")]
+
+
+def test_pause_and_resume_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[tuple[str, str]] = []
+
+    def pause(self: Any, sandbox_id: str) -> SimpleNamespace:
+        calls.append(("pause", sandbox_id))
+        return SimpleNamespace(status="RUNNING")
+
+    def resume(self: Any, sandbox_id: str) -> SimpleNamespace:
+        calls.append(("resume", sandbox_id))
+        return SimpleNamespace(status="PAUSED")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.pause", pause)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.resume", resume)
+
+    paused = runner.invoke(app, ["sandbox", "pause", "sandbox-1"])
+    assert paused.exit_code == 0, paused.output
+    assert "becomes PAUSED" in strip_ansi(paused.output)
+
+    resumed = runner.invoke(app, ["sandbox", "resume", "sandbox-1"])
+    assert resumed.exit_code == 0, resumed.output
+    assert "becomes RUNNING" in strip_ansi(resumed.output)
+    assert calls == [("pause", "sandbox-1"), ("resume", "sandbox-1")]

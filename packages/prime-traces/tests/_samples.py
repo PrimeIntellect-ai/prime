@@ -42,6 +42,38 @@ EMPTY_AGGREGATE = {
     "agent_names": [],
 }
 
+# Keep this representative of the wire-level run contract.
+RUN = {
+    "run_id": "run_9f3k2m",
+    "first_trace_created_at": "2026-07-20T18:02:11.482Z",
+    "last_trace_created_at": "2026-07-21T09:40:43.488Z",
+    "last_trace_ingested_at": "2026-07-21T13:11:05.249Z",
+    "trace_count": 578,
+    "episode_count": 578,
+    "avg_reward": 0.14,
+    "step_min": 0,
+    "step_max": 1,
+    "step_count": 2,
+    "has_error": True,
+    "first_user_id": "u1",
+    "environment_ids": ["terminal-bench-2"],
+    "model_ids": ["deepseek-v4-flash"],
+    "context": {"source": "prime-runs", "run_type": "train"},
+}
+
+RUN_STEPS = {
+    "step_min": 0,
+    "step_max": 1,
+    "step_count": 2,
+    "items": [
+        {"step": 0, "trace_count": 300, "episode_count": 300, "avg_reward": None},
+        {"step": 1, "trace_count": 278, "episode_count": 278, "avg_reward": 0.14},
+    ],
+}
+
+RESERVED_RUN_ID = "run?with#reserved%chars and space"
+ENCODED_RUN_PATH = b"/api/v1/runs/run%3Fwith%23reserved%25chars%20and%20space"
+
 RESERVED_TRACE_ID = "trace?with#reserved%chars and space"
 ENCODED_TRACE_PATH = b"/api/v1/traces/trace%3Fwith%23reserved%25chars%20and%20space"
 RESERVED_EPISODE_ID = "episode?with#reserved%chars and space"

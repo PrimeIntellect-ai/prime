@@ -7,7 +7,7 @@ token; admin role is gated server-side.
 """
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,6 +21,33 @@ from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agen
 # of a 422 from the backend.
 PRIME_RL_GITHUB_REPO = "PrimeIntellect-ai/prime-rl"
 _GITHUB_API = "https://api.github.com"
+
+
+# Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
+# Only the read wait grows: an unreachable host still fails in 10s.
+CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
+
+class PreparedTrainingRuntime(BaseModel):
+    repository: Literal["ghcr.io/primeintellect-ai/prime-rl"]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    image_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_commit: Optional[str] = Field(None, pattern=r"^[0-9a-f]{40}$")
+    schema_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class SchemaInstallInputs(BaseModel):
+    python: Literal["3.12"]
+    requirements: List[str]
+    constraints: List[str]
+
+
+class LocalValidationPreparation(BaseModel):
+    contract_version: Literal[1]
+    mode: Literal["rl", "sft"]
+    runtime: PreparedTrainingRuntime
+    schema_install: SchemaInstallInputs
+    submission_supported: bool
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -172,6 +199,9 @@ class VolumeSession(BaseModel):
     phase: Optional[str] = None
     # The latest rclone stats line while the session copies data in (staging).
     progress: Optional[str] = None
+    # A live view (platform ENG-7113): the run or read-write session whose
+    # volume this read-only session mounts as it is now. Absent otherwise.
+    live_view_of: Optional[str] = Field(None, alias="liveViewOf")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -193,6 +223,8 @@ class VolumeTransferRoute(BaseModel):
     # A put's upload lease (platform#6358): sent back on refresh, released
     # when the put ends. Absent on gets and from older backends.
     lease_id: Optional[str] = Field(None, alias="leaseId")
+    # A live get that still reads R2: why (e.g. the run is syncing back).
+    note: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -240,6 +272,13 @@ class HostedTrainingClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
+    def prepare_local_validation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        response = self.client.post("/training/runs/prepare", json=payload)
+        try:
+            return LocalValidationPreparation.model_validate(response).model_dump()
+        except PydanticValidationError as exc:
+            raise APIError(f"Failed to parse local validation preparation: {exc}") from exc
+
     def create_run(self, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
         """POST /v1/training/runs. Backend mints a per-run API token and
         kicks off the helm install asynchronously; returns immediately with
@@ -249,7 +288,10 @@ class HostedTrainingClient:
         …) propagate so callers can branch by exception class instead of
         string-matching the message.
         """
-        response = self.client.post("/training/runs", json=payload)
+        # The backend validates the config through the rl-validator before
+        # answering, and a cold validator alone may take up to its 60s
+        # timeout (ENG-6696); the client default of 30s gave up first.
+        response = self.client.post("/training/runs", json=payload, timeout=CREATE_RUN_TIMEOUT)
         return HostedTrainingRunResponse.model_validate(response)
 
     def delete_run(self, run_id: str) -> Dict[str, Any]:
@@ -262,6 +304,18 @@ class HostedTrainingClient:
         """
         response = self.client.request("DELETE", f"/training/runs/{run_id}")
         return response if isinstance(response, dict) else {"runId": run_id}
+
+    def pause_run(self, run_id: str) -> Dict[str, Any]:
+        return self.client.post(f"/training/runs/{run_id}/pause")
+
+    def resume_run(self, run_id: str, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
+        """POST /v1/training/runs/{run_id}/resume: a new run continuing a
+        PAUSED one from its stored config. Validates like a create, so it
+        shares the create timeout."""
+        response = self.client.post(
+            f"/training/runs/{run_id}/resume", json=payload, timeout=CREATE_RUN_TIMEOUT
+        )
+        return HostedTrainingRunResponse.model_validate(response)
 
     def create_volume(
         self,
@@ -342,13 +396,18 @@ class HostedTrainingClient:
         *,
         team_id: Optional[str] = None,
         lease_id: Optional[str] = None,
+        live: bool = False,
     ) -> VolumeTransferRoute:
         """POST …/volumes/{name}/transfer with mode "get" or "put" and the
         volume-relative path ("" = root): the get source or the put
         destination. A root put also sends `entries`, the top-level names it
         writes; a put's credential refresh sends its `lease_id` to extend
-        that lease. Raises NotFoundError on backends without the route."""
+        that lease. A `live` get reads a volume a run or read-write session
+        holds through a read-only live view of it (older backends ignore
+        it). Raises NotFoundError on backends without the route."""
         payload: Dict[str, Any] = {"mode": mode, "path": path}
+        if live:
+            payload["live"] = True
         if entries is not None:
             payload["entries"] = entries
         if lease_id:
@@ -594,6 +653,7 @@ def build_payload_from_toml(
     volume: Optional[str] = None,
     mode: Optional[str] = None,
     source_ref: Optional[str] = None,
+    resume_from: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -625,6 +685,8 @@ def build_payload_from_toml(
       - source_ref: a prime-rl git ref (branch / tag / sha) the pods
         overlay onto the image at startup, for testing unmerged code
         without an image build. The platform pins the resolved commit.
+      - resume_from: a PAUSED run to continue from. The platform attaches
+        that run's volume when none is given.
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
     """
@@ -647,4 +709,6 @@ def build_payload_from_toml(
         payload["volume"] = volume
     if source_ref:
         payload["sourceRef"] = source_ref
+    if resume_from is not None:
+        payload["resumeFrom"] = resume_from
     return payload

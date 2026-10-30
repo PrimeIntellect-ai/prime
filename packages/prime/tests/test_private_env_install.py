@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 # Test with a known private environment
-ENV_OWNER = "prime-cli-test"
-ENV_NAME = "private-reverse-text"
+ENV_OWNER = "primeintellect"
+ENV_NAME = "reverse-text-v1"
 
 
 # The prime CLI from the test environment; installs go into a throwaway venv so the
@@ -124,15 +124,17 @@ class TestPrivateEnvInstall:
 
         # Verify verifiers-style owner/name resolution without instantiating the env.
         # Instantiation can fetch external datasets, which makes this install test flaky.
+        # A v1 package exports its Taskset subclass via `__all__`.
         load_script = f"""
-import importlib
 import sys
 try:
+    import verifiers.v1 as vf
+
     for env_id in ('{ENV_NAME.replace("-", "_")}', '{ENV_OWNER}/{ENV_NAME}'):
-        module_name = env_id.replace('-', '_').split('/')[-1]
-        module = importlib.import_module(module_name)
-        if not callable(getattr(module, 'load_environment', None)):
-            raise RuntimeError(f"{{module_name}} has no callable load_environment")
+        module = vf.import_taskset(env_id)
+        exported = [getattr(module, name) for name in module.__all__]
+        if not any(isinstance(c, type) and issubclass(c, vf.Taskset) for c in exported):
+            raise RuntimeError(f"{{module.__name__}} exports no Taskset subclass")
     print("Successfully imported private environment loader")
     sys.exit(0)
 except ImportError as e:

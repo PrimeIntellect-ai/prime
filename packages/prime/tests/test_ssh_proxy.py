@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import typer
-from prime_cli.commands import sandbox
+from prime_cli.commands import sandbox, sandbox_ssh
 
 
 def test_ssh_proxy_sends_session_prefix_then_relays_bytes():
@@ -56,8 +56,9 @@ def test_ssh_command_authorizes_key_and_uses_session_proxy(monkeypatch, tmp_path
 
     monkeypatch.setattr(sandbox, "APIClient", lambda: object())
     monkeypatch.setattr(sandbox, "SandboxClient", lambda _api: client)
-    monkeypatch.setattr(sandbox.shutil, "which", lambda _command: "/usr/bin/tool")
-    monkeypatch.setattr(sandbox.tempfile, "mkdtemp", lambda **_kwargs: str(tmp_path))
+    # The ssh session setup lives in sandbox_ssh since the transport refactor.
+    monkeypatch.setattr(sandbox_ssh.shutil, "which", lambda _command: "/usr/bin/tool")
+    monkeypatch.setattr(sandbox_ssh.tempfile, "mkdtemp", lambda **_kwargs: str(tmp_path))
     monkeypatch.setattr(sandbox.subprocess, "run", run)
 
     with pytest.raises(typer.Exit) as exit_info:

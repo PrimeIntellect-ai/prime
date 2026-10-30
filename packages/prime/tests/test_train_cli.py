@@ -4,8 +4,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from prime_cli.core import APIError
 from prime_cli.main import app
 from typer.testing import CliRunner
+
+pytestmark = pytest.mark.usefixtures("stub_local_schema_validation")
 
 runner = CliRunner()
 
@@ -19,9 +22,12 @@ def test_train_help_promotes_config_run_path() -> None:
     assert "prime train [OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]..." in result.output
     assert "Launch and manage Hosted Training runs." in result.output
     assert "Path to a TOML config file to launch as a" in result.output
-    assert "Hosted Training run." in result.output
     assert "logs" in result.output
     assert "request" in result.output
+    # Retired with shared LoRA training: both only knew the LoRA schema.
+    assert not re.search(r"^│\s+(init|configs)\s", result.output, re.M)
+    # --fft is a deprecated no-op: still parsed, no longer advertised.
+    assert "--full-finetune" not in result.output
 
 
 def test_rl_alias_is_hidden_from_root_help() -> None:
@@ -32,107 +38,101 @@ def test_rl_alias_is_hidden_from_root_help() -> None:
     assert "Deprecated alias for `prime train`." not in result.output
 
 
-def test_rl_alias_still_works_with_deprecation_warning(tmp_path: Path) -> None:
-    output_path = tmp_path / "config.toml"
+def _mock_discovery(monkeypatch) -> None:
+    from prime_cli.api.training import AvailableFFTModelsResponse
 
-    result = runner.invoke(app, ["rl", "init", str(output_path)], env=TEST_ENV)
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.get_available_fft",
+        lambda self, team_id=None: AvailableFFTModelsResponse(models=[]),
+    )
+
+
+def test_rl_alias_still_works_with_deprecation_warning(monkeypatch) -> None:
+    _mock_discovery(monkeypatch)
+
+    result = runner.invoke(app, ["rl", "models"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert (
         "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead."
     ) in result.output
-    assert "Run with: prime train" in result.output
-    assert output_path.exists()
+    assert "No models available for Hosted Training." in result.output
 
 
-def test_rl_alias_warning_uses_stderr_for_json_output() -> None:
-    result = runner.invoke(app, ["rl", "configs", "--output", "json"], env=TEST_ENV)
+def test_rl_alias_warning_uses_stderr_for_json_output(monkeypatch) -> None:
+    _mock_discovery(monkeypatch)
+
+    result = runner.invoke(app, ["rl", "models", "--output", "json"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert (
         "[DEPRECATED] The 'rl' command is deprecated. Use 'prime train' instead."
     ) in result.stderr
     assert "[DEPRECATED]" not in result.stdout
-    data = json.loads(result.stdout)
-    assert "configs" in data
+    assert json.loads(result.stdout) == {"available_fft_models": []}
 
 
-def test_train_init_defaults_to_rl_toml() -> None:
-    with runner.isolated_filesystem():
-        result = runner.invoke(app, ["train", "init"], env=TEST_ENV)
+_LORA_CONFIG = """\
+model = "Qwen/Qwen3.5-0.8B"
+max_steps = 100
 
-        assert result.exit_code == 0, result.output
-        assert "Created rl.toml" in result.output
-        assert "Run with: prime train rl.toml" in result.output
-        assert "stop accepting new runs on" in result.output
-        assert "October 5, 2026" in result.output
-        assert "Hosted Training is transitioning to dedicated runs." in result.output
-        assert Path("rl.toml").exists()
-        assert "stop accepting new runs on October 5, 2026" in Path("rl.toml").read_text()
-        assert (
-            "# Hosted Training is transitioning to dedicated runs." in Path("rl.toml").read_text()
-        )
+[[env]]
+id = "primeintellect/reverse-text"
+"""
 
 
-def test_train_legacy_run_warns_before_confirmation_without_warning_fft(
-    monkeypatch, tmp_path: Path
-) -> None:
-    from prime_cli.commands import rl
-
-    legacy_config = tmp_path / "legacy.toml"
-    legacy_config.write_text(rl.generate_rl_config_template())
-    monkeypatch.setattr(rl, "APIClient", lambda: object())
-    monkeypatch.setattr(
-        rl, "RLClient", lambda _: type("Client", (), {"list_models": lambda self, team_id: []})()
-    )
-    monkeypatch.setattr(rl, "Config", lambda: type("Config", (), {"team_id": None})())
-    seen: list[str] = []
-
-    def cancel(_message: str, _yes: bool, *, default: bool) -> bool:
-        seen.append("confirm")
-        return False
-
-    monkeypatch.setattr(rl, "confirm_or_skip", cancel)
-    result = runner.invoke(app, ["train", str(legacy_config)], env=TEST_ENV)
-    assert result.exit_code == 0, result.output
-    assert "stop accepting new runs on" in result.output
-    assert "October 5, 2026" in result.output
-    assert "Hosted Training is transitioning to dedicated runs." in result.output
-    assert result.output.index("stop accepting new runs") < result.output.index("Configuration:")
-    assert seen == ["confirm"]
-
-    fft_config = tmp_path / "fft.toml"
-    fft_config.write_text(
-        '[model]\nname = "Qwen/Qwen3-0.6B"\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
-    )
-    monkeypatch.setattr(rl, "_dispatch_full_finetune_run", lambda **kwargs: None)
-    result = runner.invoke(app, ["train", str(fft_config)], env=TEST_ENV)
-    assert result.exit_code == 0, result.output
-    assert "stop accepting new runs" not in result.output
+def test_train_rejects_lora_config_without_dispatch(monkeypatch, tmp_path: Path) -> None:
+    """Shared LoRA no longer accepts runs, so a LoRA-shaped config fails
+    locally with a pointer to prime-rl configs instead of reaching the
+    dedicated endpoint and coming back as a validator 422."""
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    for body in (_LORA_CONFIG, 'model = "Qwen/Qwen3-0.6B"\n'):
+        cfg.write_text(body)
+        for args in ([], ["--fft"]):
+            result = runner.invoke(app, ["train", str(cfg), *args, "-y"], env=TEST_ENV)
+            assert result.exit_code == 1, (body, args)
+            assert "shared LoRA training config" in result.output
+            assert "prime-rl" in result.output
+    assert captured == []
 
 
-def test_train_legacy_json_warning_uses_stderr(monkeypatch, tmp_path: Path) -> None:
-    from prime_cli.commands import rl
+def test_train_rl_config_dispatches_without_deployment_block(monkeypatch, tmp_path: Path) -> None:
+    """The same prime-rl config runs locally and hosted: an unset
+    [deployment] falls through to prime-rl's own default sizing, with or
+    without the now no-op --fft flag."""
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text('max_steps = 20\n\n[model]\nname = "Qwen/Qwen3-0.6B"\n\n[orchestrator]\n')
+    for args in ([], ["--fft"], ["--full-finetune"]):
+        result = runner.invoke(app, ["train", str(cfg), *args, "-y", "-o", "json"], env=TEST_ENV)
+        assert result.exit_code == 0, (args, result.output)
+        assert json.loads(result.output)["run"]["runId"] == "r1"
+    assert len(captured) == 3
+    assert all("deployment" not in p["config"] for p in captured)
+    assert all(p.get("mode") in (None, "rl") for p in captured)
 
-    config = tmp_path / "legacy.toml"
-    config.write_text(rl.generate_rl_config_template())
-    monkeypatch.setattr(rl, "APIClient", lambda: object())
-    monkeypatch.setattr(
-        rl, "RLClient", lambda _: type("Client", (), {"list_models": lambda self, team_id: []})()
-    )
-    monkeypatch.setattr(rl, "Config", lambda: type("Config", (), {"team_id": None})())
-    monkeypatch.setattr(rl, "confirm_or_skip", lambda *args, **kwargs: False)
-    result = runner.invoke(app, ["train", str(config), "--output", "json"], env=TEST_ENV)
-    assert result.exit_code == 0, result.output
-    assert "stop accepting new runs on October 5, 2026" in result.stderr
-    assert "Hosted Training is transitioning to dedicated runs." in result.stderr
-    assert "stop accepting new runs" not in result.stdout
+
+def test_train_reports_missing_and_invalid_config(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+
+    result = runner.invoke(app, ["train", str(tmp_path / "nope.toml"), "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "Config file not found" in result.output
+
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text("[model\n")
+    result = runner.invoke(app, ["train", str(cfg), "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "Invalid TOML" in result.output
+    assert captured == []
 
 
 def test_train_request_submits_model_request(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
         return {"message": "Request submitted"}
@@ -168,6 +168,39 @@ def _fake_run_payload(status: str, run_id: str = "run-1") -> dict[str, Any]:
         "createdAt": "2026-08-25T00:00:00Z",
         "updatedAt": "2026-08-25T00:00:00Z",
     }
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("│┃").split("│" if "│" in line else "┃")]
+
+
+def test_train_list_shows_gpu_count(monkeypatch) -> None:
+    runs = [
+        {**_fake_run_payload("RUNNING", run_id="run-gpu"), "gpuCount": 16},
+        _fake_run_payload("COMPLETED", run_id="run-legacy"),
+    ]
+
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        return {"runs": runs, "total": len(runs)}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+
+    result = runner.invoke(
+        app,
+        ["train", "list"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    header = next(cells for line in lines if (cells := _table_cells(line))[:1] == ["ID"])
+    gpus = {
+        cells[0]: cells[header.index("GPUs")]
+        for line in lines
+        if (cells := _table_cells(line))[:1] and cells[0].startswith("run-")
+    }
+    assert gpus == {"run-gpu": "16", "run-legacy": "-"}
 
 
 def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:
@@ -316,6 +349,85 @@ def test_train_stop_survives_any_poll_api_error(monkeypatch) -> None:
     assert "Error:" not in result.output
 
 
+PAUSE_CONFLICT = "Run run-1 cannot pause: its image predates pause support."
+
+
+@pytest.mark.parametrize(
+    ("response", "exit_code", "expected_output"),
+    [
+        ({"runId": "run-1", "status": "PAUSING"}, 0, "Status: PAUSING"),
+        (APIError(f"HTTP 409: {PAUSE_CONFLICT}"), 1, f"Error: {PAUSE_CONFLICT}"),
+    ],
+)
+def test_train_pause(monkeypatch, response, exit_code, expected_output) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint))
+        if isinstance(response, APIError):
+            raise response
+        return response
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        ["train", "pause", "run-1", "--force"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == exit_code, result.output
+    assert expected_output in result.output
+    assert calls == [("POST", "/training/runs/run-1/pause")]
+
+
+RESUME_CONFLICT = "Run run-1 is RUNNING; only a PAUSED run can be resumed."
+
+
+@pytest.mark.parametrize(
+    ("response", "exit_code", "expected_output"),
+    [
+        ({"runId": "run-2", "tokenValue": "t"}, 0, "Dispatched hosted run run-2"),
+        (APIError(f"HTTP 409: {RESUME_CONFLICT}"), 1, f"Error: {RESUME_CONFLICT}"),
+    ],
+)
+def test_train_resume(monkeypatch, response, exit_code, expected_output) -> None:
+    calls: list[tuple[str, str, Any]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint, json))
+        if isinstance(response, APIError):
+            raise response
+        return response
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+
+    result = runner.invoke(
+        app,
+        [
+            "train",
+            "resume",
+            "run-1",
+            "-e",
+            "WANDB_API_KEY=wandb-key",
+            "--gpu-type",
+            "B200_180GB",
+            "-y",
+        ],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == exit_code, result.output
+    assert expected_output in result.output
+    assert calls == [
+        (
+            "POST",
+            "/training/runs/run-1/resume",
+            {"gpuType": "B200_180GB", "wandbApiKey": "wandb-key"},
+        )
+    ]
+
+
 _FFT_BODY = (
     '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
 )
@@ -393,6 +505,55 @@ def _run_volume(tmp_path: Path, *extra: str, toml_extra: str = ""):
         "[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n"
     )
     return runner.invoke(app, ["train", str(cfg), "--volume", "ckpts", "-y", *extra], env=TEST_ENV)
+
+
+def test_train_resume_from_never_creates_a_volume(monkeypatch, tmp_path: Path) -> None:
+    creates, dispatched = _mock_volumes(monkeypatch, [])
+
+    result = _run_volume(tmp_path, "--resume-from", "paused-1", "-o", "json")
+
+    assert result.exit_code == 0, result.output
+    assert creates == []
+    assert [(p["resumeFrom"], p["volume"]) for p in dispatched] == [("paused-1", "ckpts")]
+
+
+@pytest.mark.parametrize("resume_from", ["", "  "])
+def test_train_resume_from_rejects_an_empty_id(monkeypatch, tmp_path: Path, resume_from) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app, ["train", str(cfg), "--resume-from", resume_from, "-y"], env=TEST_ENV
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "--resume-from needs the ID of a PAUSED run" in result.output
+    assert captured == []
+
+
+def test_train_resume_from_a_pausing_run_shows_the_detail(monkeypatch, tmp_path: Path) -> None:
+    detail = "Run paused-1 is PAUSING; only a paused run can be resumed."
+
+    def create_run(self, payload):
+        raise APIError(f"HTTP 400: {detail}")
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", create_run)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+
+    result = runner.invoke(
+        app,
+        ["train", str(cfg), "--resume-from", "paused-1", "-y"],
+        env={**TEST_ENV, "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.output.splitlines() == [
+        "✓ Run config validation succeeded",
+        f"Error: {detail}",
+        "Tip: a run resumes once `prime train get paused-1` shows PAUSED",
+    ]
 
 
 def test_train_volume_exists_does_not_create(monkeypatch, tmp_path: Path) -> None:
@@ -499,7 +660,7 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
         seen.append(pr_number)
         return sha
 
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
+    monkeypatch.setattr("prime_cli.commands.rl.resolve_pull_request_head", fake_resolve)
     cfg = tmp_path / "rl.toml"
     cfg.write_text(_FFT_BODY)
     result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y", "-o", "json"], env=TEST_ENV)
@@ -520,13 +681,13 @@ def test_train_pr_flag_resolves_head_sha_and_conflicts_with_ref(
     def never(pr_number: int) -> str:
         raise AssertionError("resolved a PR for a dispatch that fails locally")
 
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", never)
+    monkeypatch.setattr("prime_cli.commands.rl.resolve_pull_request_head", never)
     result = runner.invoke(
         app, ["train", str(cfg), "--pr", "42", "-e", "FOO=bar", "-y"], env=TEST_ENV
     )
     assert result.exit_code == 1
     assert "secret(s): FOO" in result.output
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", fake_resolve)
+    monkeypatch.setattr("prime_cli.commands.rl.resolve_pull_request_head", fake_resolve)
 
     result = runner.invoke(
         app, ["train", str(cfg), "--pr", "42", "--ref", "main", "-y"], env=TEST_ENV
@@ -598,30 +759,12 @@ def test_source_ref_check_keeps_valid_git_refs() -> None:
         assert _source_ref_error(ok) is None, ok
 
 
-def test_train_source_overlay_is_rejected_on_the_lora_path(monkeypatch, tmp_path: Path) -> None:
-    def never(pr_number: int) -> str:
-        raise AssertionError("the LoRA path must not resolve a PR")
-
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", never)
-    lora = '[model]\nname = "Qwen/Qwen3-0.6B"\n'
-    cfg = tmp_path / "rl.toml"
-    for body, args in (
-        (lora, ["--ref", "feat/x"]),
-        (lora, ["--pr", "42"]),
-        ('source_ref = "feat/x"\n' + lora, []),
-    ):
-        cfg.write_text(body)
-        result = runner.invoke(app, ["train", str(cfg), *args, "-y"], env=TEST_ENV)
-        assert result.exit_code == 1, args
-        assert "--ref / --pr" in result.output and "full-FT" in result.output, args
-
-
 def test_train_source_overlay_reaches_the_sft_payload(monkeypatch, tmp_path: Path) -> None:
     # SFT shares the dedicated-run dispatch with full-FT, so --ref / --pr
     # are forwarded there too (never silently dropped).
     captured = _capture_fft_dispatch(monkeypatch)
     sha = "0123456789abcdef0123456789abcdef01234567"
-    monkeypatch.setattr("prime_cli.api.training.resolve_pull_request_head", lambda pr_number: sha)
+    monkeypatch.setattr("prime_cli.commands.rl.resolve_pull_request_head", lambda pr_number: sha)
     cfg = tmp_path / "sft.toml"
     sft = '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[data]\nname = "/volume/datasets/x"\n'
     cfg.write_text(sft)
@@ -847,7 +990,7 @@ _BILLED_RESPONSE = {
 def _mock_run_post(monkeypatch, response: dict[str, Any]) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
-    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None) -> dict:
+    def mock_post(self: Any, endpoint: str, json: dict[str, Any] | None = None, **_: Any) -> dict:
         captured["endpoint"] = endpoint
         captured["json"] = json
         return response
@@ -973,3 +1116,23 @@ def test_train_fft_billed_zero_rate_is_visible(monkeypatch, tmp_path: Path) -> N
     assert result.exit_code == 0, result.output
     assert "$0.00/GPU-hr" in result.output
     assert "~$0.00/hr" in result.output
+
+
+def test_create_run_waits_out_a_cold_validator():
+    """POST /training/runs validates through the rl-validator, which can take
+    its full 60s when cold (ENG-6696); the 30s client default gave up first."""
+    from unittest.mock import MagicMock
+
+    from prime_cli.api.training import CREATE_RUN_TIMEOUT, HostedTrainingClient
+
+    api = MagicMock()
+    api.post.return_value = {"id": "r1"}
+    try:
+        HostedTrainingClient(api).create_run({"x": 1})
+    except Exception:
+        pass  # response model shape is not what's under test
+    assert api.post.call_args.args == ("/training/runs",)
+    timeout = api.post.call_args.kwargs["timeout"]
+    assert timeout is CREATE_RUN_TIMEOUT
+    # The read wait outlasts the validator; connecting still fails fast.
+    assert timeout.read > 60 and timeout.connect == 10.0

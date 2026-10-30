@@ -35,14 +35,10 @@ uv tool install prime
 # Authenticate
 prime login
 
-# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
-prime lab setup
-
 # See available Hosted Training models, capacity, and pricing
 prime train models
 
-# Generate and launch a Hosted Training config
-prime train init
+# Launch a prime-rl config as a Hosted Training run
 prime train rl.toml
 
 # Browse verified environments
@@ -54,7 +50,6 @@ prime availability list
 
 ## Features
 
-- **Lab Workspaces** - Set up local verifiers workspaces for environments, evals, GEPA, and training
 - **Hosted Training** - Train models against verifiers environments and inspect runs, logs, metrics, and checkpoints
 - **Environments** - Access hundreds of verified environments on our community hub
 - **Evaluations** - Run hosted evaluations and push and manage results
@@ -146,21 +141,15 @@ prime env install <environment-name>
 prime env push my-environment
 ```
 
-### Lab and Hosted Training
+### Hosted Training
 
-Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+Build and evaluate environments with [verifiers](https://github.com/PrimeIntellect-ai/verifiers) (`uv add verifiers`). Use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
 
 ```bash
-# Set up a Lab workspace
-prime lab setup
-
-# List trainable models, capacity, and token pricing
+# List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Generate a Hosted Training config
-prime train init
-
-# Launch the run from the generated config
+# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs

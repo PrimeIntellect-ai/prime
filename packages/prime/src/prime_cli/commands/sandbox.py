@@ -1,20 +1,14 @@
 import json
-import os
 import random
 import shlex
-import shutil
 import string
 import subprocess
-import sys
-import tempfile
 import time
 from datetime import datetime, timedelta
 from inspect import signature
 from typing import Any, Dict, List, Optional
 
 import typer
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from prime_sandboxes import (
     APIClient,
     APIError,
@@ -23,6 +17,9 @@ from prime_sandboxes import (
     Config,
     CreateSandboxRequest,
     EgressPolicyStatus,
+    LanNetwork,
+    LanRule,
+    LocalhostForward,
     PaymentRequiredError,
     Sandbox,
     SandboxCheckpoint,
@@ -30,12 +27,14 @@ from prime_sandboxes import (
     SandboxNotRunningError,
     StartCommand,
     UnauthorizedError,
+    VolumeMount,
 )
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
 from ..utils import (
+    DefaultCommandGroup,
     PlainTyper,
     build_table,
     confirm_or_skip,
@@ -54,6 +53,9 @@ from ..utils import (
 from ..utils.display import SANDBOX_STATUS_COLORS
 from ..utils.plain import _PlainTyperCommand
 from ..utils.time_utils import now_utc, to_utc
+from .sandbox_ssh import ssh_transport
+from .sandbox_volumes import app as sandbox_volumes_app
+from .sandbox_volumes import parse_volume_mount_specs
 
 app = PlainTyper(help="Manage sandboxes", no_args_is_help=True)
 console = get_console()
@@ -467,8 +469,264 @@ def get(
         raise typer.Exit(1)
 
 
+class _NetworkGroup(DefaultCommandGroup):
+    """``network SANDBOX_ID [--allow|--deny]`` keeps meaning ``network egress``."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, default_cmd_name="egress", **kwargs)
+
+
+network_app = PlainTyper(
+    cls=_NetworkGroup,
+    help="Manage sandbox egress rules and private LAN networks between VM sandboxes",
+    no_args_is_help=True,
+)
+app.add_typer(network_app, name="network")
+
+
+def _parse_lan_rule(raw: str) -> LanRule:
+    """Parse ``FROM->TO[@PORT,PORT]``, e.g. ``tag:web->tag:db@5432`` or ``*->*``."""
+    head, sep, ports = raw.partition("@")
+    src, arrow, dst = head.partition("->")
+    if not arrow or not src.strip() or not dst.strip():
+        raise ValueError(f"invalid rule {raw!r}: expected FROM->TO[@PORT,...]")
+    if sep and not ports.strip():
+        raise ValueError(f"invalid rule {raw!r}: '@' needs at least one port")
+    try:
+        port_list = [int(p) for p in ports.split(",")] if sep else None
+    except ValueError as exc:
+        raise ValueError(f"invalid ports in rule {raw!r}") from exc
+    return LanRule(from_=src.strip(), to=dst.strip(), ports=port_list)
+
+
+def _lan_rule_text(rule: LanRule) -> str:
+    ports = "@" + ",".join(str(p) for p in rule.ports) if rule.ports else ""
+    return f"{rule.from_}->{rule.to}{ports}"
+
+
+def _print_lan_network(network: LanNetwork, output: str) -> None:
+    if output == "json":
+        output_data_as_json(network.model_dump(mode="json", by_alias=True), console)
+        return
+    console.print(f"Network: [cyan]{escape(network.id)}[/cyan] ({escape(network.name)})")
+    console.print(f"Rules: {escape(', '.join(_lan_rule_text(r) for r in network.rules) or 'none')}")
+    if not network.synced:
+        console.print("[yellow]⚠ Not synced to the VM fleet yet. Retrying automatically.[/yellow]")
+    if network.members is None:
+        return
+    if not network.members:
+        console.print("No members.")
+        return
+    table = build_table(
+        "Members",
+        [("Sandbox", "cyan"), ("Address", "white"), ("Tags", "white"), ("Synced", "white")],
+    )
+    for m in network.members:
+        table.add_row(
+            escape(m.sandbox_id),
+            f"{escape(m.sandbox_id)}.sandbox.internal",
+            escape(", ".join(m.tags)),
+            "yes" if m.synced else "no",
+        )
+    console.print(table)
+
+
+def _lan_error(exc: Exception) -> None:
+    console.print(f"[red]Error:[/red] {escape(str(exc))}")
+    raise typer.Exit(1) from exc
+
+
+@network_app.command("create", no_args_is_help=True)
+def lan_create(
+    name: str,
+    team_id: Optional[str] = typer.Option(None, "--team-id", help="Create the network for a team"),
+    rule: Optional[List[str]] = typer.Option(
+        None,
+        "--rule",
+        "-r",
+        help="Allow rule FROM->TO[@PORT,...] with selectors '*' or 'tag:NAME', "
+        "e.g. 'tag:web->tag:db@5432', in force before any member joins. Repeatable.",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Create a network. Without --rule, it starts with the platform's default rules:
+    none, so no member reaches another (older platforms let every member reach every
+    other)."""
+    validate_output_format(output, console)
+    try:
+        rules = [_parse_lan_rule(r) for r in rule] if rule else None
+        network = SandboxClient(APIClient()).create_lan_network(name, team_id, rules=rules)
+        _print_lan_network(network, output)
+    except (ValueError, APIError) as exc:
+        _lan_error(exc)
+
+
+@network_app.command("list")
+def lan_list(
+    team_id: Optional[str] = typer.Option(None, "--team-id", help="List a team's networks"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List your LAN networks."""
+    validate_output_format(output, console)
+    try:
+        networks = SandboxClient(APIClient()).list_lan_networks(team_id)
+    except APIError as exc:
+        _lan_error(exc)
+    if output == "json":
+        output_data_as_json(
+            {"networks": [n.model_dump(mode="json", by_alias=True) for n in networks]}, console
+        )
+        return
+    if not networks:
+        console.print("No LAN networks found.")
+        return
+    table = build_table(
+        "LAN networks", [("ID", "cyan"), ("Name", "white"), ("Rules", "white"), ("Age", "white")]
+    )
+    for n in networks:
+        table.add_row(
+            escape(n.id),
+            escape(n.name),
+            escape(", ".join(_lan_rule_text(r) for r in n.rules)),
+            human_age(n.created_at),
+        )
+    console.print(table)
+
+
+@network_app.command("get", no_args_is_help=True)
+def lan_get(
+    network_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show a network with its rules and members."""
+    validate_output_format(output, console)
+    try:
+        _print_lan_network(SandboxClient(APIClient()).get_lan_network(network_id), output)
+    except APIError as exc:
+        _lan_error(exc)
+
+
+@network_app.command("delete", no_args_is_help=True)
+def lan_delete(
+    network_id: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Delete a network; its members stop reaching each other through it."""
+    if not confirm_or_skip(f"Delete LAN network {network_id}?", yes):
+        raise typer.Exit(0)
+    try:
+        SandboxClient(APIClient()).delete_lan_network(network_id)
+    except APIError as exc:
+        _lan_error(exc)
+    console.print(f"Deleted LAN network {escape(network_id)}")
+
+
+@network_app.command("add", no_args_is_help=True)
+def lan_add(
+    network_id: str,
+    sandbox_id: str,
+    tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Member tag (repeatable)"),
+) -> None:
+    """Add a running VM sandbox to a network, or replace its tags."""
+    try:
+        member = SandboxClient(APIClient()).add_lan_member(network_id, sandbox_id, tag)
+    except APIError as exc:
+        _lan_error(exc)
+    console.print(
+        f"Added {escape(member.sandbox_id)} as {escape(member.sandbox_id)}.sandbox.internal"
+        + (f" with tags {escape(', '.join(member.tags))}" if member.tags else "")
+    )
+
+
+@network_app.command("remove", no_args_is_help=True)
+def lan_remove(network_id: str, sandbox_id: str) -> None:
+    """Remove a sandbox from a network."""
+    try:
+        SandboxClient(APIClient()).remove_lan_member(network_id, sandbox_id)
+    except APIError as exc:
+        _lan_error(exc)
+    console.print(f"Removed {escape(sandbox_id)} from {escape(network_id)}")
+
+
+@network_app.command("rules", no_args_is_help=True)
+def lan_rules(
+    network_id: str,
+    rule: List[str] = typer.Option(
+        ...,
+        "--rule",
+        "-r",
+        help="Allow rule FROM->TO[@PORT,...] with selectors '*' or 'tag:NAME', "
+        "e.g. 'tag:web->tag:db@5432'. FROM 'internet' exposes the listed ports "
+        "at https://<port>-<sandbox-id>.<gateway domain>, e.g. "
+        "'internet->tag:web@8080'. Repeatable; replaces all rules.",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Replace a network's rules. Rules are directed and allow-only."""
+    validate_output_format(output, console)
+    try:
+        rules = [_parse_lan_rule(r) for r in rule]
+        _print_lan_network(SandboxClient(APIClient()).set_lan_rules(network_id, rules), output)
+    except (ValueError, APIError) as exc:
+        _lan_error(exc)
+
+
+def _parse_localhost_forward(raw: str) -> LocalhostForward:
+    """Parse ``PORT:PEER_SANDBOX_ID``, e.g. ``5432:sbx-db``."""
+    port, sep, peer = raw.partition(":")
+    if not sep or not port.strip().isdigit() or not peer.strip():
+        raise ValueError(f"invalid forward {raw!r}: expected PORT:PEER_SANDBOX_ID")
+    if not 1 <= int(port) <= 65535:
+        raise ValueError(f"invalid forward {raw!r}: port must be 1-65535")
+    return LocalhostForward(port=int(port), sandbox_id=peer.strip())
+
+
+def _print_localhost_forwards(forwards: List[LocalhostForward], output: str) -> None:
+    if output == "json":
+        output_data_as_json({"forwards": [f.model_dump() for f in forwards]}, console)
+        return
+    if not forwards:
+        console.print("No localhost forwards.")
+    for f in forwards:
+        console.print(f"localhost:{f.port} -> {escape(f.sandbox_id)}.sandbox.internal:{f.port}")
+
+
+@network_app.command("localhost", no_args_is_help=True)
+def localhost_forwards(
+    sandbox_id: str,
+    forward: Optional[List[str]] = typer.Argument(
+        None,
+        help="PORT:PEER_SANDBOX_ID, e.g. 5432:sbx-db makes localhost:5432 reach "
+        "sbx-db's port 5432. Replaces all forwards.",
+        show_default=False,
+    ),
+    clear: bool = typer.Option(False, "--clear", help="Remove all localhost forwards"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show or replace the localhost forwards of a VM sandbox. Each forward makes the
+    sandbox's own 127.0.0.1:PORT and [::1]:PORT reach PEER.sandbox.internal:PORT. The
+    peer must share a LAN network whose rules allow PORT, or connections are reset."""
+    validate_output_format(output, console)
+    try:
+        if clear and forward:
+            raise ValueError("provide forwards or --clear, not both")
+        client = SandboxClient(APIClient())
+        if clear or forward:
+            forwards = [_parse_localhost_forward(f) for f in forward or []]
+            ports = [f.port for f in forwards]
+            if len(ports) != len(set(ports)):
+                raise ValueError("each port can be forwarded only once")
+            current = client.set_localhost_forwards(sandbox_id, forwards)
+        else:
+            current = client.get_localhost_forwards(sandbox_id)
+        _print_localhost_forwards(current, output)
+    except (ValueError, APIError) as exc:
+        _lan_error(exc)
+
+
 checkpoint_app = PlainTyper(help="Manage filesystem checkpoints", no_args_is_help=True)
 app.add_typer(checkpoint_app, name="checkpoint")
+app.add_typer(sandbox_volumes_app, name="volumes")
 
 
 def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
@@ -529,6 +787,9 @@ def checkpoint_list(
             ("Parent", "white"),
             ("State", "white"),
             ("Depth", "white"),
+            # Size is the quota measure (occupied bytes); Stored is the
+            # compressed billing metric — they differ by design.
+            ("Size", "white"),
             ("Stored", "white"),
             ("Age", "white"),
             ("Error", "red"),
@@ -540,11 +801,36 @@ def checkpoint_list(
             escape(c.parent_id or "-"),
             escape(c.state),
             str(c.depth),
+            f"{c.occupied_bytes / 1024**2:.1f} MiB",
             f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
             human_age(c.created_at),
             escape(c.error or ""),
         )
     console.print(table)
+
+
+@checkpoint_app.command("get")
+def checkpoint_get(
+    checkpoint_id: str,
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show one checkpoint's state by ID, rootfs or volume."""
+    validate_output_format(output, console)
+    try:
+        checkpoint = SandboxClient(APIClient()).get_checkpoint(checkpoint_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    if output == "json":
+        output_data_as_json(checkpoint.model_dump(mode="json"), console)
+        return
+    # Neutral output: a checkpoint fetched by id may be a volume checkpoint,
+    # which is never restorable as a sandbox rootfs, so no restorable hint.
+    console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
+    console.print(f"State: {escape(checkpoint.state)}")
+    console.print(f"Size: {checkpoint.occupied_bytes / 1024**2:.1f} MiB")
+    if checkpoint.error:
+        console.print(f"Error: {escape(checkpoint.error)}")
 
 
 @checkpoint_app.command("delete", no_args_is_help=True)
@@ -721,6 +1007,9 @@ def create(
     memory_gb: float = typer.Option(1.0, help="Memory in GB"),
     disk_size_gb: float = typer.Option(5.0, help="Disk size in GB"),
     gpu_count: int = typer.Option(0, help="Number of GPUs"),
+    arch: str = typer.Option(
+        "amd64", "--arch", help="VM architecture: amd64, arm64, or arm (alias)"
+    ),
     gpu_type: Optional[str] = typer.Option(
         None,
         "--gpu-type",
@@ -734,15 +1023,17 @@ def create(
         "--network-allow",
         help=(
             "Repeatable. Allow egress only to these domains/IPv4 CIDRs "
-            "(hostname-aware). Mutually exclusive with --network-deny."
+            "(hostname-aware), optionally with :port or :low-high (domains: 80 or 443). "
+            "Mutually exclusive with --network-deny."
         ),
     ),
     network_deny: Optional[List[str]] = typer.Option(
         None,
         "--network-deny",
         help=(
-            "Repeatable. Deny egress to these domains/IPv4 CIDRs and "
-            "allow everything else. Mutually exclusive with --network-allow."
+            "Repeatable. Deny egress to these domains/IPv4 CIDRs, optionally with "
+            ":port or :low-high (domains: 80 or 443), and allow everything else. "
+            "Mutually exclusive with --network-allow."
         ),
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
@@ -776,6 +1067,11 @@ def create(
         "-l",
         help="Labels/tags for the sandbox. Can be specified multiple times.",
     ),
+    volume: Optional[List[str]] = typer.Option(
+        None,
+        "--volume",
+        help="Attach a volume as NAME:/mount/path[:ro]. Can be specified multiple times.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Create a new sandbox"""
@@ -801,6 +1097,10 @@ def create(
                 key, value = secret_var.split("=", 1)
                 secrets_vars[key] = value
 
+        volume_mounts: List[VolumeMount] = []
+        if volume:
+            volume_mounts = parse_volume_mount_specs(volume)
+
         # VM is the only runtime. The hidden --vm flag stays accepted for
         # compatibility, and the resolved value is always sent so the created
         # runtime never depends on server-side defaults changing underneath a
@@ -812,6 +1112,12 @@ def create(
                 "[red]GPU type is required when requesting GPUs.[/red] "
                 "Provide --gpu-type with --gpu-count > 0."
             )
+            raise typer.Exit(1)
+
+        if arch == "arm":
+            arch = "arm64"
+        if arch not in ("amd64", "arm64"):
+            console.print("[red]Error: --arch must be amd64, arm64, or arm[/red]")
             raise typer.Exit(1)
 
         if gpu_count == 0 and gpu_type:
@@ -882,6 +1188,7 @@ def create(
         request = CreateSandboxRequest(
             name=name,
             docker_image=docker_image,
+            arch="arm64" if arch == "arm64" else "amd64",
             start_command=resolved_start_command,
             cpu_cores=cpu_cores,
             memory_gb=memory_gb,
@@ -896,6 +1203,7 @@ def create(
             labels=labels if labels else [],
             team_id=team_id,
             region=region,
+            volumes=volume_mounts if volume_mounts else None,
             **request_kwargs,
         )
 
@@ -903,6 +1211,7 @@ def create(
         console.print("\n[bold]Sandbox Configuration:[/bold]")
         console.print(f"Name: {name}")
         console.print(f"Docker Image: {docker_image}")
+        console.print(f"Architecture: {arch}")
         console.print(f"Start Command: {_format_start_command(resolved_start_command)}")
         console.print(f"Resources: {cpu_cores} CPU, {memory_gb}GB RAM, {disk_size_gb}GB disk")
         runtime_label = "VM (default)" if runtime_defaulted else "VM"
@@ -924,6 +1233,11 @@ def create(
             console.print(f"Idle Timeout: {idle_timeout_minutes} minutes")
         console.print(f"Team: {team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")
+        if volume_mounts:
+            mounts_summary = ", ".join(
+                f"{m.name}:{m.mount_path}" + (" (ro)" if m.read_only else "") for m in volume_mounts
+            )
+            console.print(f"Volumes: {mounts_summary}")
         if labels:
             console.print(f"Labels: {', '.join(labels)}")
         if env_vars:
@@ -1269,7 +1583,7 @@ def delete(
         raise typer.Exit(1)
 
 
-@app.command("network", no_args_is_help=True)
+@network_app.command("egress", no_args_is_help=True)
 def network(
     sandbox_id: str,
     allow: Optional[str] = typer.Option(
@@ -1277,7 +1591,8 @@ def network(
         "--allow",
         help=(
             "Replace the allowed destinations with a comma-separated list of "
-            "domains/IPv4 CIDRs. Use '*' to allow all."
+            "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
+            "Use '*' to allow all."
         ),
     ),
     deny: Optional[str] = typer.Option(
@@ -1285,11 +1600,12 @@ def network(
         "--deny",
         help=(
             "Replace the denied destinations with a comma-separated list of "
-            "domains/IPv4 CIDRs. Use '*' to deny all."
+            "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
+            "Use '*' to deny all."
         ),
     ),
 ) -> None:
-    """Show or replace the network access rules of a VM sandbox."""
+    """Show or replace the egress rules of a VM sandbox (default subcommand)."""
     selections = [allow is not None, deny is not None]
     if sum(selections) > 1:
         console.print("[red]Error:[/red] provide at most one of --allow or --deny")
@@ -1370,6 +1686,34 @@ def _print_network_status(
 
     label, value = _network_policy_summary(status)
     console.print(f"  [cyan]{label}:[/cyan] {escape(value)}")
+
+
+def _request_pause_or_resume(sandbox_id: str, resume: bool) -> None:
+    """Send a pause or resume request and report the accepted transition."""
+    try:
+        client = SandboxClient(APIClient())
+        sandbox = client.resume(sandbox_id) if resume else client.pause(sandbox_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    target = "RUNNING" if resume else "PAUSED"
+    console.print(
+        f"{'Resume' if resume else 'Pause'} requested for [cyan]{escape(sandbox_id)}[/cyan] "
+        f"(status {escape(sandbox.status)}); it becomes {target} once the node finishes. "
+        f"Check with 'prime sandbox get {escape(sandbox_id)}'."
+    )
+
+
+@app.command(no_args_is_help=True)
+def pause(sandbox_id: str) -> None:
+    """Pause a running VM sandbox, keeping its memory and disk on its node."""
+    _request_pause_or_resume(sandbox_id, resume=False)
+
+
+@app.command(no_args_is_help=True)
+def resume(sandbox_id: str) -> None:
+    """Resume a paused VM sandbox on the node that holds it."""
+    _request_pause_or_resume(sandbox_id, resume=True)
 
 
 @app.command(no_args_is_help=True)
@@ -1680,83 +2024,33 @@ def ssh_connect(
     shell: Optional[str] = typer.Option(None, "--shell", "-s", help="Remote shell to run"),
 ) -> None:
     """Connect to a VM sandbox with an ephemeral SSH key."""
-    session_id: Optional[str] = None
-    sandbox_client: Optional[SandboxClient] = None
-    temp_dir: Optional[str] = None
-
     try:
-        if not shutil.which("ssh"):
-            console.print("[red]Error:[/red] OpenSSH is required.")
-            raise typer.Exit(1)
-
         sandbox_client = SandboxClient(APIClient())
-        sandbox = sandbox_client.get(sandbox_id)
-        if sandbox.status != "RUNNING":
-            console.print(f"[red]Error:[/red] Sandbox is not running (status: {sandbox.status})")
-            raise typer.Exit(1)
-
-        temp_dir = tempfile.mkdtemp(prefix="prime-ssh-")
-        key_path = os.path.join(temp_dir, "id_ed25519")
-        private_key = Ed25519PrivateKey.generate()
-        key_fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(key_fd, "wb") as key_file:
-            key_file.write(
-                private_key.private_bytes(
-                    serialization.Encoding.PEM,
-                    serialization.PrivateFormat.OpenSSH,
-                    serialization.NoEncryption(),
-                )
-            )
-        public_key = (
-            private_key.public_key()
-            .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
-            .decode()
-        )
-
-        session = sandbox_client.create_ssh_session(sandbox_id, public_key)
-        session_id = session.session_id
-        proxy = shlex.join(
-            [
-                sys.executable,
-                "-m",
-                "prime_cli.ssh_proxy",
-                session.host,
-                str(session.port),
-                session.session_id,
+        with ssh_transport(sandbox_client, sandbox_id) as transport:
+            command = [
+                "ssh",
+                f"{transport.user}@{transport.host}",
+                "-p",
+                str(transport.port),
+                "-i",
+                transport.key_path,
+                "-o",
+                f"ProxyCommand={transport.proxy_command}",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
             ]
-        )
-        command = [
-            "ssh",
-            f"{session.session_id}@{session.host}",
-            "-p",
-            str(session.port),
-            "-i",
-            key_path,
-            "-o",
-            f"ProxyCommand={proxy}",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-        ]
-        if shell:
-            command.append("-t")
-        if ssh_args:
-            command.extend(ssh_args)
-        if shell:
-            command.append(shell)
+            if shell:
+                command.append("-t")
+            if ssh_args:
+                command.extend(ssh_args)
+            if shell:
+                command.append(shell)
 
-        raise typer.Exit(subprocess.run(command).returncode)
+            raise typer.Exit(subprocess.run(command).returncode)
     except KeyboardInterrupt:
         raise typer.Exit(130)
     except APIError as error:
         console.print(f"[red]Error:[/red] {error}")
         raise typer.Exit(1)
-    finally:
-        if session_id and sandbox_client:
-            try:
-                sandbox_client.close_ssh_session(sandbox_id, session_id)
-            except Exception:
-                pass
-        if temp_dir:
-            shutil.rmtree(temp_dir, ignore_errors=True)

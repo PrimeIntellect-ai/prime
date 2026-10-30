@@ -21,18 +21,24 @@ class SandboxStatus(str, Enum):
     TIMEOUT = "TIMEOUT"
 
 
-MAX_EGRESS_POLICY_ENTRIES = 256
+MAX_EGRESS_POLICY_ENTRIES = 1024
+
+# Domain entries are matched by HTTP Host or TLS SNI, read only on these ports.
+DOMAIN_RULE_PORTS = (80, 443)
 
 
 def _validate_egress_entry(entry: str) -> None:
     """Client-side mirror of the API's egress entry contract.
 
     Accepts an exact hostname, a leftmost-label ``*.`` wildcard, an IPv4
-    address, or an IPv4 CIDR. Schemes, credentials, ports, paths, query
-    strings, bare ``*``, IPv6, and wildcards in other positions are rejected.
-    The server canonicalizes entries further (lowercase, IDNA, /32).
+    address, or an IPv4 CIDR, optionally followed by ``:port`` or
+    ``:low-high``; domains accept only ports 80 and 443. Schemes, credentials,
+    paths, query strings, bare ``*``, IPv6, and wildcards in other positions
+    are rejected. The server canonicalizes entries further (lowercase, IDNA,
+    /32) and rejects ports until the platform enables them.
     """
     import ipaddress
+    import re
 
     value = entry.strip()
     if not value:
@@ -47,6 +53,22 @@ def _validate_egress_entry(entry: str) -> None:
             raise ValueError(f"'{entry}': IPv6 is not supported")
         return
 
+    host, separator, ports = value.rpartition(":")
+    if separator and "://" not in value and not _is_ip_network(value):
+        match = re.fullmatch(r"([0-9]{1,5})(?:-([0-9]{1,5}))?", ports)
+        low, high = (int(match[1]), int(match[2] or match[1])) if match else (0, 0)
+        if not 1 <= low <= high <= 65535:
+            raise ValueError(
+                f"'{entry}': port must be a number from 1 to 65535 or a low-high range"
+            )
+        _validate_egress_entry(host)
+        if not _is_ip_network(host) and (low != high or low not in DOMAIN_RULE_PORTS):
+            raise ValueError(
+                f"'{entry}': domain entries support only ports 80 and 443; "
+                "use an IP or CIDR entry for other ports"
+            )
+        return
+
     if "/" in value:
         try:
             network = ipaddress.ip_network(value, strict=False)
@@ -59,7 +81,6 @@ def _validate_egress_entry(entry: str) -> None:
     for forbidden, reason in (
         ("://", "schemes are not supported"),
         ("@", "credentials are not supported"),
-        (":", "ports are not supported"),
         ("?", "query strings are not supported"),
     ):
         if forbidden in value:
@@ -74,6 +95,16 @@ def _validate_egress_entry(entry: str) -> None:
     for label in domain.split("."):
         if not label:
             raise ValueError(f"'{entry}' contains an empty label")
+
+
+def _is_ip_network(value: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return False
+    return True
 
 
 def validate_egress_lists(allowlist: Optional[List[str]], denylist: Optional[List[str]]) -> None:
@@ -113,6 +144,52 @@ class EgressPolicyStatus(BaseModel):
     applied: bool
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class LocalhostForward(BaseModel):
+    """Forward the sandbox's own loopback ``port`` (127.0.0.1 and [::1]) to the same
+    port on peer ``sandbox_id`` (``<sandbox_id>.sandbox.internal``). The peer must
+    share a LAN network whose rules allow ``port``, or connections are reset."""
+
+    port: int = Field(ge=1, le=65535)
+    sandbox_id: str = Field(alias="peer_sandbox_id")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class LanRule(BaseModel):
+    """A directed allow rule: members matching ``from`` may connect to members
+    matching ``to``. Selectors are ``*`` or ``tag:<name>``; ``ports`` limits the
+    destination ports (all ports when omitted). A ``from`` of ``internet``
+    instead exposes the listed ``ports`` of members matching ``to`` publicly over
+    HTTP at ``https://<port>-<sandbox-id>.<gateway domain>``."""
+
+    from_: str = Field(alias="from")
+    to: str
+    ports: Optional[List[int]] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class LanNetworkMember(BaseModel):
+    """A sandbox in a LAN network, reachable at ``<sandbox_id>.sandbox.internal``."""
+
+    sandbox_id: str
+    tags: List[str]
+    synced: bool
+
+
+class LanNetwork(BaseModel):
+    """A private network between VM sandboxes of one owner."""
+
+    id: str
+    name: str
+    team_id: Optional[str] = None
+    rules: List[LanRule]
+    version: int
+    synced: bool
+    created_at: datetime
+    members: Optional[List[LanNetworkMember]] = None
 
 
 class SSHSession(BaseModel):
@@ -214,6 +291,10 @@ class SandboxCheckpoint(BaseModel):
     docker_image: str
     disk_size_bytes: Optional[int] = None
     stored_bytes: Optional[int] = None
+    # Quota-size measure: non-hole uncompressed bytes of the packed version.
+    # stored_bytes stays the compressed billing metric; do not conflate the two.
+    # 0 for grandfathered pre-measurement records; older responses omit it.
+    occupied_bytes: int = 0
     error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -274,12 +355,61 @@ class BatchSandboxStatusResponse(BaseModel):
     errors: List[SandboxStatusLookupError]
 
 
+class VolumeMount(BaseModel):
+    """One volume to mount in the sandbox, resolved by name in the
+    caller's scope (team scope when team_id is set)."""
+
+    name: str
+    mount_path: str
+    read_only: bool = False
+
+
+class Volume(BaseModel):
+    """A sandbox volume, owned by exactly one of user/team scope."""
+
+    id: str
+    name: str
+    user_id: Optional[str] = None
+    team_id: Optional[str] = None
+    # Newest durable publish, or null for a volume that was never published.
+    # Older responses may omit the field entirely.
+    head_checkpoint_id: Optional[str] = None
+    created_at: datetime
+    # Occupied bytes of the latest published version (its checkpoint's
+    # occupied_bytes); 0 until the first publish and for grandfathered
+    # pre-measurement versions. Older responses omit the field.
+    occupied_bytes: int = 0
+    # Account-wide storage usage across all owner volumes (sum of the latest
+    # published versions) and the whole-GiB limit from the wallet's
+    # sandboxVolumeStorageLimitGB.
+    # Populated on single-volume GET; always null on list items. Older
+    # responses omit both.
+    account_storage_used_bytes: Optional[int] = None
+    account_storage_limit_gb: Optional[int] = None
+
+
+class VolumeListResponse(BaseModel):
+    """Volume list response model"""
+
+    volumes: List[Volume]
+    total: int
+    page: int
+    per_page: int
+    has_next: bool
+    # Account-wide storage usage and whole-GiB limit, response-level and
+    # present even when ``volumes`` is empty. Older responses omit them.
+    storage_used_bytes: Optional[int] = None
+    storage_limit_gb: Optional[int] = None
+
+
 class CreateSandboxRequest(BaseModel):
     """Create sandbox request model"""
 
     name: str
     docker_image: Optional[str] = None
     checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    # None lets the server default to amd64; checkpoint restores must omit it.
+    arch: Optional[Literal["amd64", "arm64"]] = None
     start_command: Optional[StartCommand] = None
     cpu_cores: float = 1.0
     memory_gb: float = 1.0
@@ -297,6 +427,13 @@ class CreateSandboxRequest(BaseModel):
     region: Optional[str] = None
     advanced_configs: Optional[AdvancedConfigs] = None
     idempotency_key: Optional[str] = None
+    # Client-side only: when set, the sandbox joins this LAN network with these
+    # tags during the creating client's wait_for_creation or bulk_wait_for_creation.
+    lan_network_id: Optional[str] = None
+    lan_tags: Optional[List[str]] = None
+    # Unset volumes are omitted from the create payload, so requests without
+    # volume mounts keep their exact previous wire shape.
+    volumes: Optional[List[VolumeMount]] = None
 
     @model_validator(mode="after")
     def validate_restore_source(self) -> "CreateSandboxRequest":
@@ -321,6 +458,8 @@ class CreateSandboxRequest(BaseModel):
     @model_validator(mode="after")
     def validate_network_lists(self) -> "CreateSandboxRequest":
         validate_egress_lists(self.network_allowlist, self.network_denylist)
+        if self.lan_tags is not None and self.lan_network_id is None:
+            raise ValueError("lan_tags requires lan_network_id")
         return self
 
     @model_validator(mode="after")
@@ -459,7 +598,7 @@ class ImageListResponse(BaseModel):
 
 
 class BuildImageRequest(BaseModel):
-    """Request a linux/amd64 Dockerfile or public-registry source build.
+    """Request a linux/amd64 or linux/arm64 VM image build.
 
     Docker Hub sources become public, org-less platform images automatically.
     They cannot use a custom destination, team, or private visibility.
@@ -469,7 +608,7 @@ class BuildImageRequest(BaseModel):
     image_tag: Optional[str] = None
     dockerfile_path: str = "Dockerfile"
     source_image: Optional[str] = Field(default=None, alias="sourceImage")
-    platform: str = "linux/amd64"
+    platform: Literal["linux/amd64", "linux/arm64"] = "linux/amd64"
     team_id: Optional[str] = Field(default=None, alias="teamId")
     visibility: Optional[ImageVisibility] = None
     owner_scope: Optional[Literal["platform"]] = Field(default=None, alias="ownerScope")
@@ -478,9 +617,6 @@ class BuildImageRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_build(self) -> "BuildImageRequest":
-        if self.platform != "linux/amd64":
-            raise ValueError("platform must be linux/amd64")
-
         sources = [source.strip() for source in (self.source_image or "").split(",")]
         docker_hub_sources = [
             source for source in sources if source and is_docker_hub_reference(source)

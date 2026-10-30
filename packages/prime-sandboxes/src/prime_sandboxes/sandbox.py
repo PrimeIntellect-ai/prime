@@ -1,6 +1,7 @@
 """Sandbox client implementations."""
 
 import asyncio
+import contextlib
 import functools
 import json
 import math
@@ -13,7 +14,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict, deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from typing import (
     Literal,
     NoReturn,
     Optional,
+    Tuple,
     TypeVar,
 )
 
@@ -40,7 +42,8 @@ from connectrpc.errors import ConnectError
 from connectrpc.method import MethodInfo
 from google.protobuf.message import Message
 from pyqwest import Client as HTTPClient
-from pyqwest import HTTPTransport
+from pyqwest import HTTPTransport, HTTPVersion, SyncHTTPTransport
+from pyqwest import SyncClient as SyncHTTPClient
 from tenacity import (
     retry,
     retry_if_exception,
@@ -78,6 +81,10 @@ from .models import (
     DeleteSandboxCheckpointsResponse,
     EgressPolicyStatus,
     FileUploadResponse,
+    LanNetwork,
+    LanNetworkMember,
+    LanRule,
+    LocalhostForward,
     ReadFileResponse,
     Sandbox,
     SandboxCheckpoint,
@@ -100,6 +107,7 @@ from .rpc_command_session import (
     collect_command_session_start_event,
     is_transient_control_fault,
 )
+from .volumes import AsyncVolumes, Volumes
 
 # Connection-level errors: request never reached the server, so retry is safe
 # for any HTTP method (including non-idempotent POSTs).
@@ -129,6 +137,34 @@ _PROCESS_CONTROL_RPC_ATTEMPTS = 3
 _PROCESS_CONTROL_RETRY_INITIAL_DELAY = 0.5
 _BACKGROUND_JOB_LAUNCH_ATTEMPTS = 3
 _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
+# The platform retries a failed LAN push from its scheduled status sweep.
+_LAN_SYNC_TIMEOUT_SECONDS = 120.0
+_LAN_SYNC_POLL_SECONDS = 2.0
+
+
+def _lan_rules_payload(rules: List[LanRule]) -> List[Dict[str, Any]]:
+    return [r.model_dump(by_alias=True, exclude_none=True) for r in rules]
+
+
+def _created_with_lan_rules(network: LanNetwork, rules: List[LanRule]) -> bool:
+    """Whether the platform stored ``rules`` at creation. One from before rules on
+    create ignores them and gives the network its default rules instead. Allow rules
+    have no order, so neither do the compared lists."""
+
+    def key(rule: LanRule) -> Any:
+        return rule.from_, rule.to, tuple(sorted(set(rule.ports or ())))
+
+    return sorted(map(key, network.rules)) == sorted(map(key, rules))
+
+
+def _ignored_lan_rules(network_id: str, deleted: bool) -> APIError:
+    outcome = "it was deleted" if deleted else "deleting it failed, so delete it yourself"
+    return APIError(
+        f"the platform ignored LAN network {network_id}'s rules at creation and "
+        f"{outcome}; create it without rules and set them with set_lan_rules"
+    )
+
+
 _BACKGROUND_JOB_LAUNCH_TIMEOUT_SECONDS = 30
 _SANDBOX_ERROR_CONTEXT_TIMEOUT_SECONDS = 10.0
 
@@ -339,6 +375,70 @@ def _live_process_transport() -> HTTPTransport:
         tcp_keepalive_interval=_LIVE_PROCESS_TCP_KEEPALIVE_SECONDS,
         pool_idle_timeout=_LIVE_PROCESS_POOL_IDLE_TIMEOUT_SECONDS,
     )
+
+
+# The gateway caps concurrent HTTP/2 streams per connection (100 behind Google's
+# front end), and pyqwest before 0.12 keeps every request to a host on one
+# connection whatever the cap, so past it further commands queue client-side until
+# their deadline. Each command transport therefore carries at most this many
+# streams, and the pool opens another transport (connection) when all are full.
+_COMMAND_STREAMS_PER_TRANSPORT = 90
+
+_PooledClient = TypeVar("_PooledClient")
+
+
+def _is_tls_gateway(base_url: str) -> bool:
+    return base_url.startswith("https://")
+
+
+def _command_transport() -> HTTPTransport:
+    # Pinned HTTP/2: under ALPN a burst on a cold transport races the upgrade and
+    # fails requests with "ALPN upgraded to HTTP/2". Plaintext gateways (local
+    # stacks) bypass the pool, since pinned HTTP/2 there would mean h2c.
+    return HTTPTransport(tls_ca_cert=_ca_bundle(), http_version=HTTPVersion.HTTP2)
+
+
+def _sync_command_transport() -> SyncHTTPTransport:
+    return SyncHTTPTransport(tls_ca_cert=_ca_bundle(), http_version=HTTPVersion.HTTP2)
+
+
+class _CommandTransportPool(Generic[_PooledClient]):
+    """Command-stream HTTP clients, each leased to at most a fixed number of streams."""
+
+    def __init__(self, new_client: Callable[[], _PooledClient]) -> None:
+        self._new_client = new_client
+        # Transports are kept for the client's lifetime, bounded by peak
+        # concurrency / limit; idle connections close via pool_idle_timeout.
+        self._slots: List[List[Any]] = []  # [client, in-flight streams]
+        self._lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def lease(self) -> Iterator[_PooledClient]:
+        with self._lock:
+            slot = next(
+                (s for s in self._slots if s[1] < _COMMAND_STREAMS_PER_TRANSPORT),
+                None,
+            )
+            if slot is None:
+                slot = [self._new_client(), 0]
+                self._slots.append(slot)
+            slot[1] += 1
+        try:
+            yield slot[0]
+        finally:
+            with self._lock:
+                slot[1] -= 1
+
+
+def _lease_command_client(
+    pool: _CommandTransportPool[_PooledClient],
+    leases: contextlib.ExitStack,
+    base_url: str,
+) -> Optional[_PooledClient]:
+    """Lease a pooled command client for TLS gateways; plaintext uses the default."""
+    if not _is_tls_gateway(base_url):
+        return None
+    return leases.enter_context(pool.lease())
 
 
 def _network_update_payload(
@@ -1852,6 +1952,20 @@ def _raise_sandbox_gone(
     _raise_not_running_error(sandbox_id, ctx, command=command, cause=cause)
 
 
+def _parse_local_forwards(body: Dict[str, Any]) -> List[LocalhostForward]:
+    return [LocalhostForward.model_validate(f) for f in body.get("forwards") or []]
+
+
+def _raise_local_forwards_error(sandbox_id: str, error: httpx.HTTPStatusError) -> NoReturn:
+    status = error.response.status_code
+    if status == 404:
+        raise APIError(
+            f"Sandbox {sandbox_id} does not support localhost forwards; "
+            "recreate the sandbox to use them"
+        ) from error
+    raise APIError(f"Localhost forwards failed (HTTP {status}): {error.response.text}") from error
+
+
 def _raise_not_running_error(
     sandbox_id: str,
     ctx: dict,
@@ -1891,6 +2005,14 @@ def _auth_refresh_cutoff(auth_info: Dict[str, Any]) -> datetime:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     return expires_at - timedelta(seconds=AUTH_REFRESH_MARGIN_SECONDS)
+
+
+def _write_auth_cache(cache_file: Any, data: str) -> None:
+    cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with os.fdopen(os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        with contextlib.suppress(OSError):
+            cache_file.chmod(0o600)
+        f.write(data)
 
 
 def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
@@ -1939,9 +2061,7 @@ class SandboxAuthCache:
     def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                json.dump(self._auth_cache, f)
+            _write_auth_cache(self._cache_file, json.dumps(self._auth_cache))
         except Exception:
             pass
 
@@ -2026,14 +2146,8 @@ class AsyncSandboxAuthCache:
     async def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         data = json.dumps(self._auth_cache)
-
-        def _write() -> None:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                f.write(data)
-
         try:
-            await asyncio.to_thread(_write)
+            await asyncio.to_thread(_write_auth_cache, self._cache_file, data)
         except Exception:
             pass
 
@@ -2144,6 +2258,8 @@ class SandboxClient:
             self._operation_leases,
         )
         self._checkpoint_batch_supported: Optional[bool] = None
+        # sandbox_id -> (network_id, tags) recorded by create(), joined by wait_for_creation.
+        self._pending_lan_joins: Dict[str, Tuple[str, Optional[List[str]]]] = {}
         self._sandbox_status_batcher = _SyncRequestBatcher(
             self._fetch_sandbox_statuses,
             lambda sandbox_id: sandbox_id,
@@ -2162,8 +2278,12 @@ class SandboxClient:
             background_job_output_cache_bytes,
         )
         self._background_job_output_concurrency = background_job_output_concurrency
+        self._command_pool: _CommandTransportPool[SyncHTTPClient] = _CommandTransportPool(
+            lambda: SyncHTTPClient(transport=_sync_command_transport())
+        )
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
+        self.volumes = Volumes(self)
 
     @staticmethod
     @_gateway_post_retry
@@ -2284,8 +2404,14 @@ class SandboxClient:
         self._auth_cache.clear()
 
     def create(self, request: CreateSandboxRequest) -> Sandbox:
-        """Create a new sandbox"""
-        payload = request.model_dump(by_alias=False, exclude_none=True)
+        """Create a new sandbox.
+
+        With ``lan_network_id`` set, the sandbox joins that LAN network once it is
+        running, during this client's ``wait_for_creation`` or
+        ``bulk_wait_for_creation``."""
+        payload = request.model_dump(
+            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
+        )
         # VM is the only runtime; send it explicitly so the created runtime
         # never depends on server-side defaults changing underneath the SDK.
         payload["vm"] = True
@@ -2300,7 +2426,13 @@ class SandboxClient:
             json=payload,
             idempotent_post=True,
         )
-        return Sandbox.model_validate(response)
+        sandbox = Sandbox.model_validate(response)
+        # Seed the auth cache so the first gateway call skips POST /auth.
+        if auth := response.get("gatewayAuth"):
+            self._auth_cache.set(sandbox.id, auth)
+        if request.lan_network_id is not None:
+            self._pending_lan_joins[sandbox.id] = (request.lan_network_id, request.lan_tags)
+        return sandbox
 
     def list(
         self,
@@ -2335,6 +2467,16 @@ class SandboxClient:
     def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
+        return Sandbox.model_validate(response)
+
+    def pause(self, sandbox_id: str) -> Sandbox:
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/pause")
+        return Sandbox.model_validate(response)
+
+    def resume(self, sandbox_id: str) -> Sandbox:
+        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
 
     def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
@@ -2518,6 +2660,8 @@ class SandboxClient:
                 scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
             )
             response = self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            # A deleted sandbox never joins the LAN network create() recorded for it.
+            self._pending_lan_joins.pop(sandbox_id, None)
             return response
         finally:
             self._operation_leases.end_drain(scopes)
@@ -2526,6 +2670,107 @@ class SandboxClient:
         """Get the desired and applied network rules of a VM sandbox."""
         response = self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
+
+    def create_lan_network(
+        self,
+        name: str,
+        team_id: Optional[str] = None,
+        rules: Optional[List[LanRule]] = None,
+    ) -> LanNetwork:
+        """Create a LAN network. Rules are directed and allow-only. ``rules`` are in
+        force before any member joins. Without them, the network has the platform's
+        default rules: none, so no member reaches another (older platforms let every
+        member reach every other); ``set_lan_rules`` replaces them later. A platform
+        that ignores ``rules`` at creation raises ``APIError``, once the network it
+        created is deleted."""
+        payload: Dict[str, Any] = {"name": name}
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        if team_id is not None:
+            payload["team_id"] = team_id
+        if rules is not None:
+            payload["rules"] = _lan_rules_payload(rules)
+        response = self.client.request("POST", "/sandbox/networks", json=payload)
+        network = LanNetwork.model_validate(response)
+        if rules is not None and not _created_with_lan_rules(network, rules):
+            # Never hand back a network whose members could reach each other unasked.
+            try:
+                self.delete_lan_network(network.id)
+            except APIError as error:
+                raise _ignored_lan_rules(network.id, deleted=False) from error
+            raise _ignored_lan_rules(network.id, deleted=True)
+        return network
+
+    def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
+        """List your personal LAN networks, or a team's."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = {"team_id": team_id} if team_id is not None else None
+        response = self.client.request("GET", "/sandbox/networks", params=params)
+        return [LanNetwork.model_validate(n) for n in response["networks"]]
+
+    def get_lan_network(self, network_id: str) -> LanNetwork:
+        """Get a LAN network with its rules and members."""
+        response = self.client.request("GET", f"/sandbox/networks/{network_id}")
+        return LanNetwork.model_validate(response)
+
+    def delete_lan_network(self, network_id: str) -> None:
+        """Delete a LAN network; its members stop reaching each other through it."""
+        self.client.request("DELETE", f"/sandbox/networks/{network_id}")
+
+    def set_lan_rules(self, network_id: str, rules: List[LanRule]) -> LanNetwork:
+        """Replace a LAN network's rules. Rules are directed and allow-only."""
+        payload = {"rules": _lan_rules_payload(rules)}
+        response = self.client.request("PUT", f"/sandbox/networks/{network_id}/rules", json=payload)
+        return LanNetwork.model_validate(response)
+
+    def add_lan_member(
+        self, network_id: str, sandbox_id: str, tags: Optional[List[str]] = None
+    ) -> LanNetworkMember:
+        """Add a running VM sandbox to a LAN network, or replace its tags."""
+        response = self.client.request(
+            "PUT",
+            f"/sandbox/networks/{network_id}/members/{sandbox_id}",
+            json={"tags": tags or []},
+        )
+        return LanNetworkMember.model_validate(response)
+
+    def _join_pending_lan(self, sandbox_ids: List[str]) -> None:
+        """Join the LAN network create() recorded for each of these sandboxes."""
+        for sandbox_id in sandbox_ids:
+            pending = self._pending_lan_joins.get(sandbox_id)
+            if pending is not None:
+                # Leased like other sandbox operations: a delete waits for the join,
+                # and a sandbox being deleted does not start one.
+                lease = self._operation_leases.acquire(sandbox_id)
+                try:
+                    self._join_lan(pending[0], sandbox_id, pending[1])
+                finally:
+                    lease.release()
+                self._pending_lan_joins.pop(sandbox_id, None)
+
+    def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
+        """Add a member and wait until the platform has pushed it, and the network's
+        current rules, to the VM layer. A failed inline push is retried by a background
+        sweep, so poll for it. Until the rules are pushed, the VM layer enforces the
+        network's previous ones: every member reaching every other, on a new network."""
+        self.add_lan_member(network_id, sandbox_id, tags)
+        deadline = time.monotonic() + _LAN_SYNC_TIMEOUT_SECONDS
+        while True:
+            network = self.get_lan_network(network_id)
+            member = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
+            if member is None:
+                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
+            if member.synced and network.synced:
+                return
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Sandbox {sandbox_id} joined LAN network {network_id}, but the "
+                    f"membership and rules were not synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
+                )
+            time.sleep(_LAN_SYNC_POLL_SECONDS)
+
+    def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
+        """Remove a sandbox from a LAN network."""
+        self.client.request("DELETE", f"/sandbox/networks/{network_id}/members/{sandbox_id}")
 
     def create_ssh_session(
         self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
@@ -2564,6 +2809,54 @@ class SandboxClient:
         )
         return EgressPolicyStatus.model_validate(response)
 
+    def get_localhost_forwards(self, sandbox_id: str) -> List[LocalhostForward]:
+        """Get the localhost forwards of a running VM sandbox."""
+        return self._local_forwards_request(sandbox_id, None)
+
+    def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> List[LocalhostForward]:
+        """Replace the localhost forwards of a running VM sandbox; returns the new set.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox. The peer must share a LAN network whose rules allow the port.
+        Each call is a complete replacement, never a merge; an empty list removes
+        all forwards. Applied before this returns.
+        """
+        payload = {"forwards": [f.model_dump(by_alias=True) for f in forwards]}
+        return self._local_forwards_request(sandbox_id, payload)
+
+    def _local_forwards_request(
+        self, sandbox_id: str, payload: Optional[Dict[str, Any]]
+    ) -> List[LocalhostForward]:
+        """GET (payload None) or POST sandboxd's local-forwards through the gateway."""
+        reauthed = False
+        while True:
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/network/local-forwards"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            try:
+                if payload is None:
+                    response = self._gateway_get(url, headers=headers, params={}, timeout=30)
+                else:
+                    response = self._gateway_post(url, headers=headers, timeout=30, json=payload)
+                response.raise_for_status()
+                return _parse_local_forwards(response.json())
+            except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
+                    reauthed = True
+                    continue
+                _raise_local_forwards_error(sandbox_id, e)
+            except httpx.RequestError as e:
+                raise APIError(
+                    f"Localhost forwards request failed: {_format_exception_diagnostic(e)}"
+                ) from e
+
     def bulk_delete(
         self,
         sandbox_ids: Optional[List[str]] = None,
@@ -2595,7 +2888,10 @@ class SandboxClient:
                 "/sandbox",
                 json=payload,
             )
-            return BulkDeleteSandboxResponse.model_validate(response)
+            result = BulkDeleteSandboxResponse.model_validate(response)
+            for sandbox_id in result.succeeded:
+                self._pending_lan_joins.pop(sandbox_id, None)
+            return result
         finally:
             self._operation_leases.end_drain(scopes)
 
@@ -2645,15 +2941,17 @@ class SandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            stdout_parts: List[str] = []
-            stderr_parts: List[str] = []
+            stdout_parts = bytearray()
+            stderr_parts = bytearray()
             exit_code: Optional[int] = None
             stream_started = False
 
+            command_lease = contextlib.ExitStack()
             rpc_client = ConnectClientSync(
                 base_url,
                 codec=GOOGLE_PROTOBUF_BINARY_CODEC,
                 send_compression=None,
+                http_client=_lease_command_client(self._command_pool, command_lease, base_url),
             )
             try:
                 stream = rpc_client.execute_server_stream(
@@ -2676,8 +2974,8 @@ class SandboxClient:
                     raise APIError("Command stream ended without exit code")
 
                 return CommandResponse(
-                    stdout="".join(stdout_parts),
-                    stderr="".join(stderr_parts),
+                    stdout=stdout_parts.decode("utf-8", errors="replace"),
+                    stderr=stderr_parts.decode("utf-8", errors="replace"),
                     exit_code=exit_code,
                 )
             except ConnectError as e:
@@ -2711,6 +3009,7 @@ class SandboxClient:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
             finally:
                 rpc_client.close()
+                command_lease.close()
 
     def start_background_job(
         self,
@@ -3169,6 +3468,7 @@ class SandboxClient:
                 if reachable:
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
+                        self._join_pending_lan([sandbox_id])
                         return
                     # Small delay between stability checks
                     time.sleep(0.5)
@@ -3306,6 +3606,7 @@ class SandboxClient:
                             final_statuses.pop(sandbox_id, None)
 
                 if all_reachable:
+                    self._join_pending_lan(sandbox_ids)
                     return final_statuses
 
             if total_image_build_waiting:
@@ -3641,6 +3942,10 @@ class AsyncSandboxClient:
         # Shared httpx client for gateway operations (upload/download/execute)
         # Initialized lazily to allow connection pooling and reuse
         self._gateway_client: Optional[httpx.AsyncClient] = None
+        self._command_transports: List[HTTPTransport] = []
+        self._command_pool: _CommandTransportPool[HTTPClient] = _CommandTransportPool(
+            self._new_command_http_client
+        )
         self._operation_leases = _AsyncPollLeaseRegistry()
         self._poll_leases = self._operation_leases
         # Checkpoints outlive their sandboxes; leases use checkpoint scopes.
@@ -3650,6 +3955,8 @@ class AsyncSandboxClient:
             self._operation_leases,
         )
         self._checkpoint_batch_supported: Optional[bool] = None
+        # sandbox_id -> (network_id, tags) recorded by create(), joined by wait_for_creation.
+        self._pending_lan_joins: Dict[str, Tuple[str, Optional[List[str]]]] = {}
         self._sandbox_status_batcher = _AsyncRequestBatcher(
             self._fetch_sandbox_statuses,
             lambda sandbox_id: sandbox_id,
@@ -3670,6 +3977,7 @@ class AsyncSandboxClient:
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
         self._close_task: Optional[asyncio.Task[None]] = None
+        self.volumes = AsyncVolumes(self)
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling
@@ -3808,8 +4116,14 @@ class AsyncSandboxClient:
         await self._auth_cache.clear()
 
     async def create(self, request: CreateSandboxRequest) -> Sandbox:
-        """Create a new sandbox"""
-        payload = request.model_dump(by_alias=False, exclude_none=True)
+        """Create a new sandbox.
+
+        With ``lan_network_id`` set, the sandbox joins that LAN network once it is
+        running, during this client's ``wait_for_creation`` or
+        ``bulk_wait_for_creation``."""
+        payload = request.model_dump(
+            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
+        )
         # VM is the only runtime; send it explicitly so the created runtime
         # never depends on server-side defaults changing underneath the SDK.
         payload["vm"] = True
@@ -3823,7 +4137,13 @@ class AsyncSandboxClient:
             json=payload,
             idempotent_post=True,
         )
-        return Sandbox.model_validate(response)
+        sandbox = Sandbox.model_validate(response)
+        # Seed the auth cache so the first gateway call skips POST /auth.
+        if auth := response.get("gatewayAuth"):
+            await self._auth_cache.set(sandbox.id, auth)
+        if request.lan_network_id is not None:
+            self._pending_lan_joins[sandbox.id] = (request.lan_network_id, request.lan_tags)
+        return sandbox
 
     async def list(
         self,
@@ -3857,6 +4177,16 @@ class AsyncSandboxClient:
     async def get(self, sandbox_id: str) -> Sandbox:
         """Get a specific sandbox"""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
+        return Sandbox.model_validate(response)
+
+    async def pause(self, sandbox_id: str) -> Sandbox:
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/pause")
+        return Sandbox.model_validate(response)
+
+    async def resume(self, sandbox_id: str) -> Sandbox:
+        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
 
     async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
@@ -4049,6 +4379,8 @@ class AsyncSandboxClient:
                 scopes, f"APIError: Sandbox {sandbox_id} is being deleted"
             )
             response = await self.client.request("DELETE", f"/sandbox/{sandbox_id}")
+            # A deleted sandbox never joins the LAN network create() recorded for it.
+            self._pending_lan_joins.pop(sandbox_id, None)
             return response
         finally:
             self._operation_leases.end_drain(scopes)
@@ -4057,6 +4389,112 @@ class AsyncSandboxClient:
         """Get the desired and applied network rules of a VM sandbox."""
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}/egress-policy")
         return EgressPolicyStatus.model_validate(response)
+
+    async def create_lan_network(
+        self,
+        name: str,
+        team_id: Optional[str] = None,
+        rules: Optional[List[LanRule]] = None,
+    ) -> LanNetwork:
+        """Create a LAN network. Rules are directed and allow-only. ``rules`` are in
+        force before any member joins. Without them, the network has the platform's
+        default rules: none, so no member reaches another (older platforms let every
+        member reach every other); ``set_lan_rules`` replaces them later. A platform
+        that ignores ``rules`` at creation raises ``APIError``, once the network it
+        created is deleted."""
+        payload: Dict[str, Any] = {"name": name}
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        if team_id is not None:
+            payload["team_id"] = team_id
+        if rules is not None:
+            payload["rules"] = _lan_rules_payload(rules)
+        response = await self.client.request("POST", "/sandbox/networks", json=payload)
+        network = LanNetwork.model_validate(response)
+        if rules is not None and not _created_with_lan_rules(network, rules):
+            # Never hand back a network whose members could reach each other unasked.
+            try:
+                await self.delete_lan_network(network.id)
+            except APIError as error:
+                raise _ignored_lan_rules(network.id, deleted=False) from error
+            raise _ignored_lan_rules(network.id, deleted=True)
+        return network
+
+    async def list_lan_networks(self, team_id: Optional[str] = None) -> List[LanNetwork]:
+        """List your personal LAN networks, or a team's."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = {"team_id": team_id} if team_id is not None else None
+        response = await self.client.request("GET", "/sandbox/networks", params=params)
+        return [LanNetwork.model_validate(n) for n in response["networks"]]
+
+    async def get_lan_network(self, network_id: str) -> LanNetwork:
+        """Get a LAN network with its rules and members."""
+        response = await self.client.request("GET", f"/sandbox/networks/{network_id}")
+        return LanNetwork.model_validate(response)
+
+    async def delete_lan_network(self, network_id: str) -> None:
+        """Delete a LAN network; its members stop reaching each other through it."""
+        await self.client.request("DELETE", f"/sandbox/networks/{network_id}")
+
+    async def set_lan_rules(self, network_id: str, rules: List[LanRule]) -> LanNetwork:
+        """Replace a LAN network's rules. Rules are directed and allow-only."""
+        payload = {"rules": _lan_rules_payload(rules)}
+        response = await self.client.request(
+            "PUT", f"/sandbox/networks/{network_id}/rules", json=payload
+        )
+        return LanNetwork.model_validate(response)
+
+    async def add_lan_member(
+        self, network_id: str, sandbox_id: str, tags: Optional[List[str]] = None
+    ) -> LanNetworkMember:
+        """Add a running VM sandbox to a LAN network, or replace its tags."""
+        response = await self.client.request(
+            "PUT",
+            f"/sandbox/networks/{network_id}/members/{sandbox_id}",
+            json={"tags": tags or []},
+        )
+        return LanNetworkMember.model_validate(response)
+
+    async def _join_pending_lan(self, sandbox_ids: List[str]) -> None:
+        """Join the LAN network create() recorded for each of these sandboxes."""
+
+        async def join(sandbox_id: str) -> None:
+            pending = self._pending_lan_joins.get(sandbox_id)
+            if pending is not None:
+                # Leased like other sandbox operations: a delete waits for the join,
+                # and a sandbox being deleted does not start one.
+                lease = self._operation_leases.acquire(sandbox_id)
+                try:
+                    await self._join_lan(pending[0], sandbox_id, pending[1])
+                finally:
+                    lease.release()
+                self._pending_lan_joins.pop(sandbox_id, None)
+
+        await asyncio.gather(*(join(sandbox_id) for sandbox_id in sandbox_ids))
+
+    async def _join_lan(self, network_id: str, sandbox_id: str, tags: Optional[List[str]]) -> None:
+        """Add a member and wait until the platform has pushed it, and the network's
+        current rules, to the VM layer. A failed inline push is retried by a background
+        sweep, so poll for it. Until the rules are pushed, the VM layer enforces the
+        network's previous ones: every member reaching every other, on a new network."""
+        await self.add_lan_member(network_id, sandbox_id, tags)
+        deadline = time.monotonic() + _LAN_SYNC_TIMEOUT_SECONDS
+        while True:
+            network = await self.get_lan_network(network_id)
+            member = next((m for m in network.members or [] if m.sandbox_id == sandbox_id), None)
+            if member is None:
+                raise RuntimeError(f"Sandbox {sandbox_id} left LAN network {network_id}")
+            if member.synced and network.synced:
+                return
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Sandbox {sandbox_id} joined LAN network {network_id}, but the "
+                    f"membership and rules were not synced within {_LAN_SYNC_TIMEOUT_SECONDS}s"
+                )
+            await asyncio.sleep(_LAN_SYNC_POLL_SECONDS)
+
+    async def remove_lan_member(self, network_id: str, sandbox_id: str) -> None:
+        """Remove a sandbox from a LAN network."""
+        await self.client.request("DELETE", f"/sandbox/networks/{network_id}/members/{sandbox_id}")
 
     async def create_ssh_session(
         self, sandbox_id: str, public_key: str, ttl_seconds: Optional[int] = None
@@ -4097,6 +4535,58 @@ class AsyncSandboxClient:
         )
         return EgressPolicyStatus.model_validate(response)
 
+    async def get_localhost_forwards(self, sandbox_id: str) -> List[LocalhostForward]:
+        """Get the localhost forwards of a running VM sandbox."""
+        return await self._local_forwards_request(sandbox_id, None)
+
+    async def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> List[LocalhostForward]:
+        """Replace the localhost forwards of a running VM sandbox; returns the new set.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox. The peer must share a LAN network whose rules allow the port.
+        Each call is a complete replacement, never a merge; an empty list removes
+        all forwards. Applied before this returns.
+        """
+        payload = {"forwards": [f.model_dump(by_alias=True) for f in forwards]}
+        return await self._local_forwards_request(sandbox_id, payload)
+
+    async def _local_forwards_request(
+        self, sandbox_id: str, payload: Optional[Dict[str, Any]]
+    ) -> List[LocalhostForward]:
+        """GET (payload None) or POST sandboxd's local-forwards through the gateway."""
+        reauthed = False
+        while True:
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/network/local-forwards"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            try:
+                if payload is None:
+                    response = await self._gateway_get(url, headers=headers, params={}, timeout=30)
+                else:
+                    response = await self._gateway_post(
+                        url, headers=headers, timeout=30, json=payload
+                    )
+                response.raise_for_status()
+                return _parse_local_forwards(response.json())
+            except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
+                if e.response.status_code == 401 and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
+                _raise_local_forwards_error(sandbox_id, e)
+            except httpx.RequestError as e:
+                raise APIError(
+                    f"Localhost forwards request failed: {_format_exception_diagnostic(e)}"
+                ) from e
+
     async def bulk_delete(
         self,
         sandbox_ids: Optional[List[str]] = None,
@@ -4128,7 +4618,10 @@ class AsyncSandboxClient:
                 "/sandbox",
                 json=payload,
             )
-            return BulkDeleteSandboxResponse.model_validate(response)
+            result = BulkDeleteSandboxResponse.model_validate(response)
+            for sandbox_id in result.succeeded:
+                self._pending_lan_joins.pop(sandbox_id, None)
+            return result
         finally:
             self._operation_leases.end_drain(scopes)
 
@@ -4350,6 +4843,11 @@ class AsyncSandboxClient:
             finally:
                 await rpc_client.close()
 
+    def _new_command_http_client(self) -> HTTPClient:
+        transport = _command_transport()
+        self._command_transports.append(transport)
+        return HTTPClient(transport=transport)
+
     async def _execute_command_connect_rpc(
         self,
         sandbox_id: str,
@@ -4370,15 +4868,17 @@ class AsyncSandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            stdout_parts: List[str] = []
-            stderr_parts: List[str] = []
+            stdout_parts = bytearray()
+            stderr_parts = bytearray()
             exit_code: Optional[int] = None
             stream_started = False
 
+            command_lease = contextlib.ExitStack()
             rpc_client = ConnectClient(
                 base_url,
                 codec=GOOGLE_PROTOBUF_BINARY_CODEC,
                 send_compression=None,
+                http_client=_lease_command_client(self._command_pool, command_lease, base_url),
             )
             try:
                 stream = rpc_client.execute_server_stream(
@@ -4401,8 +4901,8 @@ class AsyncSandboxClient:
                     raise APIError("Command stream ended without exit code")
 
                 return CommandResponse(
-                    stdout="".join(stdout_parts),
-                    stderr="".join(stderr_parts),
+                    stdout=stdout_parts.decode("utf-8", errors="replace"),
+                    stderr=stderr_parts.decode("utf-8", errors="replace"),
                     exit_code=exit_code,
                 )
             except ConnectError as e:
@@ -4436,6 +4936,7 @@ class AsyncSandboxClient:
                 raise APIError(f"Request failed: {e.__class__.__name__}: {e}") from e
             finally:
                 await rpc_client.close()
+                command_lease.close()
 
     async def start_background_job(
         self,
@@ -4908,6 +5409,7 @@ class AsyncSandboxClient:
                 if reachable:
                     consecutive_successes += 1
                     if consecutive_successes >= stability_checks:
+                        await self._join_pending_lan([sandbox_id])
                         return
                     # Small delay between stability checks
                     await asyncio.sleep(0.5)
@@ -5046,6 +5548,7 @@ class AsyncSandboxClient:
                             final_statuses.pop(sandbox_id, None)
 
                 if all_reachable:
+                    await self._join_pending_lan(sandbox_ids)
                     return final_statuses
 
             if total_image_build_waiting:
@@ -5380,11 +5883,14 @@ class AsyncSandboxClient:
         try:
             if self._gateway_client is not None:
                 await self._gateway_client.aclose()
+            # pyqwest's aclose() returns a bare awaitable that gather() rejects on 3.11.
+            for transport in self._command_transports:
+                await transport.aclose()
         finally:
             await self.client.aclose()
 
     async def aclose(self) -> None:
-        """Cancel owned status and output tasks before closing async transports."""
+        """Close this client's batchers, leases, and gateway tasks."""
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
         try:

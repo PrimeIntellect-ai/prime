@@ -1,5 +1,4 @@
 from datetime import datetime
-from enum import Enum
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -39,19 +38,6 @@ class TunnelInfo(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class TunnelState(str, Enum):
-    """Where a Tunnel is in its life, as far as the client knows."""
-
-    # Not started, or stopped.
-    STOPPED = "stopped"
-    # Started and not known to be down.
-    UP = "up"
-    # Not serving; the supervisor is restarting frpc under the same URL.
-    RECOVERING = "recovering"
-    # The registration is gone. Only a new tunnel, with a new URL, helps.
-    DEAD = "dead"
 
 
 class TunnelStatus(BaseModel):

@@ -500,7 +500,6 @@ async def test_wait_for_connection_needs_a_launched_frpc():
 
 
 @pytest.mark.asyncio
-@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_check_registered_returns_true():
     tunnel = _make_started_tunnel()
     tunnel._client = AsyncMock()
@@ -510,7 +509,6 @@ async def test_check_registered_returns_true():
 
 
 @pytest.mark.asyncio
-@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_check_registered_returns_false_on_404():
     tunnel = _make_started_tunnel()
     tunnel._client = AsyncMock()
@@ -519,14 +517,12 @@ async def test_check_registered_returns_false_on_404():
 
 
 @pytest.mark.asyncio
-@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_check_registered_returns_false_when_no_tunnel_info():
     tunnel = Tunnel(local_port=8080)
     assert await tunnel.check_registered() is False
 
 
 @pytest.mark.asyncio
-@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_check_registered_propagates_api_errors():
     tunnel = _make_started_tunnel()
     tunnel._client = AsyncMock()
@@ -992,7 +988,6 @@ def _registration(tunnel: Tunnel, status: str) -> TunnelInfo:
 
 
 @pytest.mark.asyncio
-@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 @pytest.mark.parametrize("status", ["expired", "terminated", "TERMINATED"])
 async def test_check_registered_returns_false_for_a_terminal_registration(status):
     tunnel = _make_started_tunnel()
@@ -1014,7 +1009,7 @@ async def test_status_reports_the_process_and_the_registration():
     assert status.running is True
     assert status.registration == "disconnected"
     assert status.gone is False
-    assert tunnel._gone is False
+    assert tunnel.is_gone is False
 
 
 @pytest.mark.asyncio
@@ -1030,7 +1025,7 @@ async def test_status_marks_a_terminal_or_missing_registration_gone(status):
 
     assert result.registration == status
     assert result.gone is True
-    assert tunnel._gone is True
+    assert tunnel.is_gone is True
 
 
 @pytest.mark.asyncio
@@ -1078,7 +1073,7 @@ async def test_restart_raises_gone_when_the_registration_is_inactive():
     finally:
         _close_fake_frpc(tunnel, process, write_fd)
 
-    assert tunnel._gone is True
+    assert tunnel.is_gone is True
 
 
 @pytest.mark.asyncio
@@ -1090,7 +1085,7 @@ async def test_successful_restart_clears_gone():
     with frpc_path, popen, wait, drain:
         await tunnel.restart()
 
-    assert tunnel._gone is False
+    assert tunnel.is_gone is False
 
 
 @pytest.mark.asyncio
@@ -1121,7 +1116,7 @@ async def test_restart_keeps_a_rejection_that_follows_the_connect():
     finally:
         _close_fake_frpc(tunnel, process, write_fd)
 
-    assert tunnel._gone is True
+    assert tunnel.is_gone is True
 
 
 @pytest.mark.asyncio
@@ -1137,7 +1132,7 @@ async def test_failed_restart_keeps_gone():
         with pytest.raises(TunnelTimeoutError):
             await tunnel.restart()
 
-    assert tunnel._gone is True
+    assert tunnel.is_gone is True
 
 
 def test_output_reader_marks_the_tunnel_gone_when_a_reconnect_is_rejected():
@@ -1149,13 +1144,13 @@ def test_output_reader_marks_the_tunnel_gone_when_a_reconnect_is_rejected():
             _frpc_line("W", "connect to server error: Tunnel is inactive") + "\n",
         ],
     )
-    assert tunnel._gone is True
+    assert tunnel.is_gone is True
 
 
 def test_output_reader_ignores_transient_reconnect_failures():
     tunnel = _make_started_tunnel()
     _drain(tunnel, [_frpc_line("W", "connect to server error: i/o timeout") + "\n"])
-    assert tunnel._gone is False
+    assert tunnel.is_gone is False
 
 
 def test_output_reader_ignores_a_replaced_process_when_marking_gone():
@@ -1171,7 +1166,7 @@ def test_output_reader_ignores_a_replaced_process_when_marking_gone():
     tunnel._start_output_reader(old_process)
     tunnel._output.join()
 
-    assert tunnel._gone is False
+    assert tunnel.is_gone is False
 
 
 # -- one reader from launch --
@@ -1294,12 +1289,12 @@ async def test_a_rejected_reconnect_of_a_real_process_marks_the_tunnel_gone(monk
     with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
         await tunnel.start()
     try:
-        assert tunnel._gone is False
+        assert tunnel.is_gone is False
         for _ in range(50):
-            if tunnel._gone:
+            if tunnel.is_gone:
                 break
             await asyncio.sleep(0.1)
-        assert tunnel._gone is True
+        assert tunnel.is_gone is True
         assert tunnel.is_running
     finally:
         await tunnel.stop()

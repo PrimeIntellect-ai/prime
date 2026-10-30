@@ -137,3 +137,39 @@ def test_info_displays_scoped_install_index(monkeypatch):
     output = "".join(result.output.split())
     assert SCOPED_INDEX_URL in output
     assert INDEX_URL not in output
+
+
+def test_uninstall_uses_the_workspace_interpreter(monkeypatch):
+    """uv needs an explicit interpreter, same as the install paths."""
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(env.shutil, "which", lambda tool: f"/bin/{tool}")
+    monkeypatch.setattr(
+        env,
+        "execute_uninstall_command",
+        lambda cmd, _name, _tool: captured.update(cmd=cmd),
+    )
+
+    env.uninstall(env_name="primeintellect/deep-swe", with_tool="uv")
+
+    assert captured["cmd"][:5] == [
+        "uv",
+        "pip",
+        "uninstall",
+        "--python",
+        "/workspace/.venv/bin/python",
+    ]
+    assert captured["cmd"][-1] == "deep_swe"
+
+
+def test_uninstall_with_pip_is_unchanged(monkeypatch):
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(env.shutil, "which", lambda tool: f"/bin/{tool}")
+    monkeypatch.setattr(
+        env,
+        "execute_uninstall_command",
+        lambda cmd, _name, _tool: captured.update(cmd=cmd),
+    )
+
+    env.uninstall(env_name="deep-swe", with_tool="pip")
+
+    assert captured["cmd"] == ["pip", "uninstall", "deep_swe"]

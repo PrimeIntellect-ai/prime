@@ -111,3 +111,15 @@ SLURM_CLUSTER_STATUS_COLORS = {
     "UNKNOWN": "white",
     "TOMBSTONED": "white",
 }
+
+SLURM_CLUSTER_STATUS_COLORS = {
+    "PENDING": "yellow",
+    "DEPLOYING": "yellow",
+    "RUNNING": "green",
+    "TERMINATING": "yellow",
+    "COMPLETED": "white",
+    "FAILED": "red",
+    "STOPPED": "blue",
+    "UNKNOWN": "white",
+    "TOMBSTONED": "white",
+}

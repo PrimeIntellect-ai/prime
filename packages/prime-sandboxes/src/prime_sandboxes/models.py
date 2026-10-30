@@ -1,5 +1,6 @@
 """Pydantic models for Prime Sandboxes SDK."""
 
+import ipaddress
 import re
 from datetime import datetime
 from enum import Enum
@@ -243,6 +244,9 @@ def validate_header_rules(
 
 
 def _validate_header_rule_host(host: str) -> None:
+    """Mirror the API's rule-host contract: DNS names only — IP literals
+    (wildcard base included) are rejected because header rules match
+    hostnames and the node refuses them; numeric labels stay valid DNS."""
     domain = host[2:] if host.startswith("*.") else host
     if not domain:
         raise ValueError(f"header rule host {host!r} is empty")
@@ -252,6 +256,14 @@ def _validate_header_rule_host(host: str) -> None:
         )
     if len(domain) > 253:
         raise ValueError(f"header rule host {host!r} exceeds 253 characters")
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            f"header rule host {host!r}: IP addresses are not supported; use a DNS name"
+        )
     for label in domain.split("."):
         if not 1 <= len(label) <= 63:
             raise ValueError(

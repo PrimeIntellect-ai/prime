@@ -372,7 +372,21 @@ class TestHeaderRuleValidation:
                 },
             )
 
-    @pytest.mark.parametrize("host", ["", "*", "a.*.b.com", "a.com:443", "a.com/p", "a b"])
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "",
+            "*",
+            "a.*.b.com",
+            "a.com:443",
+            "a.com/p",
+            "a b",
+            # IP literals are rejected (wildcard base included): the node
+            # refuses them, so they must never reach a stored policy.
+            "192.0.2.1",
+            "*.192.0.2.1",
+        ],
+    )
     def test_invalid_hosts_rejected(self, host):
         with pytest.raises(ValidationError):
             CreateSandboxRequest(
@@ -380,6 +394,17 @@ class TestHeaderRuleValidation:
                 docker_image="img",
                 network_rules={host: {"headers": {"X": "v"}}},
             )
+
+    @pytest.mark.parametrize(
+        "host", ["123.example.com", "example.com.456", "1.2.3.4.5"]
+    )
+    def test_numeric_dns_labels_accepted(self, host):
+        request = CreateSandboxRequest(
+            name="t",
+            docker_image="img",
+            network_rules={host: {"headers": {"X": "v"}}},
+        )
+        assert list(request.network_rules) == [host.lower()]
 
     @pytest.mark.parametrize(
         "name",

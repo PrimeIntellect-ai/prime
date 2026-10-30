@@ -35,8 +35,8 @@ def test_volume_create(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
 
-    def fake_create(self: Any, name: str, *, team_id: Any = None) -> Volume:
-        captured["create_args"] = (name, team_id)
+    def fake_create(self: Any, name: str, *, team_id: Any = None, size_gb: Any = None) -> Volume:
+        captured["create_args"] = (name, team_id, size_gb)
         return Volume(id="cvol-1", name="data", created_at=datetime.now(timezone.utc))
 
     monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", fake_create)
@@ -51,7 +51,27 @@ def test_volume_create(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     # account fields, so no account-storage line either.
     assert "Size: 0 bytes" in output
     assert "Account storage" not in output
-    assert captured["create_args"] == ("data", "team-1")
+    # An older server sends no size_gb.
+    assert "Capacity: -" in output
+    assert captured["create_args"] == ("data", "team-1", None)
+
+
+def test_volume_create_forwards_size_gb(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_create(self: Any, name: str, *, team_id: Any = None, size_gb: Any = None) -> Volume:
+        captured["create_args"] = (name, team_id, size_gb)
+        return Volume(id="cvol-1", name="data", size_gb=512, created_at=datetime.now(timezone.utc))
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", fake_create)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "create", "data", "--size-gb", "512"])
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert captured["create_args"] == ("data", None, 512)
+    assert "Capacity: 512 GiB" in output
 
 
 def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
@@ -62,6 +82,7 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
             Volume(
                 id="cvol-1",
                 name="data",
+                size_gb=512,
                 occupied_bytes=1536 * 1024**2,
                 created_at=created,
             ),
@@ -97,6 +118,8 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     output = strip_ansi(table.output)
     assert "data" in output and "shared" in output and "cvol-1" in output
     assert "Size" in output and "1.5 GB" in output and "512.0 MB" in output
+    assert "Capacity" in output
+    assert "512 GiB" in output
     assert "Account storage: 2.0 GB used of 1024 GiB limit" in output
     assert captured["team_id"] == "team-1"
     assert captured == {"team_id": "team-1", "page": 1, "per_page": 50}
@@ -114,6 +137,7 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
         1536 * 1024**2,
         512 * 1024**2,
     ]
+    assert [v["size_gb"] for v in payload["volumes"]] == [512, None]
     assert payload["storage_used_bytes"] == 2 * 1024**3
     assert payload["storage_limit_gb"] == 1024
 
@@ -176,6 +200,7 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
             id="cvol-1",
             name="data",
             user_id="user-1",
+            size_gb=512,
             head_checkpoint_id="chk-9",
             occupied_bytes=1536 * 1024**2,
             account_storage_used_bytes=2 * 1024**3,
@@ -191,6 +216,7 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     output = strip_ansi(result.output)
     assert "data" in output and "cvol-1" in output and "Personal" in output
     assert "Head checkpoint: chk-9" in output
+    assert "Capacity: 512 GiB" in output
     assert "Size: 1.5 GB" in output
     assert "Account storage: 2.0 GB used of 1024 GiB limit" in output
     assert captured["args"] == ("data", "team-1")
@@ -222,6 +248,60 @@ def test_volume_delete_and_in_use_error(monkeypatch: pytest.MonkeyPatch, tmp_pat
     failing = runner.invoke(app, ["sandbox", "volumes", "delete", "data", "-y"])
     assert failing.exit_code == 1, failing.output
     assert "attached" in strip_ansi(failing.output)
+
+
+# --- D2: prime sandbox volumes resize ---
+
+
+def test_volume_resize_grows_and_prints_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_resize(self: Any, name: str, size_gb: int, *, team_id: Any = None) -> Volume:
+        captured["args"] = (name, size_gb, team_id)
+        return Volume(id="cvol-1", name=name, size_gb=512, created_at=datetime.now(timezone.utc))
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.resize", fake_resize)
+
+    result = runner.invoke(
+        app, ["sandbox", "volumes", "resize", "data", "--size-gb", "512", "--team-id", "team-1"]
+    )
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert captured["args"] == ("data", 512, "team-1")
+    assert "Resized volume data to 512 GiB" in output
+    assert "Capacity: 512 GiB" in output
+
+
+def test_volume_resize_surfaces_grow_only_rejection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.resize",
+        lambda self, name, size_gb, team_id=None: (_ for _ in ()).throw(
+            APIError("HTTP 400: size_gb must be greater than the current size 100")
+        ),
+    )
+
+    result = runner.invoke(app, ["sandbox", "volumes", "resize", "data", "--size-gb", "100"])
+
+    assert result.exit_code == 1, result.output
+    output = strip_ansi(result.output)
+    assert "HTTP 400" in output
+    assert "must be greater than the current size" in output
+
+
+def test_volume_resize_requires_size_option(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "resize", "data"])
+
+    assert result.exit_code == 2, result.output
+    assert "--size-gb" in strip_ansi(result.output)
 
 
 # --- D2: prime sandbox volumes publish ---
@@ -508,11 +588,13 @@ def _configure_import_mocks(
     }
     monkeypatch.setattr("prime_cli.commands.sandbox_volumes.Config", _DevConfig)
 
-    def fake_volume_create(self: Any, name: str, *, team_id: Any = None) -> Volume:
+    def fake_volume_create(
+        self: Any, name: str, *, team_id: Any = None, size_gb: Any = None
+    ) -> Volume:
         state["order"].append("volume_create")
         state["api_clients"].add(id(self._parent.client))
         state["volume_creates"] = state.get("volume_creates", [])
-        state["volume_creates"].append((name, team_id))
+        state["volume_creates"].append((name, team_id, size_gb))
         return Volume(id="cvol-1", name=name, created_at=datetime.now(timezone.utc))
 
     def fake_sandbox_create(self: Any, request: Any) -> Any:
@@ -613,7 +695,7 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     # Success-path rsync progress is suppressed; stderr stays attached.
     assert state["rsync_kwargs"] == {"stdout": subprocess.DEVNULL}
 
-    assert state["volume_creates"] == [("data", None)]
+    assert state["volume_creates"] == [("data", None, None)]
     sandbox_request = state["sandbox_request"]
     assert sandbox_request.name.startswith("volume-import-data-")
     assert sandbox_request.docker_image == "volume-import:dev"
@@ -676,6 +758,23 @@ def test_volume_import_uses_prod_channel_on_default_api(
     assert state["sandbox_request"].docker_image == "volume-import:prod"
 
 
+def test_volume_import_forwards_size_gb(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    state = _configure_import_mocks(monkeypatch, tmp_path)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "volumes", "create", "data", "--from", str(data_dir), "--size-gb", "512"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert state["volume_creates"] == [("data", None, 512)]
+
+
 def test_volume_import_rsync_failure_keeps_volume_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
@@ -733,12 +832,12 @@ def test_volume_import_reuses_existing_volume_scope(
         ["sandbox", "volumes", "create", "data", "--team-id", "team-1", "--from", str(data_dir)],
     )
     assert first.exit_code == 1, first.output
-    assert state["volume_creates"] == [("data", "team-1")]
+    assert state["volume_creates"] == [("data", "team-1", None)]
 
     # Second run: create now conflicts (same scope); the importer attaches at
     # the volume's durable head for a fresh copy.
-    def taken(self: Any, name: str, *, team_id: Any = None) -> Volume:
-        state["volume_creates"].append((name, team_id))
+    def taken(self: Any, name: str, *, team_id: Any = None, size_gb: Any = None) -> Volume:
+        state["volume_creates"].append((name, team_id, size_gb))
         raise APIError("HTTP 409: Volume name already taken")
 
     monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", taken)
@@ -761,14 +860,14 @@ def test_volume_import_reuses_existing_volume_scope(
     assert "copying the local directory into its current published contents" in output
     assert "resumes incrementally" not in output
     assert state["publish_calls"] == [("sbx-import-1", "data", False, False)]
-    assert state["volume_creates"] == [("data", "team-1"), ("data", "team-1")]
+    assert state["volume_creates"] == [("data", "team-1", None), ("data", "team-1", None)]
     # Same scope carried into the reused importer sandbox.
     assert state["sandbox_request"].team_id == "team-1"
     assert len(state["rsync_calls"]) == 1
     assert state["deleted"] == ["sbx-import-1", "sbx-import-1"]
 
     # A body merely mentioning "HTTP 409" is a server error, not a conflict.
-    def server_error(self: Any, name: str, *, team_id: Any = None) -> Volume:
+    def server_error(self: Any, name: str, *, team_id: Any = None, size_gb: Any = None) -> Volume:
         raise APIError("HTTP 500: detail body mentioning HTTP 409")
 
     monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", server_error)

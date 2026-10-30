@@ -41,7 +41,7 @@ console = get_console()
 
 
 VOLUMES_LIST_JSON_HELP = json_output_help(
-    ".volumes[] = {id, name, user_id?, team_id?, created_at, occupied_bytes}",
+    ".volumes[] = {id, name, user_id?, team_id?, size_gb?, created_at, occupied_bytes}",
     ".total = number",
     ".page = number",
     ".per_page = number",
@@ -104,6 +104,10 @@ def _print_account_storage(used_bytes: int, limit_gb: Optional[int]) -> None:
     console.print(line)
 
 
+def _volume_capacity(volume: Volume) -> str:
+    return f"{volume.size_gb} GiB" if volume.size_gb is not None else "-"
+
+
 def _print_volume(volume: Volume) -> None:
     console.print(f"Name: [cyan]{escape(volume.name)}[/cyan]")
     console.print(f"ID: {escape(volume.id)}")
@@ -111,6 +115,7 @@ def _print_volume(volume: Volume) -> None:
     # None until the first publish reaches DURABLE, then the newest one.
     head = volume.head_checkpoint_id
     console.print(f"Head checkpoint: {escape(head) if head else 'none (never published)'}")
+    console.print(f"Capacity: {_volume_capacity(volume)}")
     console.print(f"Size: {format_file_size(volume.occupied_bytes)}")
     if volume.account_storage_used_bytes is not None:
         _print_account_storage(volume.account_storage_used_bytes, volume.account_storage_limit_gb)
@@ -201,7 +206,9 @@ def _print_retained_importer(
     )
 
 
-def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
+def _import_volume(
+    name: str, team_id: Optional[str], from_path: str, size_gb: Optional[int]
+) -> None:
     # Absolute before rsync: a relative source would be ambiguous in the rsync
     # argv (rsync reads bare words as remote paths, not only the dest).
     path = Path(from_path).expanduser().resolve()
@@ -224,7 +231,7 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
     )
 
     try:
-        sandbox_client.volumes.create(name, team_id=team_id)
+        sandbox_client.volumes.create(name, team_id=team_id, size_gb=size_gb)
     except APIError as error:
         # Prefix match on the SDK's exact format ("HTTP <status>: <body>"):
         # a detail string that merely mentions "HTTP 409" is not a conflict.
@@ -346,15 +353,18 @@ def create(
     from_path: Optional[str] = typer.Option(
         None, "--from", help="Import this local directory into the new volume"
     ),
+    size_gb: Optional[int] = typer.Option(
+        None, "--size-gb", help="Volume capacity in GiB (default: 100)"
+    ),
 ) -> None:
     """Create a volume, optionally importing a local directory."""
     try:
         if from_path is None:
-            volume = _sandbox_client().volumes.create(name, team_id=team_id)
+            volume = _sandbox_client().volumes.create(name, team_id=team_id, size_gb=size_gb)
             console.print(f"[green]✓[/green] Created volume {escape(volume.name)}")
             _print_volume(volume)
             return
-        _import_volume(name, team_id, from_path)
+        _import_volume(name, team_id, from_path, size_gb)
     except typer.Exit:
         raise
     except KeyboardInterrupt:
@@ -428,6 +438,7 @@ def list_volumes(
             ("Name", "cyan"),
             ("Scope", "white"),
             ("Size", "white"),
+            ("Capacity", "white"),
             ("Created", "white"),
             ("ID", "dim"),
         ],
@@ -437,6 +448,7 @@ def list_volumes(
             escape(volume.name),
             _volume_scope(volume),
             format_file_size(volume.occupied_bytes),
+            _volume_capacity(volume),
             human_age(volume.created_at),
             escape(volume.id),
         )
@@ -498,6 +510,36 @@ def delete(
         console.print_exception(show_locals=False)
         raise typer.Exit(1)
     console.print(f"[green]✓[/green] Deleted volume {escape(name)}")
+
+
+@app.command()
+def resize(
+    name: str = typer.Argument(..., help="Volume name"),
+    size_gb: int = typer.Option(
+        ..., "--size-gb", help="New capacity in GiB; must be larger than the current size"
+    ),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
+) -> None:
+    """Grow a volume's capacity. Applies to sandboxes created after the change."""
+    try:
+        volume = _sandbox_client().volumes.resize(name, size_gb, team_id=team_id)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] Resized volume {escape(name)} to {size_gb} GiB")
+    _print_volume(volume)
 
 
 @app.command()

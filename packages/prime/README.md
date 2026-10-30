@@ -208,10 +208,11 @@ prime sandbox download <sandbox-id> /remote/file.txt ./local/
 # Attach persistent volumes (repeatable; :ro mounts read-only)
 prime sandbox create --volume data:/data --volume cache:/mnt:ro python:3.11
 
-# Manage volumes
+# Manage volumes (create takes --size-gb; default capacity is 100 GiB)
 prime sandbox volumes create data
 prime sandbox volumes list [--page N] [--num N] [--json]
 prime sandbox volumes get data
+prime sandbox volumes resize data --size-gb 512
 prime sandbox volumes delete data
 
 # Publish a sandbox's private volume writes as a durable checkpoint

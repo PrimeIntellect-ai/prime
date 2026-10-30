@@ -47,12 +47,20 @@ class Volumes:
     def __init__(self, parent: "SandboxClient"):
         self._parent = parent
 
-    def create(self, name: str, *, team_id: Optional[str] = None) -> Volume:
-        """Create an empty volume in the caller's personal scope or in a team."""
+    def create(
+        self, name: str, *, team_id: Optional[str] = None, size_gb: Optional[int] = None
+    ) -> Volume:
+        """Create an empty volume in the caller's personal scope or in a team.
+
+        ``size_gb`` is the requested capacity in whole GiB; omitted means
+        the base image size (100 GiB).
+        """
         payload: dict[str, object] = {"name": name}
         resolved_team_id = _resolved_team_id(self._parent.client, team_id)
         if resolved_team_id:
             payload["team_id"] = resolved_team_id
+        if size_gb is not None:
+            payload["size_gb"] = size_gb
         response = self._parent.client.request("POST", "/sandbox/volumes", json=payload)
         return Volume.model_validate(response)
 
@@ -93,6 +101,22 @@ class Volumes:
             params=_name_params(self._parent.client, team_id),
         )
 
+    def resize(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
+        """Grow a volume's capacity to ``size_gb`` whole GiB.
+
+        Grow-only: the server rejects a size at or below the volume's
+        current effective size (its set size, or the 100 GiB base image
+        size when unset). The new size applies to sandboxes created after
+        the change; running attachments keep their current size.
+        """
+        response = self._parent.client.request(
+            "PATCH",
+            _volume_path(name),
+            json={"size_gb": size_gb},
+            params=_name_params(self._parent.client, team_id),
+        )
+        return Volume.model_validate(response)
+
     def publish(
         self, sandbox_id: str, name: str, force: bool = False, wait: bool = True
     ) -> SandboxCheckpoint:
@@ -127,12 +151,20 @@ class AsyncVolumes:
     def __init__(self, parent: "AsyncSandboxClient"):
         self._parent = parent
 
-    async def create(self, name: str, *, team_id: Optional[str] = None) -> Volume:
-        """Create an empty volume in the caller's personal scope or in a team."""
+    async def create(
+        self, name: str, *, team_id: Optional[str] = None, size_gb: Optional[int] = None
+    ) -> Volume:
+        """Create an empty volume in the caller's personal scope or in a team.
+
+        ``size_gb`` is the requested capacity in whole GiB; omitted means
+        the base image size (100 GiB).
+        """
         payload: dict[str, object] = {"name": name}
         resolved_team_id = _resolved_team_id(self._parent.client, team_id)
         if resolved_team_id:
             payload["team_id"] = resolved_team_id
+        if size_gb is not None:
+            payload["size_gb"] = size_gb
         response = await self._parent.client.request("POST", "/sandbox/volumes", json=payload)
         return Volume.model_validate(response)
 
@@ -172,6 +204,22 @@ class AsyncVolumes:
             _volume_path(name),
             params=_name_params(self._parent.client, team_id),
         )
+
+    async def resize(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
+        """Grow a volume's capacity to ``size_gb`` whole GiB.
+
+        Grow-only: the server rejects a size at or below the volume's
+        current effective size (its set size, or the 100 GiB base image
+        size when unset). The new size applies to sandboxes created after
+        the change; running attachments keep their current size.
+        """
+        response = await self._parent.client.request(
+            "PATCH",
+            _volume_path(name),
+            json={"size_gb": size_gb},
+            params=_name_params(self._parent.client, team_id),
+        )
+        return Volume.model_validate(response)
 
     async def publish(
         self, sandbox_id: str, name: str, force: bool = False, wait: bool = True

@@ -68,6 +68,31 @@ def _run_upgrade(method: str) -> bool:
     return False
 
 
+def _installed_version_on_disk() -> str | None:
+    """Return the prime version installed in this environment, read fresh from disk.
+
+    The running process imported its modules at startup, so after an upgrade
+    ``__version__`` still reports the old version. A fresh subprocess reads the
+    current on-disk install instead.
+    """
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from importlib.metadata import version; print(version('prime'))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 @app.callback(invoke_without_command=True)
 def upgrade(
     ctx: typer.Context,
@@ -118,7 +143,32 @@ def upgrade(
     console.print(f"\n[dim]Detected install method: {method}[/dim]")
 
     if _run_upgrade(method):
-        console.print(f"\n[green]✓ Successfully upgraded to {latest_version}![/green]")
+        # `uv tool upgrade` (and friends) can exit 0 without changing anything,
+        # e.g. when the tool was installed with an exact version pin
+        # (`uv tool install prime@latest`). Verify the on-disk version instead
+        # of trusting the exit code.
+        new_version = _installed_version_on_disk()
+        if new_version is not None and new_version != __version__:
+            console.print(f"\n[green]✓ Successfully upgraded to {new_version}![/green]")
+            raise typer.Exit(0)
+        if new_version is not None and version.parse(new_version) >= latest:
+            console.print(f"\n[green]✓ Already on the latest version: {new_version}[/green]")
+            raise typer.Exit(0)
+        console.print(
+            f"\n[red]The upgrade command reported success, but prime is still on {__version__} "
+            f"(expected {latest_version}).[/red]"
+        )
+        if method == "uv_tool":
+            console.print(
+                "[red]An exact version pin (e.g. from 'uv tool install prime@latest') "
+                "makes 'uv tool upgrade' a no-op. Reinstall without the pin:[/red]"
+            )
+            console.print("  [dim]uv tool install --reinstall prime[/dim]")
+        else:
+            console.print("[red]Try reinstalling manually:[/red]")
+            console.print("  [dim]pipx install --force prime[/dim]")
+            console.print("  [dim]pip install --force-reinstall prime[/dim]")
+        raise typer.Exit(1)
     else:
         console.print("\n[red]Upgrade failed. You can try manually:[/red]")
         console.print("  [dim]uv tool upgrade prime[/dim]")

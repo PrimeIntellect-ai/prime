@@ -20,19 +20,18 @@ Prime Intellect CLI & SDKs
 [![Python versions](https://img.shields.io/pypi/pyversions/prime?cacheSeconds=60)](https://pypi.org/project/prime/)
 [![Downloads](https://img.shields.io/pypi/dm/prime)](https://pypi.org/project/prime/)
 
-Command line interface and SDKs for Prime Lab, Hosted Training, GPU resources, sandboxes, and environments.
+Command line interface and SDKs for Hosted Training, hosted evaluations, GPU resources, sandboxes, and environments.
 
 </div>
 
 ## Overview
 
-Prime is the official CLI and Python SDK for [Prime Intellect](https://primeintellect.ai), providing seamless access to Prime Lab workflows, Hosted Training, GPU compute infrastructure, remote code execution environments (sandboxes), and AI inference capabilities.
+Prime is the official CLI and Python SDK for [Prime Intellect](https://primeintellect.ai), providing seamless access to Hosted Training, hosted evaluations, GPU compute infrastructure, remote code execution environments (sandboxes), and AI inference capabilities.
 
 **What can you do with Prime?**
 
-- Deploy GPU pods with H100, A100, and other high-performance GPUs
 - Launch Prime Agent, with automatic installation on first use
-- Set up Lab workspaces for verifiers environments, evals, GEPA, and training
+- Deploy GPU pods with H100, A100, and other high-performance GPUs
 - Discover and launch Hosted Training runs against verifiers environments
 - Create and manage isolated sandbox environments for running code
 - Access hundreds of pre-configured development environments
@@ -70,6 +69,9 @@ pip install prime
 # Interactive login (recommended)
 prime login
 
+# Cap what the key minted by this login can do (see `prime login --help`)
+prime login --max-concurrent-sandboxes 10 --max-concurrent-tunnels 2
+
 # Or set API key directly
 prime config set-api-key
 
@@ -82,20 +84,13 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 ### Basic Usage
 
 ```bash
-# Launch Prime Agent (installs automatically on first use)
-prime agent
-
 # Browse environments on the hub
 prime env list
-
-# Set up a Lab workspace
-prime lab setup
 
 # See available Hosted Training models, capacity, and pricing
 prime train models
 
-# Generate and launch a Hosted Training config
-prime train init
+# Launch a prime-rl config as a Hosted Training run
 prime train rl.toml
 
 # List available GPUs
@@ -113,21 +108,27 @@ prime sandbox create python:3.11
 
 ## Features
 
-### Lab and Hosted Training
+### Prime Agent
 
-Prime Lab connects verifiers environments to evaluations, GEPA prompt optimization, and Hosted Training. Start with `prime lab setup` to create a local workspace with starter configs, then use `prime train models` to choose a Hosted Training model with current capacity and pricing.
+Run `prime agent` to launch Prime Agent. Trailing arguments, including `--help`,
+are forwarded to it. If it is missing, the CLI downloads the stable installer,
+verifies a pinned SHA-256 digest before execution, and launches the installation
+from `~/.local/bin` or `PRIME_AGENT_RUST_PREFIX/bin`. Existing TypeScript
+installations are also discovered.
+
+The installer pin must be updated when the published script changes. A checksum
+mismatch stops installation; no downloaded script runs in that case.
+
+
+### Hosted Training
+
+Build and evaluate environments with [verifiers](https://github.com/PrimeIntellect-ai/verifiers) (`uv add verifiers`). Use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
 
 ```bash
-# Set up a Lab workspace
-prime lab setup
-
-# List trainable models, capacity, and token pricing
+# List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Generate a Hosted Training config
-prime train init
-
-# Launch the run from the generated config
+# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
@@ -154,8 +155,7 @@ prime env inspect <environment-name>
 # Install an environment locally
 prime env install <environment-name>
 
-# Create and push your own environment
-prime env init my-environment
+# Push your own environment (scaffold one with verifiers' `vf-init`)
 prime env push my-environment
 ```
 
@@ -187,14 +187,14 @@ prime pods terminate <pod-id>
 Isolated environments for running code remotely:
 
 ```bash
-# Create a sandbox
+# Create a sandbox (VM-backed)
 prime sandbox create python:3.11
 
-# Create a VM sandbox with GPUs
-prime sandbox create user-1/vm-image:latest --vm --gpu-count 1 --gpu-type H100_80GB
+# Create a sandbox with GPUs
+prime sandbox create user-1/vm-image:latest --gpu-count 1 --gpu-type RTX_PRO_6000
 
-# Create a CPU-only VM sandbox
-prime sandbox create user-1/vm-image:latest --vm
+# Create a one-shot workload (arguments after -- are preserved exactly)
+prime sandbox create user-1/vm-image:latest -- /worker --platform linux/amd64
 
 # List sandboxes
 prime sandbox list
@@ -202,13 +202,93 @@ prime sandbox list
 # Execute commands
 prime sandbox run <sandbox-id> -- python script.py
 
+# Run as an existing guest account
+prime sandbox run <sandbox-id> --user ubuntu -- id
+
+# Request a filesystem checkpoint; check again until it is DURABLE
+prime sandbox checkpoint create <sandbox-id>
+prime sandbox checkpoint list <sandbox-id> [--checkpoint-id <checkpoint-id>]
+# Any checkpoint by id, rootfs or volume
+prime sandbox checkpoint get <checkpoint-id>
+prime sandbox checkpoint restore <checkpoint-id> --name restored-sandbox
+# Checkpoint + restore in one step, inheriting the source's resources
+prime sandbox fork <sandbox-id> [--name forked-sandbox]
+
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
 prime sandbox download <sandbox-id> /remote/file.txt ./local/
 
+# Attach persistent volumes (repeatable; :ro mounts read-only)
+prime sandbox create --volume data:/data --volume cache:/mnt:ro python:3.11
+
+# Manage volumes
+prime sandbox volumes create data
+prime sandbox volumes list [--page N] [--num N] [--json]
+prime sandbox volumes get data
+prime sandbox volumes delete data
+
+# Publish a sandbox's private volume writes as a durable checkpoint
+prime sandbox volumes publish data --sandbox <sandbox-id> [--force] [--no-wait]
+
+# Create a volume and import a local directory into it
+prime sandbox volumes create data --from ~/datasets/my-data
+
 # Clean up
 prime sandbox delete <sandbox-id>
 ```
+
+Volume writes are private to a sandbox until a publish reaches DURABLE. A
+new volume starts empty; each publish becomes the volume's head, and a
+sandbox always sees the volume as of its own creation, so attach a new
+sandbox to read a newer head. Read-only mounts cannot publish. A publish
+whose volume head moved since attach is rejected (409) unless `--force`,
+which still cannot overtake another sandbox's pending publish. `--no-wait`
+prints the checkpoint id and state; the data is published only once that
+checkpoint is DURABLE, checkable with
+`prime sandbox checkpoint get <checkpoint-id>`.
+
+`volumes create --from` copies a local directory into a disposable
+read-write importer sandbox, publishes it, waits until DURABLE, and only
+then deletes the importer. An rsync failure publishes nothing and leaves
+the volume's previous durable contents in place. A publish failure,
+timeout, or interrupt keeps the importer sandbox so the checkpoint state
+can be inspected first; delete it manually once it is no longer needed.
+The importer is reaped automatically after 30 minutes without transfer
+activity, and publishing does not reset that clock. Importing into an
+existing volume attaches it at its current durable head for a fresh copy,
+not a resumption of a failed transfer.
+
+### Volume contents
+
+Inspect a volume's files:
+
+```bash
+prime volumes list                         # List volumes
+prime volumes ls my-data                   # List files and directories
+prime volumes ls my-data datasets/ -l -h   # Sizes and modified times
+prime volumes ls my-data runs/ -R          # Include nested run outputs
+prime volumes ls my-data -o json           # Volume-relative paths and metadata
+prime volumes du my-data -h                # Stored bytes, object count, and cap
+prime volumes du my-data datasets/ -o json # Subtree and whole-volume usage
+prime volumes cat my-data config.json | jq .
+```
+
+Paths use the same validation as `volumes get` and `put`: they are relative
+to the volume root, and `/` selects that root. `ls -R` includes nested
+directories, including empty directories. `du` scans the entire volume
+with paginated listings so the usage percentage always compares the
+whole volume with its cap, even when a file or subtree is selected.
+Directory marker objects count toward the object total; internal SSH sync
+metadata is excluded. These commands report usage without enforcing the cap.
+
+While a run or read-write session holds the volume, `ls`, `du`, `cat` and
+`get` read it live, as that writer has it right now: the CLI starts (or
+reuses) a read-only SSH view of the writer's volume and runs the read there,
+so a run's checkpoints are visible and downloadable mid-run. This needs your
+SSH key (`prime config set-ssh-key-path`); the view stops after 30 minutes
+idle. Otherwise, and while a finished writer is still syncing back, reads use
+the stored copy. Notes about the source go to stderr; `cat` writes only the
+file's bytes to stdout, without adding a newline.
 
 ### Team Management
 
@@ -287,6 +367,13 @@ sandbox_client.wait_for_creation(sandbox.id)
 result = sandbox_client.execute_command(sandbox.id, "python --version")
 print(result.stdout)
 
+# Request a filesystem checkpoint and wait until it is durable
+checkpoint = sandbox_client.checkpoint(sandbox.id)
+checkpoint = sandbox_client.wait_for_checkpoint(checkpoint.id, timeout_seconds=300)
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox", checkpoint_id=checkpoint.id
+))
+
 # Clean up
 sandbox_client.delete(sandbox.id)
 ```
@@ -336,6 +423,40 @@ prime pods ssh <pod-id>
 ## Related Packages
 
 - **prime-sandboxes** - Lightweight SDK for sandboxes only (if you don't need the full CLI)
+
+## Local dedicated-training validation (experimental)
+
+Validate a dedicated RL or SFT config against the schema of the runtime selected
+by Platform, including its default image:
+
+```bash
+prime train validate rl.toml
+prime train validate rl.toml --ref your-branch
+prime train validate sft.toml --sft --artifact-out normalized.json
+```
+
+The CLI needs `uv` to cache a CPU-only schema environment. An existing matching
+interpreter can be supplied with `--schema-python`. No FFT checkout is required.
+Schema setup precompiles Python bytecode to speed up later validations, and the
+CLI removes cached environments unused for 14 days or beyond the four most recent.
+Platform supplies the pinned image digest and schema commit before local parsing;
+`--image-tag`, `--ref`, and `--pr` override runtime selection when needed.
+With `--ref`, `--pr`, or a top-level `source_ref`, validation installs and runs
+that prime-rl commit's schema package on your machine, including on `prime train`
+before the confirmation prompt.
+
+Validation checks and normalizes the config locally. Platform owns deployment
+adaptation and rendering. Environment plugins and dispatch policy remain deferred.
+Validation creates no run. `--artifact-out` can save the normalized config for
+inspection.
+
+Dedicated submissions (`prime train rl.toml` or `prime train sft.toml --sft`)
+perform local validation automatically before creating a run or volume. Platform
+checks the runtime pins and deployment policy, applies hosted settings, and
+renders the deployment internally. Queued runs keep the same pinned runtime and
+resolved configs. A changed image tag or source branch requires a fresh retry.
+This requires a Platform deployment with JSON-config chart support enabled;
+unsupported deployments return an error before submission.
 
 ## License
 

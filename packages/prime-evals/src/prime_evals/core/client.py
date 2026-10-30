@@ -91,7 +91,10 @@ class APIClient:
             response = self.client.request(method, url, params=params, json=json, timeout=timeout)
             response.raise_for_status()
 
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as e:
+                raise APIError(f"Invalid JSON in API response: {e}") from e
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")
             return result
@@ -185,7 +188,10 @@ class AsyncAPIClient:
             )
             response.raise_for_status()
 
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as e:
+                raise APIError(f"Invalid JSON in API response: {e}") from e
             if not isinstance(result, dict):
                 raise APIError("API response was not a dictionary")
             return result

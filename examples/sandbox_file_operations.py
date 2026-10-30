@@ -30,7 +30,6 @@ async def main() -> None:
         request = CreateSandboxRequest(
             name="file-operations-demo",
             docker_image="python:3.11-slim",
-            start_command="tail -f /dev/null",  # Keep container running
             cpu_cores=1,
             memory_gb=2,
             disk_size_gb=10,
@@ -177,7 +176,6 @@ def sync_example() -> None:
         request = CreateSandboxRequest(
             name="sync-file-demo",
             docker_image="python:3.11-slim",
-            start_command="tail -f /dev/null",
             cpu_cores=1,
             memory_gb=2,
             timeout_minutes=15,

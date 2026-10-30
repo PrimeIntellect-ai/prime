@@ -22,7 +22,7 @@ from pathlib import Path
 
 from prime_sandboxes import APIClient, CreateSandboxRequest, SandboxClient
 
-DEFAULT_MODEL = "deepseek/deepseek-chat"
+DEFAULT_MODEL = "openai/gpt-5.6-luna"
 DEFAULT_HOSTED_TIMEOUT_MINUTES = "120"
 DEFAULT_SANDBOX_IMAGE = "python:3.11-bookworm"
 
@@ -277,10 +277,7 @@ def remote_script(config: RemoteConfig) -> str:
                 version = "0.0.1"
                 description = "Temporary Prime release e2e smoke environment"
                 requires-python = ">=3.11"
-                dependencies = [
-                  "datasets>=2.18.0",
-                  "verifiers>=0.1.14",
-                ]
+                dependencies = ["verifiers>=0.4.0"]
 
                 [build-system]
                 requires = ["hatchling"]
@@ -288,9 +285,6 @@ def remote_script(config: RemoteConfig) -> str:
 
                 [tool.hatch.build]
                 include = ["{MODULE_NAME}.py", "README.md"]
-
-                [project.entry-points."verifiers.environments"]
-                {MODULE_NAME} = "{MODULE_NAME}:load_environment"
                 ''',
             )
             write_file(
@@ -305,54 +299,47 @@ def remote_script(config: RemoteConfig) -> str:
             write_file(
                 ENV_DIR / f"{MODULE_NAME}.py",
                 '''
-                from __future__ import annotations
+                import re
 
-                from datasets import Dataset
-                import verifiers as vf
+                import verifiers.v1 as vf
 
                 SYSTEM_PROMPT = 'Answer with the exact requested token inside <answer> tags.'
+                _ANSWER = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 
-                def _rows(split: str, variant: str) -> list[dict[str, str]]:
-                    return [
-                        {
-                            "id": f"{split}-{variant}-0",
-                            "question": "Return only the token prime inside <answer> tags.",
-                            "answer": "prime",
-                        }
-                    ]
+                class SmokeData(vf.TaskData):
+                    answer: str
 
 
-                def load_environment(
-                    split: str = "eval",
-                    variant: str = "default",
-                    num_examples: int = -1,
-                    **kwargs,
-                ) -> vf.Environment:
-                    dataset = Dataset.from_list(_rows(split, variant))
-                    if num_examples > 0:
-                        dataset = dataset.select(range(min(num_examples, len(dataset))))
+                class SmokeTask(vf.Task[SmokeData]):
+                    @vf.stop
+                    async def single_turn(self, trace: vf.Trace) -> bool:
+                        return trace.num_turns >= 1
 
-                    parser = vf.XMLParser(["answer"])
+                    @vf.reward(weight=1.0)
+                    async def exact_answer(self, trace: vf.Trace) -> float:
+                        match = _ANSWER.search(trace.last_reply or "")
+                        response = match.group(1).strip().lower() if match else ""
+                        return float(response == self.data.answer)
 
-                    async def exact_answer(completion, answer, parser) -> float:
-                        parsed = parser.parse_answer(completion)
-                        if parsed is None:
-                            return 0.0
-                        return 1.0 if str(parsed).strip().lower() == str(answer).strip() else 0.0
 
-                    rubric = vf.Rubric(
-                        funcs=[exact_answer, parser.get_format_reward_func()],
-                        weights=[1.0, 0.2],
-                        parser=parser,
-                    )
-                    return vf.SingleTurnEnv(
-                        dataset=dataset,
-                        eval_dataset=dataset,
-                        rubric=rubric,
-                        system_prompt=SYSTEM_PROMPT,
-                        **kwargs,
-                    )
+                class SmokeConfig(vf.TasksetConfig):
+                    split: str = "eval"
+                    variant: str = "default"
+
+
+                class SmokeTaskset(vf.Taskset[SmokeTask, SmokeConfig]):
+                    def load(self) -> list[SmokeTask]:
+                        data = SmokeData(
+                            id=f"{self.config.split}-{self.config.variant}-0",
+                            prompt="Return only the token prime inside <answer> tags.",
+                            system_prompt=SYSTEM_PROMPT,
+                            answer="prime",
+                        )
+                        return [SmokeTask(data, self.config.task)]
+
+
+                __all__ = ["SmokeTaskset"]
                 ''',
             )
 
@@ -371,6 +358,8 @@ def remote_script(config: RemoteConfig) -> str:
                     str(SOURCE_ROOT / "packages" / "prime-evals"),
                     "-e",
                     str(SOURCE_ROOT / "packages" / "prime-sandboxes"),
+                    "-e",
+                    str(SOURCE_ROOT / "packages" / "prime-traces"),
                     "-e",
                     str(SOURCE_ROOT / "packages" / "prime-tunnel"),
                     "-e",
@@ -432,20 +421,27 @@ def remote_script(config: RemoteConfig) -> str:
             return f"{owner}/{name}"
 
 
-        def latest_eval_dir() -> Path:
-            output_roots = (LAB_ROOT / "outputs", ENV_DIR / "outputs")
-            candidates = sorted(
-                (
-                    path.parent
-                    for output_root in output_roots
-                    for path in output_root.glob("evals/**/results.jsonl")
-                ),
-                key=lambda path: path.stat().st_mtime,
-            )
-            if not candidates:
-                searched = ", ".join(str(path) for path in output_roots)
-                raise RuntimeError(f"No eval output directory found under: {searched}")
-            return candidates[-1]
+        def write_eval_results_for_push() -> Path:
+            # prime no longer runs evals locally; push a minimal results directory.
+            eval_dir = LAB_ROOT / "outputs" / "evals" / "release-e2e"
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            metadata = {
+                "env_id": ENV_NAME,
+                "model": CONFIG["model"],
+                "num_examples": 1,
+                "rollouts_per_example": 1,
+                "avg_reward": 1.0,
+            }
+            sample = {
+                "example_id": 0,
+                "prompt": [{"role": "user", "content": "ping"}],
+                "completion": [{"role": "assistant", "content": "pong"}],
+                "answer": "pong",
+                "reward": 1.0,
+            }
+            write_file(eval_dir / "metadata.json", json.dumps(metadata))
+            write_file(eval_dir / "results.jsonl", json.dumps(sample) + "\\n")
+            return eval_dir
 
 
         def parse_hosted_eval_ids(output: str) -> list[str]:
@@ -555,7 +551,7 @@ def remote_script(config: RemoteConfig) -> str:
 
                 [[eval]]
                 env_id = "{REMOTE_ENV_SLUG}"
-                env_args = {{ split = "eval", variant = "single" }}
+                env_args = {{ taskset = {{ split = "eval", variant = "single" }} }}
                 ''',
             )
             single = run(["prime", "eval", "run", str(single_config), "--hosted"], timeout=600)
@@ -574,14 +570,14 @@ def remote_script(config: RemoteConfig) -> str:
                 env_id = "{REMOTE_ENV_SLUG}"
                 num_examples = 1
                 rollouts_per_example = 1
-                env_args = {{ split = "eval", variant = "multi-a" }}
+                env_args = {{ taskset = {{ split = "eval", variant = "multi-a" }} }}
                 eval_name = "{ENV_NAME} multi config A"
 
                 [[eval]]
                 env_id = "{REMOTE_ENV_SLUG}"
                 num_examples = 1
                 rollouts_per_example = 2
-                env_args = {{ split = "eval", variant = "multi-b" }}
+                env_args = {{ taskset = {{ split = "eval", variant = "multi-b" }} }}
                 eval_name = "{ENV_NAME} multi config B"
                 ''',
             )
@@ -625,27 +621,7 @@ def remote_script(config: RemoteConfig) -> str:
                 run(["prime", "env", "info", REMOTE_ENV_SLUG], timeout=180)
                 run(["prime", "env", "install", REMOTE_ENV_SLUG, "--with", "pip"], timeout=900)
 
-                run(
-                    [
-                        "prime",
-                        "eval",
-                        "run",
-                        ENV_NAME,
-                        "-m",
-                        CONFIG["model"],
-                        "-n",
-                        "1",
-                        "-r",
-                        "1",
-                        "--env-path",
-                        str(ENV_DIR),
-                        "--save-results",
-                        "--skip-upload",
-                    ],
-                    cwd=LAB_ROOT,
-                    timeout=900,
-                )
-                eval_dir = latest_eval_dir()
+                eval_dir = write_eval_results_for_push()
                 run(
                     [
                         "prime",
@@ -661,25 +637,6 @@ def remote_script(config: RemoteConfig) -> str:
                     ],
                     cwd=LAB_ROOT,
                     timeout=600,
-                )
-
-                run(
-                    [
-                        "prime",
-                        "eval",
-                        "run",
-                        ENV_NAME,
-                        "-m",
-                        CONFIG["model"],
-                        "-n",
-                        "1",
-                        "-r",
-                        "1",
-                        "--env-path",
-                        str(ENV_DIR),
-                    ],
-                    cwd=LAB_ROOT,
-                    timeout=900,
                 )
 
                 hosted_eval_checks()

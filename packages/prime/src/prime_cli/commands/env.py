@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 import zipfile
 from datetime import datetime
 
@@ -25,7 +24,6 @@ from rich.table import Table
 from rich.text import Text
 
 from ..client import APIClient, APIError
-from ..lab_hygiene import LabHygieneOptions, find_lab_workspace, run_lab_hygiene_preflight
 from ..utils import (
     PlainTyper,
     get_console,
@@ -34,8 +32,12 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.env_metadata import find_environment_metadata
+from ..utils.environment_runtime import (
+    VERIFIERS_V1,
+    classify_runtime_from_metadata,
+    parse_runtime_option,
+)
 from ..utils.formatters import format_file_size
-from ..utils.formatters import strip_ansi as _strip_ansi
 from ..utils.prompt import (
     any_provided,
     prompt_for_value,
@@ -43,8 +45,7 @@ from ..utils.prompt import (
     validate_env_var_name,
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
-from ..verifiers_bridge import is_help_request, print_env_build_help, print_env_init_help
-from ..verifiers_plugin import load_verifiers_prime_plugin, resolve_workspace_python
+from ..utils.workspace_python import resolve_workspace_python
 from .config import TEAM_ID_PATTERN
 
 app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
@@ -57,8 +58,17 @@ DEFAULT_LIST_LIMIT = 20
 MAX_TARBALL_SIZE_LIMIT = 250 * 1024 * 1024  # 250MB
 
 # Action subcommand app
-action_app = PlainTyper(help="Manage environment actions (CI jobs)", no_args_is_help=True)
-app.add_typer(action_app, name="action", rich_help_panel="Manage")
+action_app = PlainTyper(
+    help="Removed: the Environments Hub no longer runs Environment Actions.",
+    no_args_is_help=True,
+)
+app.add_typer(action_app, name="action", rich_help_panel="Manage", hidden=True, deprecated=True)
+
+_ACTIONS_REMOVED_NOTE = (
+    "[yellow]Environment Actions were removed from the Environments Hub.[/yellow] "
+    "Pushed environments no longer run CI, so there is no action status to show. "
+    "See https://docs.primeintellect.ai/tutorials-environments/environments"
+)
 
 # Secret subcommand app
 secret_app = PlainTyper(help="Manage environment secrets", no_args_is_help=True)
@@ -68,27 +78,16 @@ app.add_typer(secret_app, name="secret", rich_help_panel="Manage")
 var_app = PlainTyper(help="Manage environment variables", no_args_is_help=True)
 app.add_typer(var_app, name="var", rich_help_panel="Manage")
 
-ACTION_LIST_JSON_HELP = json_output_help(
-    ".actions[] = {id, name|job_type, status, version, trigger, created_at}",
-    ".total = number",
-)
-
-ACTION_RETRY_JSON_HELP = json_output_help(
-    ". = {success, job_id?, version_id?, message?}",
-)
-
 ENV_LIST_JSON_HELP = json_output_help(
-    ".environments[] = {environment, description, visibility, version, stars, "
-    "updated_at, action_status?, tags[]?}",
+    ".environments[] = {environment, description, visibility, version, stars, updated_at, tags[]?}",
     ".total = number",
     ".page = number",
     ".per_page = number",
 )
 
 ENV_STATUS_JSON_HELP = json_output_help(
-    ". = {name, description?, visibility, latest_version?, action?}",
+    ". = {name, description?, visibility, latest_version?}",
     ".latest_version? = {semantic_version?, content_hash?, created_at?}",
-    ".action? = {status, job_id?}",
 )
 
 ENV_INSPECT_JSON_HELP = json_output_help(
@@ -168,257 +167,47 @@ def _resolve_environment(environment: Optional[str]) -> Tuple[str, str]:
     raise typer.Exit(1)
 
 
-@action_app.command("list", epilog=ACTION_LIST_JSON_HELP)
+def _environment_actions_removed() -> None:
+    console.print(_ACTIONS_REMOVED_NOTE)
+    raise typer.Exit(1)
+
+
+_IGNORE_LEGACY_FLAGS = {"allow_extra_args": True, "ignore_unknown_options": True}
+
+
+@action_app.command("list", hidden=True, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
 def actions_list(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
     ),
-    version_id: Optional[str] = typer.Option(
-        None,
-        "--version-id",
-        "-v",
-        help="Filter by version ID",
-    ),
-    num: int = typer.Option(
-        20,
-        "--num",
-        "-n",
-        help="Items per page",
-    ),
-    page: int = typer.Option(
-        1,
-        "--page",
-        "-p",
-        help="Page number",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
 ) -> None:
-    """List actions (CI jobs) for an environment."""
-    validate_output_format(output, console)
-
-    if num < 1 or page < 1:
-        console.print("[red]Error:[/red] --num and --page must be at least 1")
-        raise typer.Exit(1)
-
-    owner, env_name = _parse_environment_slug(environment)
-
-    try:
-        client = APIClient()
-        offset = (page - 1) * num
-        params: dict[str, int | str] = {
-            "limit": num,
-            "offset": offset,
-        }
-        if version_id:
-            params["version_id"] = version_id
-
-        response = client.get(f"/environmentshub/{owner}/{env_name}/actions", params=params)
-        data = response.get("data", {})
-
-        if output == "json":
-            output_data_as_json(data, console)
-            return
-
-        actions = data.get("actions", [])
-        total = data.get("total", 0)
-
-        if not actions:
-            if page > 1:
-                console.print("[yellow]No more results.[/yellow]")
-            else:
-                console.print("[yellow]No actions found for this environment.[/yellow]")
-            return
-
-        table = Table(title=f"Actions for {owner}/{env_name}")
-        table.add_column("ID", style="cyan", no_wrap=True)
-        table.add_column("Name", style="blue")
-        table.add_column("Status", style="yellow")
-        table.add_column("Version", style="dim")
-        table.add_column("Trigger", style="dim")
-        table.add_column("Created", style="dim")
-
-        for action in actions:
-            action_id = action.get("id", "")
-            name = action.get("name") or action.get("job_type", "")
-            status = action.get("status", "")
-
-            # Color the status
-            status_color = {
-                "SUCCESS": "[green]SUCCESS[/green]",
-                "FAILED": "[red]FAILED[/red]",
-                "RUNNING": "[yellow]RUNNING[/yellow]",
-                "PENDING": "[dim]PENDING[/dim]",
-                "CANCELLED": "[dim]CANCELLED[/dim]",
-            }.get(status, status)
-
-            version = action.get("version") or {}
-            version_str = version.get("semantic_version") or (version.get("content_hash") or "")[:8]
-            trigger = action.get("trigger", "")
-            created = action.get("created_at", "")
-            if created:
-                created = format_time_ago(created)
-
-            table.add_row(action_id, name, status_color, version_str, trigger, created)
-
-        console.print(table)
-        if total > page * num:
-            console.print(
-                f"\n[yellow]Showing page {page} of results. "
-                f"Use --page {page + 1} to see more.[/yellow]"
-            )
-        else:
-            console.print(f"\n[dim]Total: {total} action(s)[/dim]")
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    """Removed: the Hub no longer runs Environment Actions."""
+    _environment_actions_removed()
 
 
-@action_app.command("logs")
+@action_app.command("logs", hidden=True, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
 def actions_logs(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
     ),
-    action_id: str = typer.Argument(
-        ...,
-        help="Action/job ID to get logs for",
-    ),
-    tail: int = typer.Option(1000, "--tail", "-n", help="Number of lines to show"),
-    follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
+    action_id: Optional[str] = typer.Argument(None, help="Action/job ID"),
 ) -> None:
-    """Get logs for a specific action."""
-    owner, env_name = _parse_environment_slug(environment)
-
-    try:
-        client = APIClient()
-
-        if follow:
-            console.print(f"[dim]Watching logs for action {action_id}... (Ctrl+C to stop)[/dim]\n")
-            last_logs = ""
-            consecutive_errors = 0
-
-            while True:
-                try:
-                    response = client.get(
-                        f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
-                        params={"tail_lines": tail},
-                    )
-                    data = response.get("data", {})
-                    logs = _strip_ansi(data.get("logs") or "")
-                    consecutive_errors = 0
-
-                    if logs != last_logs:
-                        old_lines = last_logs.splitlines() if last_logs else []
-                        new_lines = logs.splitlines()
-
-                        if not last_logs:
-                            for line in new_lines:
-                                console.print(line)
-                        else:
-                            overlap = 0
-                            max_overlap = min(len(old_lines), len(new_lines))
-                            for i in range(1, max_overlap + 1):
-                                if old_lines[-i:] == new_lines[:i]:
-                                    overlap = i
-                            for line in new_lines[overlap:]:
-                                console.print(line)
-
-                        last_logs = logs
-                except APIError as e:
-                    consecutive_errors += 1
-                    if "429" in str(e):
-                        if consecutive_errors >= 3:
-                            console.print("[yellow]Rate limited. Waiting 30s...[/yellow]")
-                            time.sleep(30)
-                        else:
-                            time.sleep(10)
-                        continue
-                    raise
-
-                time.sleep(5)
-        else:
-            response = client.get(
-                f"/environmentshub/{owner}/{env_name}/actions/{action_id}/logs",
-                params={"tail_lines": tail},
-            )
-            data = response.get("data", {})
-            logs = _strip_ansi(data.get("logs") or "")
-
-            if logs:
-                console.print(logs)
-            else:
-                console.print("[yellow]No logs available yet.[/yellow]")
-
-    except KeyboardInterrupt:
-        console.print("\n[dim]Stopped watching logs.[/dim]")
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    """Removed: the Hub no longer runs Environment Actions."""
+    _environment_actions_removed()
 
 
-@action_app.command("retry", epilog=ACTION_RETRY_JSON_HELP)
+@action_app.command("retry", hidden=True, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
 def actions_retry(
     environment: str = typer.Argument(
         ...,
         help="Environment slug (e.g., 'owner/environment-name')",
     ),
-    action_id: Optional[str] = typer.Argument(
-        None,
-        help="Action ID to retry (retries latest action if not provided)",
-    ),
-    output: str = typer.Option(
-        "table",
-        "--output",
-        "-o",
-        help="Output format: table or json",
-    ),
+    action_id: Optional[str] = typer.Argument(None, help="Action ID"),
 ) -> None:
-    """Retry an action (integration test) for an environment.
-
-    If no action ID is provided, retries the latest action.
-    """
-    validate_output_format(output, console)
-
-    owner, env_name = _parse_environment_slug(environment)
-
-    try:
-        client = APIClient()
-        payload = {}
-        if action_id:
-            payload["action_id"] = action_id
-
-        response = client.post(
-            f"/environmentshub/{owner}/{env_name}/actions/retry",
-            json=payload,
-        )
-        data = response.get("data", {})
-
-        if output == "json":
-            output_data_as_json(data, console)
-            return
-
-        if data.get("success"):
-            console.print("[green]Successfully triggered retry[/green]")
-            console.print(f"[dim]Job ID: {data.get('job_id')}[/dim]")
-            console.print(f"[dim]Version: {data.get('version_id')}[/dim]")
-            job_id = data.get("job_id")
-            console.print(
-                f"\n[dim]Use 'prime env action logs {environment} {job_id}' to view logs[/dim]"
-            )
-        else:
-            console.print(f"[red]Retry failed:[/red] {data.get('message', 'Unknown error')}")
-            raise typer.Exit(1)
-
-    except APIError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
+    """Removed: the Hub no longer runs Environment Actions."""
+    _environment_actions_removed()
 
 
 def display_upstream_environment_info(
@@ -581,6 +370,9 @@ def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
     if file_path.is_symlink():
         return False
 
+    # Hardlinks are fine to include: _add_file_to_archive stores them as
+    # regular file content so pull/install safe-extract never sees LNKTYPE.
+
     rel_path = file_path.relative_to(base_path)
 
     # Skip hidden files
@@ -665,6 +457,25 @@ def _collect_archive_files(env_path: Path) -> List[Path]:
     return [files_by_rel_path[rel_path] for rel_path in sorted(files_by_rel_path)]
 
 
+def _add_file_to_archive(tar: tarfile.TarFile, file_path: Path, arcname: str) -> None:
+    """Add a file as REGTYPE content (never symlink/hardlink members).
+
+    ``tar.add()`` records a hardlink (``LNKTYPE``) when another file with the
+    same inode is already in the archive. ``_safe_tar_extract`` rejects
+    hardlinks, so push must always store byte content as a regular file —
+    same rationale as skipping symlinks at collect time.
+    """
+    if file_path.is_symlink():
+        return
+
+    info = tar.gettarinfo(str(file_path), arcname=arcname)
+    info.type = tarfile.REGTYPE
+    info.linkname = ""
+    info.size = file_path.stat().st_size
+    with open(file_path, "rb") as handle:
+        tar.addfile(info, handle)
+
+
 def compute_content_hash(env_path: Path) -> str:
     """Compute deterministic, cross-platform content hash for environment files.
 
@@ -689,21 +500,6 @@ def compute_content_hash(env_path: Path) -> str:
     return content_hasher.hexdigest()
 
 
-def _format_action_status(status: Optional[str]) -> Text:
-    """Format action status with color coding."""
-    if not status:
-        return Text("-", style="dim")
-    status_colors = {
-        "SUCCESS": "green",
-        "FAILED": "red",
-        "RUNNING": "yellow",
-        "PENDING": "yellow",
-        "CANCELLED": "dim",
-    }
-    color = status_colors.get(status.upper(), "white")
-    return Text(status, style=color)
-
-
 def _print_env_inspect_examples(owner: str, name: str, version: str) -> None:
     """Print inspect commands for an environment version."""
     console.print("[bold yellow]Inspect[/bold yellow]")
@@ -725,13 +521,21 @@ def list_cmd(
     ),
     tag: Optional[List[str]] = typer.Option(None, "--tag", "-t", help="Filter by tag (repeatable)"),
     action_status: Optional[str] = typer.Option(
-        None, "--action-status", help="Filter by action status (SUCCESS/FAILED/RUNNING/PENDING)"
+        None,
+        "--action-status",
+        hidden=True,
+        help="Deprecated: Environment Actions were removed; this filter is ignored.",
     ),
     sort: str = typer.Option(
         "created_at", "--sort", help="Sort by: name, created_at, updated_at, stars"
     ),
     order: str = typer.Option("desc", "--order", help="Sort order: asc, desc"),
-    show_actions: bool = typer.Option(False, "--show-actions", help="Show action status column"),
+    show_actions: bool = typer.Option(
+        False,
+        "--show-actions",
+        hidden=True,
+        help="Deprecated: Environment Actions were removed; this flag is ignored.",
+    ),
     starred: bool = typer.Option(
         False, "--starred", help="Filter to only environments you have starred"
     ),
@@ -789,10 +593,8 @@ def list_cmd(
             params["search"] = search
         if tag:
             params["tags"] = tag
-        if action_status:
-            params["ci_status"] = action_status
-        if show_actions or action_status:
-            params["include_ci_status"] = True
+        if (show_actions or action_status) and output != "json":
+            console.print(_ACTIONS_REMOVED_NOTE)
         if starred:
             params["starred_only"] = True
         if mine:
@@ -828,8 +630,6 @@ def list_cmd(
                     "stars": env.get("stars", 0),
                     "updated_at": env.get("updated_at"),
                 }
-                if show_actions or action_status:
-                    env_entry["action_status"] = env.get("latest_ci_status")
                 if env.get("tags"):
                     env_entry["tags"] = env.get("tags")
                 env_data.append(env_entry)
@@ -849,8 +649,6 @@ def list_cmd(
             table.add_column("Version", style="blue")
             table.add_column("Stars", style="yellow", justify="right")
             table.add_column("Updated", style="dim")
-            if show_actions or action_status:
-                table.add_column("Action Status")
 
             for env in environments:
                 owner_name = env["owner"]["name"]
@@ -868,11 +666,7 @@ def list_cmd(
                     except (ValueError, AttributeError):
                         pass
 
-                if show_actions or action_status:
-                    action_text = _format_action_status(env.get("latest_ci_status"))
-                    table.add_row(env_id, description, version, stars, updated_at, action_text)
-                else:
-                    table.add_row(env_id, description, version, stars, updated_at)
+                table.add_row(env_id, description, version, stars, updated_at)
 
             console.print(table)
 
@@ -897,7 +691,7 @@ def status_cmd(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name)"),
     output: str = typer.Option("table", "--output", help="Output format: table or json"),
 ) -> None:
-    """Show action status for an environment.
+    """Show an environment's visibility and latest version.
 
     \b
     Examples:
@@ -941,17 +735,6 @@ def status_cmd(
             else:
                 console.print("  [dim]No versions found[/dim]")
 
-            # Action status section
-            action_data = data.get("action")
-            if action_data:
-                console.print("\n[bold]Action Status:[/bold]")
-                action_status_value = action_data.get("status")
-                action_text = _format_action_status(action_status_value)
-                console.print("  Status: ", end="")
-                console.print(action_text)
-                if action_data.get("job_id"):
-                    console.print(f"  Job ID: [dim]{action_data.get('job_id')}[/dim]")
-
             console.print()
 
     except APIError as e:
@@ -970,34 +753,6 @@ def _resolve_push_environment_path(path: Optional[str], env_id: Optional[str]) -
         return (parent / env_folder).resolve()
 
     return Path(path or ".").resolve()
-
-
-def _emit_lab_hygiene_message(message: str) -> None:
-    console.print(message, markup=False)
-
-
-def _run_env_init_lab_hygiene_preflight() -> None:
-    workspace = find_lab_workspace(Path.cwd())
-    if workspace is None:
-        return
-    run_lab_hygiene_preflight(
-        LabHygieneOptions(fix=True),
-        workspace=workspace,
-        emit=_emit_lab_hygiene_message,
-    )
-
-
-def _run_env_push_lab_hygiene_preflight(env_path: Path) -> None:
-    workspace = find_lab_workspace(env_path)
-    if workspace is None:
-        return
-    result = run_lab_hygiene_preflight(
-        LabHygieneOptions(fix=False, fail_on_tracked=True),
-        workspace=workspace,
-        emit=_emit_lab_hygiene_message,
-    )
-    if result.exit_code != 0:
-        raise typer.Exit(result.exit_code)
 
 
 def _environment_resolve_data(
@@ -1069,6 +824,14 @@ def push(
     visibility: Optional[str] = typer.Option(
         None, "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
     ),
+    runtime: Optional[str] = typer.Option(
+        None,
+        "--runtime",
+        help=(
+            "Verifiers API the package targets: v0 or v1. Defaults to the package's "
+            "verifiers requirement (a lower bound of 0.2.0 or newer means v1)."
+        ),
+    ),
     auto_bump: bool = typer.Option(
         False, "--auto-bump", help="Automatically bump patch version before push"
     ),
@@ -1082,8 +845,13 @@ def push(
     """Push environment to registry"""
 
     try:
+        declared_runtime = parse_runtime_option(runtime)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    try:
         env_path = _resolve_push_environment_path(path, env_id)
-        _run_env_push_lab_hygiene_preflight(env_path)
 
         # Display upstream environment info if metadata exists
         display_upstream_environment_info(env_path)
@@ -1344,6 +1112,19 @@ def push(
             # Extract Requires-Dist from wheel METADATA (includes URL dependencies)
             requires_dist = extract_requires_dist_from_wheel(wheel_path)
 
+            runtime_hint = declared_runtime or classify_runtime_from_metadata(
+                requires_dist or project_metadata.get("dependencies", [])
+            )
+            if runtime_hint is None:
+                console.print(
+                    "[yellow]No verifiers requirement found, so the Hub will list this "
+                    "package as Unclassified; pass --runtime v0|v1 to declare it.[/yellow]"
+                )
+            else:
+                label = "verifiers v1" if runtime_hint == VERIFIERS_V1 else "legacy verifiers v0"
+                source = "--runtime" if declared_runtime else "the verifiers requirement"
+                console.print(f"Publishing as {label} (from {source})")
+
             wheel_data = {
                 "content_hash": content_hash,
                 "filename": unique_wheel_name,
@@ -1360,6 +1141,8 @@ def push(
                     "requires_dist": requires_dist,  # Include full dependency specs from wheel
                 },
             }
+            if runtime_hint is not None:
+                wheel_data["runtime_hint"] = runtime_hint
 
             try:
                 response = client.post(f"/environmentshub/{env_id}/wheels", json=wheel_data)
@@ -1419,7 +1202,7 @@ def push(
                     with tarfile.open(tmp.name, "w:gz") as tar:
                         for file_path in _collect_archive_files(env_path):
                             arcname = file_path.relative_to(env_path)
-                            tar.add(file_path, arcname=str(arcname))
+                            _add_file_to_archive(tar, file_path, str(arcname))
 
                     # Check tarball size
                     tarball_size = Path(tmp.name).stat().st_size
@@ -1463,6 +1246,8 @@ def push(
                             "original_filename": f"{env_name}-{version}.tar.gz",
                         },
                     }
+                    if runtime_hint is not None:
+                        source_data["runtime_hint"] = runtime_hint
 
                     try:
                         response = client.post(
@@ -1658,83 +1443,6 @@ def push(
         raise typer.Exit(1)
 
 
-@app.command(
-    no_args_is_help=True,
-    rich_help_panel="Manage",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
-def init(
-    ctx: typer.Context,
-    name: Optional[str] = typer.Argument(None, help="Name of the new environment"),
-) -> None:
-    """Initialize a new environment."""
-    passthrough_args = list(ctx.args)
-
-    if is_help_request(name or "", passthrough_args):
-        print_env_init_help()
-        raise typer.Exit(0)
-
-    if name is None:
-        console.print("[red]Error:[/red] Missing argument 'NAME'.")
-        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    if name.startswith("-"):
-        console.print("[red]Error:[/red] Environment name must be the first argument.")
-        console.print("[dim]Example: prime env init my-env --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    plugin = load_verifiers_prime_plugin(console=console)
-    command = plugin.build_module_command(plugin.init_module, [name, *passthrough_args])
-    result = subprocess.run(command)
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
-    _run_env_init_lab_hygiene_preflight()
-
-
-@app.command(
-    no_args_is_help=True,
-    rich_help_panel="Manage",
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-        "help_option_names": [],
-    },
-)
-def build(
-    ctx: typer.Context,
-    env_id: Optional[str] = typer.Argument(
-        None, help="Environment ID (hyphenated, e.g. openenv-echo)"
-    ),
-) -> None:
-    """Build an OpenEnv-backed environment image."""
-    passthrough_args = list(ctx.args)
-
-    if is_help_request(env_id or "", passthrough_args):
-        print_env_build_help()
-        raise typer.Exit(0)
-
-    if env_id is None:
-        console.print("[red]Error:[/red] Missing argument 'ENV_ID'.")
-        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    if env_id.startswith("-"):
-        console.print("[red]Error:[/red] Environment ID must be the first argument.")
-        console.print("[dim]Example: prime env build openenv-echo --path ./environments[/dim]")
-        raise typer.Exit(2)
-
-    plugin = load_verifiers_prime_plugin(console=console)
-    command = plugin.build_module_command(plugin.build_module, [env_id, *passthrough_args])
-    result = subprocess.run(command)
-    if result.returncode != 0:
-        raise typer.Exit(result.returncode)
-
-
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
 def pull(
     env_id: str = typer.Argument(..., help="Environment ID (owner/name or owner/name@version)"),
@@ -1833,7 +1541,11 @@ def pull(
 
                 try:
                     with tarfile.open(tmp.name, "r:gz") as tar:
-                        tar.extractall(target_dir)
+                        # Use path-traversal / symlink-safe extract (same as install)
+                        _safe_tar_extract(tar, Path(target_dir))
+                except ValueError as e:
+                    console.print(f"[red]Failed to extract archive: {e}[/red]")
+                    raise typer.Exit(1)
                 except tarfile.TarError as e:
                     console.print(f"[red]Failed to extract archive: {e}[/red]")
                     raise typer.Exit(1)
@@ -2166,7 +1878,7 @@ def info(
         console.print()
 
         # Display key installation commands based on availability
-        simple_index_url = details.get("simple_index_url")
+        simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
         _print_env_inspect_examples(owner, name, target_version)
         console.print()
 
@@ -2399,10 +2111,7 @@ def execute_install_command(cmd: List[str], env_id: str, version: str, tool: str
     """
     console.print(f"\n[cyan]Installing {env_id}@{version} with {tool}...[/cyan]")
 
-    display_command = " ".join(cmd)
-    if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2].startswith("verifiers.cli.commands."):
-        display_command = f"prime env install {env_id}"
-    console.print(f"[dim]Command: {display_command}[/dim]")
+    console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
     process = subprocess.Popen(
         cmd,
@@ -2467,7 +2176,6 @@ def install(
     """
     try:
         client = APIClient(require_auth=False)
-        plugin = load_verifiers_prime_plugin(console=console)
 
         # Validate package manager
         if with_tool not in ["uv", "pip"]:
@@ -2505,10 +2213,7 @@ def install(
                 env_path = Path(path) / env_folder
                 if env_path.exists():
                     if with_tool == "uv":
-                        cmd_parts = plugin.build_module_command(
-                            plugin.install_module,
-                            [local_name, "--path", path],
-                        )
+                        cmd_parts = _uv_pip_command("install", "-e", str(env_path))
                     else:
                         cmd_parts = ["pip", "install", "-e", str(env_path)]
                     installable_envs.append((cmd_parts, local_name, "local", local_name))
@@ -2548,7 +2253,7 @@ def install(
                 continue
 
             # Get both simple index URL and wheel URL
-            simple_index_url = details.get("simple_index_url")
+            simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
             wheel_url = process_wheel_url(details.get("wheel_url"))
             url_dependencies = details.get("url_dependencies", [])
 
@@ -3331,7 +3036,7 @@ def _install_single_environment(env_slug: str, tool: str = "uv", prerelease: boo
         console.print(f"[red]Failed to find environment {env_slug}: {e}[/red]")
         return False
 
-    simple_index_url = details.get("simple_index_url")
+    simple_index_url = details.get("install_index_url") or details.get("simple_index_url")
     wheel_url = process_wheel_url(details.get("wheel_url"))
     url_dependencies = details.get("url_dependencies", [])
 

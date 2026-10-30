@@ -8,7 +8,6 @@ from prime_cli.api.rl import RLClient, RLRun
 class FakeAPIClient:
     def __init__(self) -> None:
         self.requests: list[tuple[str, dict[str, Any] | None]] = []
-        self.posts: list[tuple[str, dict[str, Any] | None]] = []
 
     def get(self, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self.requests.append((endpoint, params))
@@ -25,24 +24,6 @@ class FakeAPIClient:
             },
             "step": 160,
             "unexpected": "raw response detail",
-        }
-
-    def post(self, endpoint: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
-        self.posts.append((endpoint, json))
-        return {
-            "run": {
-                "id": "run-1",
-                "userId": "user-1",
-                "status": "QUEUED",
-                "rolloutsPerExample": json["rollouts_per_example"] if json else 8,
-                "seqLen": 2048,
-                "maxSteps": json["max_steps"] if json else 100,
-                "batchSize": json["batch_size"] if json else 128,
-                "baseModel": json["model"]["name"] if json else "model",
-                "maxInflightRollouts": json.get("max_inflight_rollouts") if json else None,
-                "createdAt": "2026-05-17T00:00:00Z",
-                "updatedAt": "2026-05-17T00:00:00Z",
-            }
         }
 
 
@@ -67,6 +48,28 @@ def test_run_model_allows_dedicated_full_ft_without_lora_fields() -> None:
     assert run.base_model is None
 
 
+def test_run_model_maps_the_dedicated_runs_prime_cluster() -> None:
+    """Dedicated runs answer with primeClusterId (their rftClusterId is
+    NULL); the model must carry the field or `prime train get` shows no
+    cluster at all."""
+    run = RLRun.model_validate(
+        {
+            "id": "kuvz6ncuc5qzezo3uk3afrur",
+            "userId": "user-1",
+            "status": "RUNNING",
+            "kind": "DEDICATED_FULL_FT",
+            "primeClusterId": "ccl9wyl7n0002f2dn0g0x3p0q",
+            "rftClusterId": "",
+            "createdAt": "2026-05-17T00:00:00Z",
+            "updatedAt": "2026-05-17T00:00:00Z",
+        }
+    )
+
+    assert run.prime_cluster_id == "ccl9wyl7n0002f2dn0g0x3p0q"
+    assert run.cluster_id == ""
+    assert "prime_cluster_id" in run.model_dump()
+
+
 def test_get_distributions_preserves_chart_histogram_data() -> None:
     api_client = FakeAPIClient()
     client = RLClient(api_client)  # type: ignore[arg-type]
@@ -87,71 +90,3 @@ def test_get_distributions_preserves_chart_histogram_data() -> None:
         ],
         "step": 160,
     }
-
-
-def test_create_run_sends_max_inflight_rollouts() -> None:
-    api_client = FakeAPIClient()
-    client = RLClient(api_client)  # type: ignore[arg-type]
-
-    run = client.create_run(
-        model_name="Qwen/Qwen3.5-0.8B",
-        environments=[{"id": "reverse-text"}],
-        max_inflight_rollouts=96,
-    )
-
-    assert api_client.posts[0][0] == "/rft/runs"
-    assert api_client.posts[0][1]["max_inflight_rollouts"] == 96
-    assert run.max_inflight_rollouts == 96
-
-
-def test_create_run_sends_sft_loss_and_teacher_config() -> None:
-    api_client = FakeAPIClient()
-    client = RLClient(api_client)  # type: ignore[arg-type]
-
-    client.create_run(
-        model_name="openai/gpt-oss-20b",
-        environments=[{"id": "primeintellect/reverse-text"}],
-        max_tokens=512,
-        loss="sft",
-        teacher={
-            "model": {"name": "openai/gpt-oss-120b"},
-            "sampling": {
-                "max_tokens": 2048,
-                "reasoning_effort": "medium",
-            },
-        },
-    )
-
-    assert api_client.posts[0][0] == "/rft/runs"
-    payload = api_client.posts[0][1]
-    assert payload == {
-        "model": {"name": "openai/gpt-oss-20b"},
-        "environments": [{"id": "primeintellect/reverse-text"}],
-        "rollouts_per_example": 8,
-        "max_steps": 100,
-        "batch_size": 128,
-        "secrets": [],
-        "loss": "sft",
-        "teacher": {
-            "model": {"name": "openai/gpt-oss-120b"},
-            "sampling": {
-                "max_tokens": 2048,
-                "reasoning_effort": "medium",
-            },
-        },
-        "max_tokens": 512,
-    }
-
-
-def test_create_run_omits_default_rl_loss() -> None:
-    api_client = FakeAPIClient()
-    client = RLClient(api_client)  # type: ignore[arg-type]
-
-    client.create_run(
-        model_name="Qwen/Qwen3.5-0.8B",
-        environments=[{"id": "reverse-text"}],
-    )
-
-    assert api_client.posts[0][0] == "/rft/runs"
-    assert "loss" not in api_client.posts[0][1]
-    assert "teacher" not in api_client.posts[0][1]

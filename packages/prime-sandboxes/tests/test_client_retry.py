@@ -1,6 +1,9 @@
 """Tests for retry logic on transient connection errors."""
 
+import asyncio
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -187,6 +190,51 @@ class TestSyncAPIClientRetry:
 
         assert result == {"success": True}
         assert transport.call_count == 3
+
+    def test_rate_limit_retries_use_long_waits(self, monkeypatch):
+        """Platform rate limits wait 10s then 30s across three attempts."""
+        call_count = 0
+        delays = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return httpx.Response(429, request=request, text="rate limited")
+            return httpx.Response(200, request=request, json={"success": True})
+
+        monkeypatch.setattr(APIClient._idempotent_request_with_retry.retry, "sleep", delays.append)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        result = client.request("GET", "test")
+
+        assert result == {"success": True}
+        assert call_count == 3
+        assert delays == [10.0, 30.0]
+
+    def test_connection_error_retry_keeps_tight_wait(self, monkeypatch):
+        """Connection errors keep the existing fast first retry."""
+        call_count = 0
+        delays = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("Connection refused", request=request)
+            return httpx.Response(200, request=request, json={"success": True})
+
+        monkeypatch.setattr(APIClient._idempotent_request_with_retry.retry, "sleep", delays.append)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+        result = client.request("GET", "test")
+
+        assert result == {"success": True}
+        assert call_count == 2
+        assert len(delays) == 1
+        assert 0 <= delays[0] <= 0.1
 
     def test_gives_up_after_max_retries(self):
         """Raises after 3 failed attempts."""
@@ -424,6 +472,53 @@ class TestAsyncAPIClientRetry:
         assert transport.call_count == 1
 
 
+class RecordingAPIClient(APIClient):
+    """Real-config APIClient that records requests instead of hitting the wire."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls = []
+
+    def request(self, method: str, path: str, **kwargs):
+        self.calls.append((method, path, kwargs))
+        return _sandbox_response(f"sandbox-{len(self.calls)}")
+
+
+class TestCreateSandboxTeamContextFromConfig:
+    def test_sync_create_omits_team_id_when_prime_team_id_env_is_empty(self, monkeypatch, tmp_path):
+        # PRIME_TEAM_ID="" means personal scope: the create payload must not
+        # carry team_id: "", which the backend rejects as an unknown wallet.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        for variable in ("PRIME_CONTEXT", "PRIME_TEAM_ID", "PRIME_USER_ID"):
+            monkeypatch.delenv(variable, raising=False)
+        monkeypatch.setenv("PRIME_TEAM_ID", "")
+
+        recording = RecordingAPIClient(api_key="test-key")
+        assert recording.config.team_id is None
+
+        SandboxClient(recording).create(
+            CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+        )
+
+        payload = recording.calls[0][2]["json"]
+        assert "team_id" not in payload
+
+    def test_sync_create_keeps_team_id_from_env_when_set(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        for variable in ("PRIME_CONTEXT", "PRIME_TEAM_ID", "PRIME_USER_ID"):
+            monkeypatch.delenv(variable, raising=False)
+        monkeypatch.setenv("PRIME_TEAM_ID", "team-77")
+
+        recording = RecordingAPIClient(api_key="test-key")
+
+        SandboxClient(recording).create(
+            CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+        )
+
+        payload = recording.calls[0][2]["json"]
+        assert payload["team_id"] == "team-77"
+
+
 class TestCreateSandboxIdempotencyPayload:
     def test_sync_create_does_not_reuse_generated_idempotency_key_on_request_reuse(self):
         client = SandboxClient(APIClient(api_key="test-key"))
@@ -549,11 +644,12 @@ class TestSyncGatewayRetry:
         assert result == "success"
         assert call_count == 2
 
-    def test_gateway_retry_on_connect_error(self):
-        """Test retry on ConnectError."""
+    def test_gateway_retry_on_connect_error(self, monkeypatch):
+        """Connection errors retain the tight retry curve."""
         from prime_sandboxes.sandbox import _gateway_retry
 
         call_count = 0
+        delays = []
 
         @_gateway_retry
         def connect_error_then_succeed():
@@ -563,9 +659,37 @@ class TestSyncGatewayRetry:
                 raise httpx.ConnectError("Connection refused")
             return "success"
 
+        monkeypatch.setattr(connect_error_then_succeed.retry, "sleep", delays.append)
+
         result = connect_error_then_succeed()
         assert result == "success"
         assert call_count == 2
+        assert delays == [1.0]
+
+    def test_gateway_retry_on_429_uses_long_waits(self, monkeypatch):
+        """Gateway rate limits use the longer inter-attempt delays."""
+        from prime_sandboxes.sandbox import _gateway_retry
+
+        call_count = 0
+        delays = []
+
+        @_gateway_retry
+        def rate_limit_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 4:
+                response = httpx.Response(429, request=httpx.Request("GET", "http://test"))
+                raise httpx.HTTPStatusError(
+                    "429 rate limited", request=response.request, response=response
+                )
+            return "success"
+
+        monkeypatch.setattr(rate_limit_then_succeed.retry, "sleep", delays.append)
+
+        result = rate_limit_then_succeed()
+        assert result == "success"
+        assert call_count == 4
+        assert delays == [10.0, 30.0, 40.0]
 
     def test_gateway_retry_on_read_error(self):
         """Test retry on ReadError (TCP drop mid-response) — idempotent path."""
@@ -886,3 +1010,308 @@ class TestReadFileRetry:
         assert "Read file timed out after 12s" in message
         assert f"({expected_name})" in message
         assert "/tmp/job.exit" in message
+
+    def test_read_file_connection_error_surfaces_nested_os_errno(self, monkeypatch):
+        """Transport wrappers retain the actionable nested socket errno."""
+        import errno
+
+        from prime_sandboxes.sandbox import SandboxClient
+
+        request = httpx.Request("GET", "https://gateway.example/read-file")
+
+        def raise_connect_error(url, headers, params, timeout):
+            try:
+                raise OSError(errno.EMFILE, "Too many open files")
+            except OSError as os_error:
+                raise httpx.ConnectError(
+                    "All connection attempts failed",
+                    request=request,
+                ) from os_error
+
+        monkeypatch.setattr(
+            SandboxClient,
+            "_gateway_read_file_get",
+            staticmethod(raise_connect_error),
+        )
+
+        client = SandboxClient.__new__(SandboxClient)
+        client._auth_cache = DummySandboxAuthCache()
+
+        with pytest.raises(APIError) as exc_info:
+            client.read_file("sandbox-123", "/tmp/job.stdout.log")
+
+        message = str(exc_info.value)
+        assert "ConnectError" in message
+        assert "errno=24" in message
+        assert "Too many open files" in message
+
+
+class AlwaysStatusTransport(httpx.BaseTransport):
+    """Transport that always returns one HTTP status."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        self.call_count = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.call_count += 1
+        return httpx.Response(self.status_code, request=request, text="rate limited")
+
+
+class AsyncBatchRateLimitTransport(httpx.AsyncBaseTransport):
+    """Rate-limit one batch request, then return all requested statuses."""
+
+    def __init__(self):
+        self.call_count = 0
+        self.requests: list[httpx.Request] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.call_count += 1
+        self.requests.append(request)
+        if self.call_count == 1:
+            return httpx.Response(429, request=request, text="rate limited")
+        sandbox_ids = json.loads(request.content)["sandbox_ids"]
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "statuses": [
+                    {
+                        "sandbox_id": sandbox_id,
+                        "status": "RUNNING",
+                        "error_type": None,
+                        "error_message": None,
+                        "pending_image_build_id": None,
+                    }
+                    for sandbox_id in sandbox_ids
+                ],
+                "errors": [],
+            },
+        )
+
+
+class AsyncGatewayStatusSequenceTransport(httpx.AsyncBaseTransport):
+    """Return a fixed status sequence for gateway upload tests."""
+
+    def __init__(self, statuses: list[int]):
+        self.statuses = statuses
+        self.call_count = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        status = self.statuses[self.call_count]
+        self.call_count += 1
+        if status != 200:
+            return httpx.Response(status, request=request, text=f"HTTP {status}")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "success": True,
+                "path": "/tmp/file",
+                "size": 4,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+
+class AsyncGatewayAuthCache:
+    async def get_or_refresh(self, _sandbox_id: str) -> dict[str, str]:
+        return {
+            "gateway_url": "https://gateway.example",
+            "user_ns": "test-ns",
+            "job_id": "job-123",
+            "token": "test-token",
+        }
+
+
+@pytest.fixture
+def no_sync_retry_sleep(monkeypatch):
+    monkeypatch.setattr(
+        APIClient._idempotent_post_request_with_retry.retry,
+        "sleep",
+        lambda _delay: None,
+    )
+    monkeypatch.setattr(
+        APIClient._non_idempotent_request_with_retry.retry,
+        "sleep",
+        lambda _delay: None,
+    )
+
+
+@pytest.fixture
+def no_async_retry_sleep(monkeypatch):
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(AsyncAPIClient._idempotent_post_request_with_retry.retry, "sleep", no_sleep)
+    monkeypatch.setattr(AsyncSandboxClient._gateway_post.retry, "sleep", no_sleep)
+
+
+class TestRateLimitRetry:
+    def test_create_retries_429_once(self, no_sync_retry_sleep):
+        transport = StatusThenSucceedTransport(429, payload=_sandbox_response())
+        api_client = APIClient(api_key="test-key")
+        api_client.client = httpx.Client(transport=transport)
+
+        sandbox = SandboxClient(api_client).create(
+            CreateSandboxRequest(name="sandbox", docker_image="python:3.11-slim")
+        )
+
+        assert sandbox.id == "sandbox-1"
+        assert transport.call_count == 2
+        assert [request.method for request in transport.requests] == ["POST", "POST"]
+
+    @pytest.mark.asyncio
+    async def test_batch_status_429_retry_preserves_all_waiters(self, no_async_retry_sleep):
+        transport = AsyncBatchRateLimitTransport()
+        client = AsyncSandboxClient(api_key="test-key")
+        await client.client.client.aclose()
+        client.client.client = httpx.AsyncClient(transport=transport)
+
+        async def reachable(_sandbox_id: str) -> bool:
+            return True
+
+        client._is_sandbox_reachable = reachable  # type: ignore[method-assign]
+        try:
+            await asyncio.gather(
+                client.wait_for_creation("sandbox-a"),
+                client.wait_for_creation("sandbox-b"),
+            )
+        finally:
+            await client.aclose()
+
+        assert transport.call_count == 2
+        assert json.loads(transport.requests[1].content)["sandbox_ids"] == [
+            "sandbox-a",
+            "sandbox-b",
+        ]
+
+    def test_429_budget_exhaustion_raises_api_error(self, no_sync_retry_sleep):
+        transport = AlwaysStatusTransport(429)
+        client = APIClient(api_key="test-key")
+        client.client = httpx.Client(transport=transport)
+
+        with pytest.raises(APIError, match="HTTP 429"):
+            client.request("POST", "sandbox", json={"name": "sandbox"})
+
+        assert transport.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_429_during_gateway_retry_does_not_enter_409_status_path(
+        self, no_async_retry_sleep
+    ):
+        transport = AsyncGatewayStatusSequenceTransport([409, 429, 200])
+        client = AsyncSandboxClient(api_key="test-key")
+        client._auth_cache = AsyncGatewayAuthCache()  # type: ignore[assignment]
+        client._gateway_client = httpx.AsyncClient(transport=transport)
+        status_checks = 0
+
+        async def retry_409(
+            _sandbox_id: str,
+            _error: httpx.HTTPStatusError,
+            _attempt: int,
+            command: str | None = None,
+        ) -> bool:
+            nonlocal status_checks
+            status_checks += 1
+            return True
+
+        client._should_retry_409 = retry_409  # type: ignore[method-assign]
+        try:
+            response = await client.upload_bytes(
+                "sandbox-1",
+                "/tmp/file",
+                b"data",
+                "file",
+            )
+        finally:
+            await client.aclose()
+
+        assert response.success
+        assert transport.call_count == 3
+        assert status_checks == 1
+
+
+def _terminated_response(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        410,
+        request=request,
+        json={
+            "error": "sandbox_terminated",
+            "sandboxId": "sandbox-123",
+            "message": "The sandbox has been terminated",
+            "code": "not_found",
+        },
+    )
+
+
+class TestGatewaySandboxTerminated:
+    """Gateway HTTP 410 sandbox_terminated is terminal: typed error, no retry."""
+
+    def test_read_file_raises_not_running_without_retry(self, monkeypatch):
+        from prime_sandboxes.exceptions import SandboxNotRunningError
+
+        calls = 0
+
+        def terminated(url, headers, params, timeout):
+            nonlocal calls
+            calls += 1
+            return _terminated_response(httpx.Request("GET", url))
+
+        monkeypatch.setattr(SandboxClient, "_gateway_read_file_get", staticmethod(terminated))
+        client = SandboxClient.__new__(SandboxClient)
+        client._auth_cache = DummySandboxAuthCache()
+        client._get_sandbox_error_context = lambda _sandbox_id: {  # type: ignore[method-assign]
+            "status": None,
+            "error_type": None,
+            "error_message": None,
+        }
+
+        with pytest.raises(SandboxNotRunningError) as exc_info:
+            client.read_file("sandbox-123", "/tmp/file")
+
+        assert exc_info.value.status == "TERMINATED"
+        assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_async_upload_raises_not_running_without_retry(self):
+        from prime_sandboxes.exceptions import SandboxNotRunningError
+
+        calls = 0
+
+        async def terminated(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return _terminated_response(request)
+
+        client = AsyncSandboxClient(api_key="test-key")
+        client._auth_cache = AsyncGatewayAuthCache()  # type: ignore[assignment]
+        client._gateway_client = httpx.AsyncClient(transport=httpx.MockTransport(terminated))
+
+        async def error_context(_sandbox_id: str) -> dict:
+            return {"status": None, "error_type": None, "error_message": None}
+
+        client._get_sandbox_error_context = error_context  # type: ignore[method-assign]
+        try:
+            with pytest.raises(SandboxNotRunningError) as exc_info:
+                await client.upload_bytes("sandbox-123", "/tmp/file", b"data", "file")
+        finally:
+            await client.aclose()
+
+        assert exc_info.value.status == "TERMINATED"
+        assert calls == 1
+
+    def test_reachability_does_not_retry_terminated(self):
+        from prime_sandboxes.exceptions import SandboxNotRunningError
+        from prime_sandboxes.sandbox import _is_retryable_reachability_error
+
+        request = httpx.Request("POST", "https://gateway.example/ns/job/exec")
+        cause = httpx.HTTPStatusError(
+            "gone", request=request, response=_terminated_response(request)
+        )
+        error = SandboxNotRunningError("sandbox-123", status="TERMINATED")
+        error.__cause__ = cause
+
+        assert _is_retryable_reachability_error(cause) is False
+        assert _is_retryable_reachability_error(error) is False

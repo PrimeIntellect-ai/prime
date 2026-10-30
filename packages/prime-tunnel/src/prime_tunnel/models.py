@@ -40,6 +40,24 @@ class TunnelInfo(BaseModel):
         from_attributes = True
 
 
+class TunnelStatus(BaseModel):
+    """What is known about a started tunnel: the local frpc and the service's record."""
+
+    tunnel_id: str = Field(..., description="Unique tunnel identifier")
+    running: bool = Field(..., description="Whether the local frpc process is running")
+    registration: Optional[str] = Field(
+        None,
+        description=(
+            "Status the tunnel service reports (pending, connected, disconnected, "
+            "expired, terminated), or None if it has no record of the tunnel"
+        ),
+    )
+    gone: bool = Field(
+        ...,
+        description="Whether the registration can no longer be used, so only a new tunnel helps",
+    )
+
+
 class TunnelListPage(BaseModel):
     """A page of tunnel results with pagination metadata."""
 

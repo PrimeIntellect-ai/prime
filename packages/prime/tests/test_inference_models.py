@@ -230,3 +230,254 @@ def test_models_json_output_applies_search_and_sort(monkeypatch: pytest.MonkeyPa
     )
     assert all(p >= 0 for p in positions)
     assert positions == sorted(positions)
+
+
+def _catalog_fixture() -> Dict[str, Any]:
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "anthropic/claude-haiku-4.5",
+                "display_name": "Claude Haiku 4.5",
+                "pricing": {
+                    "input_usd_per_mtok": 1.0,
+                    "output_usd_per_mtok": 5.0,
+                    "cache_read_usd_per_mtok": 0.1,
+                    "cache_write_usd_per_mtok": 1.25,
+                },
+                "specs": {
+                    "context_window": 200000,
+                    "max_output_tokens": 64000,
+                    "modalities": {"input": ["text", "image", "file"], "output": ["text"]},
+                    "supports_reasoning": True,
+                },
+            },
+            {
+                "id": "prime/hosted-model",
+                "pricing": {
+                    "input_usd_per_mtok": 0.11,
+                    "output_usd_per_mtok": 0.44,
+                    "cache_read_usd_per_mtok": 0.099,
+                    "cache_write_usd_per_mtok": 0.11,
+                },
+            },
+            {
+                "id": "partial/cache-read-only",
+                "pricing": {
+                    "input_usd_per_mtok": 0.3,
+                    "output_usd_per_mtok": 0.6,
+                    "cache_read_usd_per_mtok": 0.03,
+                },
+            },
+        ],
+    }
+
+
+def test_models_table_shows_catalog_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_models(monkeypatch, _catalog_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Claude Haiku 4.5" in out
+    assert "context" in out
+    assert "200k" in out
+    assert "64k" in out
+    assert "✓" in out
+    # Modalities are upstream model data, not a productized gateway feature —
+    # never rendered even when the endpoint serves them.
+    assert "modalities" not in out
+    assert "t+i+f" not in out
+    # Cache read/write cell for the first model.
+    assert "$0.1 / $1.25" in out
+    # Second model has no specs -> em-dash cells, but cache pricing still shown.
+    assert "prime/hosted-model" in out
+    assert "$0.099 / $0.11" in out
+    # Partial cache pricing marks the missing side explicitly.
+    assert "$0.03 / —" in out
+    # Legend explains the reasoning column.
+    assert "reasoning ✓" in out
+
+
+def test_models_table_renders_markup_in_catalog_names_literally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "object": "list",
+        "data": [
+            {
+                "id": "vendor/model",
+                "display_name": "Weird [/red] Name",
+                "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+            }
+        ],
+    }
+    _patch_models(monkeypatch, payload)
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    # An unmatched closing tag must not raise MarkupError (exit 1) nor
+    # restyle the table — catalog names render verbatim.
+    assert result.exit_code == 0, result.output
+    assert "Weird [/red] Name" in result.output
+
+
+def test_models_table_folds_ids_in_narrow_terminals(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_models(monkeypatch, _catalog_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env={**TEST_ENV, "COLUMNS": "80"})
+
+    assert result.exit_code == 0, result.output
+    # The id column folds (wraps) instead of truncating, so the identifier's
+    # tail stays visible and copyable even when catalog columns squeeze the
+    # table (truncation would render 'anthrop…' and drop the tail).
+    assert "u-4.5" in result.output
+
+
+def test_models_table_omits_catalog_columns_for_legacy_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _models_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    # No model carries catalog data -> slim table, unchanged from before.
+    assert "name" not in out
+    assert "context" not in out
+    assert "reasoning" not in out
+    assert "cache" not in out
+
+
+def test_models_json_output_passes_catalog_fields_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _catalog_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models", "--output", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert '"display_name": "Claude Haiku 4.5"' in result.output
+    assert '"context_window": 200000' in result.output
+    assert '"cache_read_usd_per_mtok": 0.1' in result.output
+
+
+def _serving_fixture() -> Dict[str, Any]:
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "openrouter/cheap-gateway",
+                "serving": "gateway",
+                "pricing": {"input_usd_per_mtok": 0.10, "output_usd_per_mtok": 0.40},
+            },
+            {
+                "id": "prime/zeta-hosted",
+                "serving": "hosted",
+                "pricing": {"input_usd_per_mtok": 1.40, "output_usd_per_mtok": 4.40},
+            },
+            {
+                "id": "openrouter/alpha-gateway",
+                "serving": "gateway",
+                "pricing": {"input_usd_per_mtok": 0.05, "output_usd_per_mtok": 0.10},
+            },
+            {
+                "id": "legacy/no-field",
+                "pricing": {"input_usd_per_mtok": 2.00, "output_usd_per_mtok": 6.00},
+            },
+            {
+                "id": "mystery/new-tier",
+                "serving": "edge",
+                "pricing": {"input_usd_per_mtok": 3.00, "output_usd_per_mtok": 9.00},
+            },
+        ],
+    }
+
+
+def test_models_table_shows_serving_column_with_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _serving_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "serving" in out
+    assert "Hosted by Prime" in out
+    assert "Gateway" in out
+    # Unknown values render verbatim, never mapped to a published tier.
+    assert "edge" in out
+    # Missing field renders as an em-dash, not a default tier.
+    assert "legacy/no-field" in out
+    assert "—" in out
+
+
+def test_models_table_omits_serving_column_for_legacy_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _models_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "serving" not in result.output
+    assert "Hosted by Prime" not in result.output
+    assert "Gateway" not in result.output
+
+
+def test_models_pins_hosted_first_then_keeps_sort_within_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _serving_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    # Default id sort: hosted group first, then the rest alphabetically.
+    positions = _ids_in_order(
+        result.output,
+        ["prime/zeta-hosted", "legacy/no-field", "mystery/new-tier", "openrouter/alpha-gateway"],
+    )
+    assert all(p >= 0 for p in positions)
+    assert positions == sorted(positions)
+
+
+def test_models_pin_is_stable_under_price_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _serving_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models", "--sort", "input"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    # Hosted first despite a higher price; tail keeps the ascending order.
+    positions = _ids_in_order(
+        result.output,
+        [
+            "prime/zeta-hosted",
+            "openrouter/alpha-gateway",
+            "openrouter/cheap-gateway",
+            "legacy/no-field",
+        ],
+    )
+    assert all(p >= 0 for p in positions)
+    assert positions == sorted(positions)
+
+
+def test_models_json_passes_serving_through_and_pins_hosted_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_models(monkeypatch, _serving_fixture())
+
+    result = CliRunner().invoke(app, ["inference", "models", "--output", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert '"serving": "hosted"' in out
+    assert '"serving": "gateway"' in out
+    assert '"serving": "edge"' in out
+    # The hosted-first order applies to JSON output too.
+    assert out.find("prime/zeta-hosted") < out.find("legacy/no-field")

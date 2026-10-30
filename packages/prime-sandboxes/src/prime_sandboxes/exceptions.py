@@ -9,6 +9,22 @@ class SandboxFileNotFoundError(APIError):
     pass
 
 
+class SandboxFileTooLargeError(APIError):
+    """Raised when a file exceeds the sandbox read size limit (413).
+
+    Read a bounded window via read_file(offset=..., length=...) or use
+    download_file() for the full content.
+    """
+
+    pass
+
+
+class BatchStatusUnsupportedError(APIError):
+    """Raised when batch status is unsupported for the requested sandbox runtime."""
+
+    pass
+
+
 class SandboxNotRunningError(RuntimeError):
     """Raised when an operation requires a RUNNING sandbox but it is not running."""
 

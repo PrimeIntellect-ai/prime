@@ -1,12 +1,12 @@
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import httpx
 
 from .config import Config
 
 
-def _default_user_agent() -> str:
+def default_user_agent() -> str:
     """Build default User-Agent string for prime-cli"""
     from prime_cli import __version__
 
@@ -38,10 +38,25 @@ class NotFoundError(APIError):
     pass
 
 
+class MethodNotAllowedError(APIError):
+    """Raised when API returns 405 method not allowed"""
+
+    pass
+
+
 class PaymentRequiredError(APIError):
     """Raised when API returns 402 payment required"""
 
     pass
+
+
+class ServerError(APIError):
+    """Raised when API returns a 5xx status"""
+
+    pass
+
+
+_STATUS_ERRORS = {404: NotFoundError, 405: MethodNotAllowedError}
 
 
 class APITimeoutError(APIError):
@@ -90,7 +105,7 @@ class APIClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         # Set User-Agent (default to prime-cli if not provided)
-        headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
+        headers["User-Agent"] = user_agent if user_agent else default_user_agent()
 
         self.client = httpx.Client(
             headers=headers,
@@ -110,7 +125,7 @@ class APIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make a request to the API"""
         self._check_auth_required()
@@ -123,8 +138,15 @@ class APIClient:
 
         url = f"{self.base_url}{endpoint}"
 
+        # Omit the timeout kwarg when unset: passing timeout=None to httpx
+        # explicitly DISABLES the client's configured default timeout
+        # (30s / 10s connect), letting requests hang indefinitely.
+        request_kwargs: Dict[str, Any] = {"params": params, "json": json}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+
         try:
-            response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+            response = self.client.request(method, url, **request_kwargs)
             response.raise_for_status()
 
             if response.status_code == 204 and not response.content:
@@ -155,7 +177,9 @@ class APIClient:
                 except (ValueError, KeyError):
                     pass
 
-            error_cls = NotFoundError if e.response.status_code == 404 else APIError
+            error_cls = _STATUS_ERRORS.get(
+                e.response.status_code, ServerError if e.response.status_code >= 500 else APIError
+            )
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()
@@ -173,13 +197,23 @@ class APIClient:
             u = getattr(req, "url", "?")
             raise APIError(f"Request failed: {e.__class__.__name__} at {method} {u}: {e}") from e
 
-    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
+    ) -> Dict[str, Any]:
         """Make a GET request to the API"""
-        return self.request("GET", endpoint, params=params)
+        return self.request("GET", endpoint, params=params, timeout=timeout)
 
-    def post(self, endpoint: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Make a POST request to the API"""
-        return self.request("POST", endpoint, json=json)
+    def post(
+        self,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
+    ) -> Dict[str, Any]:
+        """Make a POST request to the API (timeout: per-request override)"""
+        return self.request("POST", endpoint, json=json, timeout=timeout)
 
     def patch(
         self,
@@ -228,7 +262,7 @@ class AsyncAPIClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         # Set User-Agent (default to prime-cli if not provided)
-        headers["User-Agent"] = user_agent if user_agent else _default_user_agent()
+        headers["User-Agent"] = user_agent if user_agent else default_user_agent()
 
         self.client = httpx.AsyncClient(
             headers=headers,
@@ -248,7 +282,7 @@ class AsyncAPIClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
         """Make an async request to the API"""
         self._check_auth_required()
@@ -296,7 +330,9 @@ class AsyncAPIClient:
                 except (ValueError, KeyError):
                     pass
 
-            error_cls = NotFoundError if e.response.status_code == 404 else APIError
+            error_cls = _STATUS_ERRORS.get(
+                e.response.status_code, ServerError if e.response.status_code >= 500 else APIError
+            )
             # For other HTTP errors, try to extract the error message from the response
             try:
                 error_response = e.response.json()

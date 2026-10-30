@@ -1,4 +1,9 @@
 import hashlib
+import os
+import selectors
+import signal
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.request import Request
@@ -102,9 +107,7 @@ def test_agent_installs_then_runs_binary(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr("prime_cli.commands.agent.shutil.which", fake_which)
 
     def fake_urlopen(request: Request, timeout: int) -> FakeResponse:
-        download_requests.append(
-            (request.full_url, request.get_header("User-agent"), timeout)
-        )
+        download_requests.append((request.full_url, request.get_header("User-agent"), timeout))
         return FakeResponse()
 
     monkeypatch.setattr("prime_cli.commands.agent.urlopen", fake_urlopen)
@@ -119,9 +122,7 @@ def test_agent_installs_then_runs_binary(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.exit_code == 0, result.output
     assert "Downloading the installer" in result.output
     assert installer_calls[0][0] == "/bin/sh"
-    assert exec_calls == [
-        ("/new/bin/prime-agent", ["/new/bin/prime-agent", "agents"])
-    ]
+    assert exec_calls == [("/new/bin/prime-agent", ["/new/bin/prime-agent", "agents"])]
     assert download_requests == [
         (
             "https://app.primeintellect.ai/prime-agent/install.sh",
@@ -159,6 +160,7 @@ def test_agent_finds_standalone_node_install(
     standalone_agent = tmp_path / "prime-agent-node" / "current" / "bin" / "prime-agent"
     standalone_agent.parent.mkdir(parents=True)
     standalone_agent.touch()
+    standalone_agent.chmod(0o755)
     calls: list[tuple[str, list[str]]] = []
 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
@@ -171,9 +173,7 @@ def test_agent_finds_standalone_node_install(
     result = runner.invoke(app, ["agent", "doctor"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert calls == [
-        (str(standalone_agent), [str(standalone_agent), "doctor"])
-    ]
+    assert calls == [(str(standalone_agent), [str(standalone_agent), "doctor"])]
 
 
 def test_agent_rejects_installer_checksum_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,3 +252,60 @@ def test_agent_cleans_up_temp_file_when_write_fails(
     assert result.exit_code == 1, result.output
     assert "disk full" in result.output
     assert not installer_path.exists()
+
+
+@pytest.mark.parametrize("custom_prefix", [False, True])
+def test_agent_finds_installer_binary_outside_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    custom_prefix: bool,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    prefix = tmp_path / ("custom-prefix" if custom_prefix else ".local")
+    if custom_prefix:
+        monkeypatch.setenv("PRIME_AGENT_RUST_PREFIX", str(prefix))
+    else:
+        monkeypatch.delenv("PRIME_AGENT_RUST_PREFIX", raising=False)
+    installed_agent = prefix / "bin" / "prime-agent"
+    installed_agent.parent.mkdir(parents=True)
+    installed_agent.write_text("#!/bin/sh\nexit 0\n")
+    installed_agent.chmod(0o755)
+    monkeypatch.setattr("prime_cli.commands.agent.shutil.which", lambda _command: None)
+    calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        "prime_cli.commands.agent.os.execv",
+        lambda executable, args: calls.append((executable, args)),
+    )
+
+    result = runner.invoke(app, ["agent", "--version"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert calls == [(str(installed_agent), [str(installed_agent), "--version"])]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX termination signals")
+def test_agent_keeps_pid_and_receives_wrapper_termination() -> None:
+    # Exercise an actual exec rather than mocking it: terminating the wrapper
+    # PID must terminate the launched program, without leaving a child behind.
+    wrapper = (
+        "import sys; from prime_cli.commands.agent import _run_agent; "
+        "_run_agent(sys.executable, ['-u', '-c', "
+        "'import os, signal; print(os.getpid(), flush=True); signal.pause()'])"
+    )
+    with subprocess.Popen(
+        [sys.executable, "-c", wrapper],
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as process:
+        try:
+            assert process.stdout is not None
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                assert selector.select(timeout=10), "agent did not become ready"
+            assert int(process.stdout.readline()) == process.pid
+            process.terminate()
+            assert process.wait(timeout=5) == -signal.SIGTERM
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)

@@ -23,11 +23,14 @@ def validate_env_var_name(name: str, item_type: str = "secret") -> bool:
     return False
 
 
-def confirm_or_skip(message: str, yes_flag: bool, default: bool = False) -> bool:
-    """Show confirmation prompt or skip if --yes flag is provided."""
+def confirm_or_skip(message: str, yes_flag: bool, default: bool = False, err: bool = False) -> bool:
+    """Show confirmation prompt or skip if --yes flag is provided.
+
+    ``err=True`` writes the prompt to stderr so JSON stdout stays pure data.
+    """
     if yes_flag:
         return True
-    return bool(typer.confirm(message, default=default))
+    return bool(typer.confirm(message, default=default, err=err))
 
 
 def any_provided(*values: Any) -> bool:

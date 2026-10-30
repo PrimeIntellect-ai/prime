@@ -234,6 +234,8 @@ Main client for interacting with the Prime Evals API.
 - `get_evaluation()` - Get evaluation details by ID
 - `list_evaluations()` - List evaluations with optional filters
 - `get_samples()` - Get samples for an evaluation
+- `create_hosted_evaluation()` - Start a hosted evaluation on the platform
+- `cancel_hosted_evaluation()` - Cancel a running hosted evaluation
 
 ### AsyncEvalsClient
 
@@ -255,8 +257,14 @@ Async version of EvalsClient with the same methods (all async).
 
 ## Error Handling
 
+Most methods raise `EvalsAPIError` for validation/producer errors and
+`EvaluationNotFoundError` when an evaluation does not exist. The hosted methods
+(`create_hosted_evaluation`, `cancel_hosted_evaluation`) perform no wrapping, so
+transport failures surface as the underlying `APIError` from the injected
+client (sync) or the SDK's own `AsyncAPIClient` (async). Catch both:
+
 ```python
-from prime_evals import APIClient, EvalsClient, EvalsAPIError, EvaluationNotFoundError
+from prime_evals import APIClient, APIError, EvalsClient, EvalsAPIError, EvaluationNotFoundError
 
 try:
     api_client = APIClient()
@@ -264,6 +272,8 @@ try:
     client.get_evaluation("non-existent-id")
 except EvaluationNotFoundError:
     print("Evaluation not found")
+except APIError as e:
+    print(f"Transport error: {e}")
 except EvalsAPIError as e:
     print(f"API error: {e}")
 ```

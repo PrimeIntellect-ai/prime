@@ -1,0 +1,158 @@
+# Prime Runs SDK
+
+Track evaluation and training runs on the Prime Intellect platform: `init()`
+opens the run, records stream out while it proceeds, and `finish()` closes it
+out with a terminal status.
+
+## Install
+
+```bash
+uv add prime-runs            # or: pip install prime-runs
+uv add 'prime-runs[train]'   # training runs: adds pyarrow for the sample table
+```
+
+## Eval runs
+
+```python
+import prime_runs as pr
+
+run = pr.init(
+    name="gsm8k-qwen3-8b",
+    environments=["gsm8k"],      # hub names (get-or-create) or owner/name slugs
+    model="Qwen/Qwen3-8B",
+    framework="verifiers",
+    config="eval.toml",          # the launched file, stored byte for byte
+)
+print(run.url)                   # https://app.primeintellect.ai/dashboard/evaluations/...
+
+for episode in rollouts:
+    run.log_episodes([episode])  # a queue put; bare traces: log_traces()
+
+run.finish(summary=pr.metrics.from_episodes(episodes))
+```
+
+`init()` is called before the first rollout. Every record the run uploads is
+keyed to it: the SDK sets `run.id` and `run.type` on the uploaded copy of each
+trace and episode, over whatever run id the producer recorded locally, and
+keeps the rest of that block (`name`, `work`). A producer never needs to know
+the platform's id; `run.url` is the handle. A `with run:` block finishes for
+you: an exception marks the run `failed`, Ctrl-C `cancelled`, and a process
+that exits without finishing is reported `crashed` by an atexit hook. An
+evaluation that stops without completing is closed out on the platform as
+`FAILED` or `CANCELLED` (a crash arrives as `FAILED` with the reason in
+`error_message`), so it never shows as running forever; a run the platform
+already closed is left as it is.
+
+`config=` takes the path to the launched file (kept verbatim under
+`config_source`, comments and all) or a mapping stored as given; put a file
+under `pr.CONFIG_SOURCE_KEY` in the mapping to send both. Nothing is redacted.
+
+## Training runs
+
+```python
+run = pr.init(
+    kind="train",
+    name="qwen3-8b-gsm8k-rl",
+    model="Qwen/Qwen3-8B",                    # the base model
+    environments=["primeintellect/gsm8k"],    # hub ids, passed through
+    training=pr.TrainingSpec(max_steps=1000, batch_size=64, rollouts_per_example=8),
+    config=train_config.model_dump(),
+    team_id="team_...",                       # external runs belong to a team
+)
+
+for step, (episodes, metrics) in enumerate(training_loop):
+    run.log_episodes(episodes)          # episodes carry run.work.step (TrainRunInfo)
+    run.log_metrics(metrics, step=step)
+
+run.finish()
+```
+
+- The platform enables external runs per team; a team outside the allowlist
+  gets a `ForbiddenError` from `init()`.
+- `init(kind="train", id=os.environ["RUN_ID"])` attaches to a run a launcher
+  already created: nothing is registered, the platform keeps the run's failure
+  marking, and a clean `finish()` still completes it. A *hosted* run (one the
+  platform launched) is reachable only through the platform's internal RFT
+  root: pass the `PRIME_API_BASE` its launcher injects (`…/api/internal/rft`) as
+  `base_url=` and the SDK addresses that router, sending the run's token as
+  `x-api-key` too. Registering a run or setting its status is not available
+  there; the public API answers 400 for a hosted run's id.
+- Metrics are one row per `log_metrics` call, on their own uploader. The sample
+  table gets one Parquet object per upload, every 10th step, keyed by the step
+  an episode was dispatched at; a step logged in several calls gets several
+  objects, and the viewer shows their union.
+- The status vocabulary is `completed | failed`; `cancelled` and `crashed`
+  arrive as `failed` with the reason in `error_message`.
+
+## How it behaves
+
+- **Streams.** Records go out on a background thread as they are logged;
+  whatever queues up during one request goes out as the next.
+- **Contains its errors.** With the default `on_error="warn"` nothing the
+  platform raises escapes into your loop; `on_error="raise"` surfaces the first
+  failure from `flush()` or `finish()`, for tests and CI. Platform errors are
+  the `prime_traces` exception family.
+- **Degrades.** A transient failure costs its batch, three in a row retire the
+  sink (a training run pauses it for five minutes instead), and a full queue
+  drops records rather than stalling the run. Losses are counted in
+  `run.dropped_records` and `run.failed_records`.
+- **Drains on exit.** `finish()` gives queued uploads up to `finish_timeout`
+  (300 s) before closing the run out; an abort path can pass
+  `finish(timeout=...)`.
+
+An online run uploads traces and episodes only to Prime Traces when the account
+has access. An explicit `service_not_enabled` response before any committed
+upload switches the run to the legacy sample table, including the first batch.
+Other errors remain upload failures; they do not switch storage systems.
+Run metadata, finalization, and training metrics still use the Platform API.
+View uploads in the Prime Traces viewer; legacy sample views no longer
+receive a copy. Eval summaries reserve `prime_runs.traces_episodes_written` for
+receipt-backed upload counts used by hosted evaluation completion checks.
+`log_*()` are queue puts, safe inside a coroutine; `init()` and `finish()` do
+network I/O.
+
+### Opting out of Prime Traces
+
+Runs upload to Prime Traces by default. To opt a run out, set one of the
+following before it starts. Its samples then upload to the legacy sample tables,
+and the run never contacts Prime Traces, exactly as for an account without
+access:
+
+```python
+run = prime_runs.init(..., traces_opt_out=True)  # one run
+```
+
+```bash
+export PRIME_TRACES_OPT_OUT=true       # one shell or job
+prime config set-traces-opt-out true   # this machine
+```
+
+An account can also opt out for every client and SDK version from the billing
+page of the dashboard. Runs already in Prime Traces stay readable in the
+dashboard either way; an account-level opt-out also turns off trace reads from
+the SDK and CLI.
+
+## Configuration
+
+| Source                 | Meaning                                                                |
+| ---------------------- | ---------------------------------------------------------------------- |
+| `PRIME_API_KEY`        | Platform API token                                                     |
+| `PRIME_TEAM_ID`        | Team context; required for training runs                               |
+| `PRIME_API_BASE_URL`   | Platform API; defaults to `https://api.primeintellect.ai`              |
+| `PRIME_FRONTEND_URL`   | Dashboard; defaults to `https://app.primeintellect.ai`                 |
+| `PRIME_TRACES_URL`     | Prime Traces service, resolved by `prime-traces`                       |
+| `PRIME_RUNS_MODE`      | `online` or `disabled`; unset means online when there is an API key    |
+| `PRIME_TRACES_OPT_OUT` | `true` opts out of Prime Traces; samples go to the legacy tables        |
+| `~/.prime/config.json` | Shared prime CLI config (`api_key`, `team_id`, `base_url`, `traces_opt_out`) |
+
+Precedence is `init()` argument → environment variable → config file. A missing
+API key disables the run with a warning. `base_url` is normally the platform
+origin; the internal RFT root a hosted training run is given
+(`…/api/internal`, with or without `/rft`) is accepted too and switches the
+client to that router (attached runs only).
+
+## Related packages
+
+- [prime-traces](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-traces) — Prime Traces SDK
+- [prime](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime) — Prime CLI
+- [prime-evals](https://github.com/PrimeIntellect-ai/prime/tree/main/packages/prime-evals) — Evals SDK

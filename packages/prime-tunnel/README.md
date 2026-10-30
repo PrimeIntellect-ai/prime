@@ -25,6 +25,25 @@ async with Tunnel(local_port=8765) as tunnel:
     # Your local service on port 8765 is now accessible at tunnel.url
 ```
 
+If a tunnel stops serving while it should stay at the same URL, restart its
+client. The registration is kept, so `tunnel.url` does not change:
+
+```python
+await tunnel.restart()
+```
+
+A tunnel that was deleted, expired, or stayed disconnected for too long cannot
+be restarted: `restart()` raises `TunnelGoneError`, and `tunnel.is_gone` turns
+true as soon as the tunnel service rejects the client. Stop it and start a new
+tunnel, which gets a new URL. `await tunnel.status()` reports the client
+process and the service's record of the tunnel:
+
+```python
+status = await tunnel.status()
+if status.gone:
+    await tunnel.stop()
+```
+
 ## CLI Usage
 
 ```bash

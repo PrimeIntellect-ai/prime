@@ -16,19 +16,12 @@ from ..utils import get_console
 
 PRIME_AGENT_COMMAND = "prime-agent"
 PRIME_AGENT_INSTALLER_URL = "https://app.primeintellect.ai/prime-agent/install.sh"
-# Update only after reviewing a new installer published at the URL above.
-PRIME_AGENT_INSTALLER_SHA256 = (
-    "38d14a1be73b325652c7ce8342e3bf19335721837192855a7907732caf8e6d04"
-)
+# Published from prime-agent commit 21bdf28e94acc661187d2c1a2cfc55df20c6f276.
+# Update only after verifying the published installer against its release source.
+PRIME_AGENT_INSTALLER_SHA256 = "e4219185fdbba6fff6c50b656ea0155ee07837ad029ae6ded679e7db79c4c8e7"
 MAX_INSTALLER_BYTES = 1024 * 1024
 
 console = get_console()
-
-
-def _standalone_agent_path() -> Path:
-    data_home = os.environ.get("XDG_DATA_HOME")
-    base_dir = Path(data_home) if data_home else Path.home() / ".local" / "share"
-    return base_dir / "prime-agent-node" / "current" / "bin" / PRIME_AGENT_COMMAND
 
 
 def _find_agent() -> str | None:
@@ -36,9 +29,20 @@ def _find_agent() -> str | None:
     if executable is not None:
         return executable
 
-    standalone_path = _standalone_agent_path()
-    if standalone_path.is_file():
-        return str(standalone_path)
+    # The installer publishes into ~/.local/bin even when that directory is
+    # absent from the current shell's PATH. Honor its custom prefix as well.
+    prefix = os.environ.get("PRIME_AGENT_RUST_PREFIX")
+    install_prefix = Path(prefix) if prefix else Path.home() / ".local"
+    data_home = os.environ.get("XDG_DATA_HOME")
+    legacy_data = Path(data_home) if data_home else Path.home() / ".local" / "share"
+    candidates = [
+        install_prefix / "bin" / PRIME_AGENT_COMMAND,
+        legacy_data / "prime-agent" / "bin" / PRIME_AGENT_COMMAND,
+        legacy_data / "prime-agent-node" / "current" / "bin" / PRIME_AGENT_COMMAND,
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
 
     return None
 

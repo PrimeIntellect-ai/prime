@@ -1,10 +1,15 @@
+import asyncio
+import json
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from prime_tunnel import Config, Tunnel, TunnelClient
-from prime_tunnel.exceptions import TunnelError, TunnelTimeoutError
+from prime_tunnel.exceptions import TunnelError, TunnelGoneError, TunnelTimeoutError
+from prime_tunnel.frpc import FrpcEvent, classify_line
 from prime_tunnel.models import TunnelInfo
 
 
@@ -80,6 +85,62 @@ def test_config_api_key_from_env(monkeypatch):
     monkeypatch.setenv("PRIME_API_KEY", "test-key-123")
     config = Config()
     assert config.api_key == "test-key-123"
+
+
+def test_config_loads_temporary_context(monkeypatch, tmp_path):
+    config_dir = tmp_path / ".prime"
+    environments_dir = config_dir / "environments"
+    environments_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_key": "production-key",
+                "base_url": "https://api.production.example",
+                "team_id": "production-team",
+                "user_id": "production-user",
+            }
+        )
+    )
+    (environments_dir / "dev.json").write_text(
+        json.dumps(
+            {
+                "api_key": "dev-key",
+                "base_url": "https://api.dev.example/api/v1",
+                "team_id": "dev-team",
+                "user_id": "dev-user",
+            }
+        )
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+    config = Config()
+
+    assert config.api_key == "dev-key"
+    assert config.base_url == "https://api.dev.example"
+    assert config.team_id == "dev-team"
+    assert config.user_id == "dev-user"
+
+
+@pytest.mark.parametrize("content", ["{", "[]", '"not-an-object"'])
+def test_config_rejects_broken_temporary_context(monkeypatch, tmp_path, content):
+    config_dir = tmp_path / ".prime"
+    environments_dir = config_dir / "environments"
+    environments_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_key": "production-key",
+                "base_url": "https://api.production.example",
+            }
+        )
+    )
+    (environments_dir / "dev.json").write_text(content)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_CONTEXT", "dev")
+
+    with pytest.raises(ValueError, match="context|JSON object"):
+        Config()
 
 
 def test_config_bin_dir():
@@ -161,6 +222,278 @@ def test_sync_stop_survives_delete_failure():
 
     assert tunnel._started is False
     assert tunnel._tunnel_info is None
+
+
+# -- restart tests --
+
+
+def _patch_restart(tunnel, new_process):
+    """Patch what restart() launches so no real frpc runs."""
+    return (
+        patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+        patch("prime_tunnel.tunnel.subprocess.Popen", return_value=new_process),
+        patch.object(tunnel, "_wait_for_connection", new=AsyncMock()),
+        patch.object(tunnel, "_start_output_reader"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_restart_requires_started_tunnel():
+    tunnel = Tunnel(local_port=8080)
+
+    with pytest.raises(TunnelError, match="not started"):
+        await tunnel.restart()
+
+
+@pytest.mark.asyncio
+async def test_restart_replaces_frpc_and_keeps_registration():
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    old_process = tunnel._process
+    config_file = tunnel._config_file
+    new_process = MagicMock()
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, new_process)
+
+    with frpc_path, popen as mock_popen, wait as mock_wait, drain as mock_drain:
+        url = await tunnel.restart()
+
+    old_process.kill.assert_called_once()
+    old_process.terminate.assert_not_called()
+    assert mock_popen.call_args[0][0] == ["/bin/frpc", "-c", str(config_file)]
+    mock_wait.assert_awaited_once_with(new_process)
+    mock_drain.assert_called_once_with(new_process)
+    assert url == "https://t-test123.tunnel.example.com"
+    assert tunnel._process is new_process
+    assert tunnel._config_file is config_file
+    assert tunnel._started is True
+    tunnel._client.create_tunnel.assert_not_called()
+    tunnel._client.delete_tunnel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_starts_frpc_when_it_already_exited():
+    tunnel = _make_started_tunnel()
+    tunnel._process = None
+    new_process = MagicMock()
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, new_process)
+
+    with frpc_path, popen, wait, drain:
+        await tunnel.restart()
+
+    assert tunnel._process is new_process
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_stops_new_frpc_and_keeps_registration():
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    new_process = MagicMock()
+    frpc_path, popen, _, drain = _patch_restart(tunnel, new_process)
+    failing_wait = patch.object(
+        tunnel, "_wait_for_connection", new=AsyncMock(side_effect=TunnelTimeoutError("timed out"))
+    )
+
+    with frpc_path, popen, failing_wait, drain:
+        with pytest.raises(TunnelTimeoutError):
+            await tunnel.restart()
+
+    new_process.kill.assert_called_once()
+    assert tunnel._process is new_process
+    assert tunnel._started is True
+    assert tunnel._tunnel_info is not None
+    tunnel._client.delete_tunnel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_start_frpc_after_stop():
+    tunnel = _make_started_tunnel()
+
+    def stop_while_terminating(process, kill=False):
+        with patch("prime_tunnel.tunnel.httpx.delete"):
+            tunnel.sync_stop()
+
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+
+    with frpc_path, popen as mock_popen, wait, drain:
+        with patch.object(Tunnel, "_end_process", side_effect=stop_while_terminating):
+            with pytest.raises(TunnelError, match="stopped during restart"):
+                await tunnel.restart()
+
+    mock_popen.assert_not_called()
+    assert tunnel._process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_stops_new_frpc_when_stopped_while_connecting():
+    tunnel = _make_started_tunnel()
+    new_process = MagicMock()
+
+    async def stop_while_connecting(process):
+        with patch("prime_tunnel.tunnel.httpx.delete"):
+            tunnel.sync_stop()
+
+    frpc_path, popen, _, drain = _patch_restart(tunnel, new_process)
+    stopping_wait = patch.object(
+        tunnel, "_wait_for_connection", new=AsyncMock(side_effect=stop_while_connecting)
+    )
+
+    with frpc_path, popen, stopping_wait, drain:
+        with pytest.raises(TunnelError, match="stopped during restart"):
+            await tunnel.restart()
+
+    new_process.kill.assert_called_once()
+    assert tunnel._process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_stops_new_frpc_when_stopped_while_launching():
+    tunnel = _make_started_tunnel()
+    new_process = MagicMock()
+
+    def stop_while_launching(*args, **kwargs):
+        with patch("prime_tunnel.tunnel.httpx.delete"):
+            tunnel.sync_stop()
+        return new_process
+
+    frpc_path, _, wait, drain = _patch_restart(tunnel, new_process)
+    launching = patch("prime_tunnel.tunnel.subprocess.Popen", side_effect=stop_while_launching)
+
+    with frpc_path, launching, wait as mock_wait, drain as mock_drain:
+        with pytest.raises(TunnelError, match="stopped during restart"):
+            await tunnel.restart()
+
+    new_process.kill.assert_called_once()
+    mock_wait.assert_not_awaited()
+    mock_drain.assert_not_called()
+    assert tunnel._process is None
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_start_frpc_while_stop_is_deleting_the_registration():
+    import asyncio
+
+    tunnel = _make_started_tunnel()
+    deleting = asyncio.Event()
+    finish_delete = asyncio.Event()
+
+    async def slow_delete(tunnel_id):
+        deleting.set()
+        await finish_delete.wait()
+
+    tunnel._client = AsyncMock()
+    tunnel._client.delete_tunnel.side_effect = slow_delete
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+
+    with frpc_path, popen as mock_popen, wait, drain:
+        stop = asyncio.create_task(tunnel.stop())
+        await deleting.wait()
+        with pytest.raises(TunnelError, match="not started"):
+            await tunnel.restart()
+        finish_delete.set()
+        await stop
+
+    mock_popen.assert_not_called()
+    assert tunnel._process is None
+    assert tunnel._started is False
+
+
+@pytest.mark.asyncio
+async def test_start_waits_for_a_restart_that_was_stopped():
+    import asyncio
+    import threading
+
+    tunnel = _make_started_tunnel()
+    terminating = threading.Event()
+    finish_terminate = threading.Event()
+
+    def slow_terminate(process, kill=False):
+        terminating.set()
+        finish_terminate.wait(timeout=5)
+
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+    connect = patch.object(tunnel, "_register_and_connect", new=AsyncMock(return_value="url"))
+
+    with frpc_path, popen as mock_popen, wait, drain, connect as mock_connect:
+        with patch.object(Tunnel, "_end_process", side_effect=slow_terminate):
+            restart = asyncio.create_task(tunnel.restart())
+            await asyncio.to_thread(terminating.wait, 5)
+            with patch("prime_tunnel.tunnel.httpx.delete"):
+                tunnel.sync_stop()
+            start = asyncio.create_task(tunnel.start())
+            await asyncio.sleep(0.05)
+            mock_connect.assert_not_awaited()
+
+            finish_terminate.set()
+            with pytest.raises(TunnelError, match="stopped during restart"):
+                await restart
+            assert await start == "url"
+
+    mock_popen.assert_not_called()
+    mock_connect.assert_awaited_once()
+    assert tunnel._stopping is False
+
+
+@pytest.mark.asyncio
+async def test_start_after_stop_clears_the_stopping_state():
+    tunnel = _make_started_tunnel()
+    with patch("prime_tunnel.tunnel.httpx.delete"):
+        tunnel.sync_stop()
+    assert tunnel._stopping is True
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", side_effect=RuntimeError("no frpc")):
+        with pytest.raises(RuntimeError):
+            await tunnel.start()
+
+    assert tunnel._stopping is False
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_shows_the_new_frpc_in_recent_output():
+    tunnel = _make_started_tunnel()
+    _drain(tunnel, ["old frpc line\n"])
+    assert tunnel.recent_output == ["old frpc line"]
+
+    rejection = _frpc_line("W", "connect to server error: Tunnel is inactive")
+    process, write_fd = _make_fake_frpc([rejection])
+    try:
+        with (
+            patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+            patch("prime_tunnel.tunnel.subprocess.Popen", return_value=process),
+            pytest.raises(TunnelGoneError),
+        ):
+            await tunnel.restart()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+    assert tunnel.recent_output == [rejection]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_watches_the_process_it_is_given():
+    import io
+
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    tunnel = _make_started_tunnel()
+    tunnel._process.poll.return_value = None
+    exited = MagicMock()
+    exited.poll.return_value = 1
+    exited.stdout = io.StringIO(_frpc_line("E", "something broke") + "\n")
+    exited.stderr = io.StringIO("")
+    tunnel._start_output_reader(exited)
+
+    with pytest.raises(TunnelConnectionError, match="something broke"):
+        await tunnel._wait_for_connection(exited)
+
+    tunnel._process.poll.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_needs_a_launched_frpc():
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    with pytest.raises(TunnelConnectionError, match="not running"):
+        await Tunnel(local_port=8080)._wait_for_connection()
 
 
 # -- check_registered tests --
@@ -380,3 +713,588 @@ async def test_client_bulk_delete_status_rejects_tunnel_ids():
 
     with pytest.raises(TunnelError, match="status cannot be combined with tunnel_ids"):
         await client.bulk_delete_tunnels(tunnel_ids=["t-1"], status="disconnected")
+
+
+# -- startup login retry tests --
+
+
+def _frpc_line(level: str, msg: str) -> str:
+    return f"2026-07-28 00:00:00.000 [{level}] [client/service.go:319] {msg}"
+
+
+def test_classify_line_connected():
+    line = _frpc_line("I", "[t-test123] start proxy success")
+    assert classify_line(line) is FrpcEvent.CONNECTED
+
+
+def test_classify_line_leaves_transient_failures_to_frpc():
+    transient = [
+        _frpc_line("W", "connect to server error: dial tcp 1.2.3.4:7000: i/o timeout"),
+        _frpc_line("W", "connect to server error: Tunnel validation failed"),
+        _frpc_line("W", "connect to server error: EOF"),
+    ]
+    for line in transient:
+        assert classify_line(line) is None
+
+
+def test_classify_line_gone_registration():
+    gone = [
+        _frpc_line("W", "connect to server error: Tunnel is inactive"),
+        _frpc_line("W", "connect to server error: Tunnel not registered"),
+        _frpc_line("W", "[t-test123] start error: Tunnel is inactive"),
+    ]
+    for line in gone:
+        assert classify_line(line) is FrpcEvent.GONE
+
+
+def test_classify_line_rejected_credentials():
+    rejected = [
+        _frpc_line("W", "connect to server error: Invalid binding secret"),
+        _frpc_line("W", "connect to server error: Invalid authentication token"),
+        _frpc_line(
+            "W", "connect to server error: token in login doesn't match token from configuration"
+        ),
+    ]
+    for line in rejected:
+        assert classify_line(line) is FrpcEvent.REJECTED
+
+
+def test_classify_line_refused_proxy():
+    line = _frpc_line("W", "[t-test123] start error: proxy [t-test123] already exists")
+    assert classify_line(line) is FrpcEvent.PROXY_REFUSED
+
+
+def test_classify_line_ignores_unrelated_lines():
+    assert classify_line(_frpc_line("I", "try to connect to server...")) is None
+    # A rejection reason without a connect or proxy failure is not an event
+    assert classify_line(_frpc_line("E", "Tunnel is inactive")) is None
+
+
+def test_frpc_config_disables_login_fail_exit(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tunnel = _make_started_tunnel()
+    config_file = tunnel._write_frpc_config()
+    content = config_file.read_text()
+    assert "loginFailExit = false" in content
+    assert 'auth.token = "tok"' in content
+
+
+def _make_fake_frpc(lines: list[str]):
+    """Fake Popen whose stdout is a real pipe fed with lines and left open."""
+    read_fd, write_fd = os.pipe()
+    stdout = os.fdopen(read_fd, "r")
+    for line in lines:
+        os.write(write_fd, (line + "\n").encode())
+
+    process = MagicMock()
+    process.poll.return_value = None
+    process.stdout = stdout
+    process.stderr = None
+    return process, write_fd
+
+
+def _close_fake_frpc(tunnel: Tunnel, process, write_fd: int) -> None:
+    os.close(write_fd)
+    if tunnel._output is not None:
+        tunnel._output.join()
+    process.stdout.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_rides_out_transient_failure():
+    tunnel = Tunnel(local_port=8080, connection_timeout=5.0)
+    process, write_fd = _make_fake_frpc(
+        [
+            _frpc_line("W", "connect to server error: dial tcp 1.2.3.4:7000: i/o timeout"),
+            _frpc_line("I", "[t-test123] start proxy success"),
+        ]
+    )
+    tunnel._process = process
+    tunnel._start_output_reader(process)
+    try:
+        await tunnel._wait_for_connection()  # should not raise
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_fails_fast_on_rejection():
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    tunnel = Tunnel(local_port=8080, connection_timeout=5.0)
+    process, write_fd = _make_fake_frpc(
+        [_frpc_line("W", "connect to server error: Tunnel is inactive")]
+    )
+    tunnel._process = process
+    tunnel._start_output_reader(process)
+    try:
+        with pytest.raises(TunnelConnectionError, match="Tunnel is inactive"):
+            await tunnel._wait_for_connection()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_times_out_on_persistent_transient_failure():
+    tunnel = Tunnel(local_port=8080, connection_timeout=0.5)
+    process, write_fd = _make_fake_frpc(
+        [_frpc_line("W", "connect to server error: dial tcp 1.2.3.4:7000: i/o timeout")]
+    )
+    tunnel._process = process
+    tunnel._start_output_reader(process)
+    try:
+        with pytest.raises(TunnelTimeoutError):
+            await tunnel._wait_for_connection()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+
+@pytest.mark.asyncio
+async def test_restart_rides_out_transient_login_failure():
+    tunnel = _make_started_tunnel()
+    tunnel.connection_timeout = 5.0
+    process, write_fd = _make_fake_frpc(
+        [
+            _frpc_line("W", "connect to server error: EOF"),
+            _frpc_line("I", "[t-test123] start proxy success"),
+        ]
+    )
+    try:
+        with (
+            patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+            patch("prime_tunnel.tunnel.subprocess.Popen", return_value=process),
+        ):
+            url = await tunnel.restart()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+    assert url == "https://t-test123.tunnel.example.com"
+    assert tunnel._process is process
+    process.kill.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_fails_fast_when_the_registration_is_inactive():
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    tunnel = _make_started_tunnel()
+    tunnel.connection_timeout = 5.0
+    process, write_fd = _make_fake_frpc(
+        [_frpc_line("W", "connect to server error: Tunnel is inactive")]
+    )
+    try:
+        with (
+            patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+            patch("prime_tunnel.tunnel.subprocess.Popen", return_value=process),
+            pytest.raises(TunnelConnectionError, match="Tunnel is inactive"),
+        ):
+            await tunnel.restart()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+    process.kill.assert_called_once()
+    assert tunnel._started is True
+
+
+def _drain(tunnel: Tunnel, stdout_lines: list[str], stderr_lines: list[str] = ()) -> None:
+    import io
+
+    tunnel._process.stdout = io.StringIO("".join(stdout_lines))
+    tunnel._process.stderr = io.StringIO("".join(stderr_lines))
+    tunnel._process.poll.return_value = None
+    tunnel._start_output_reader(tunnel._process)
+    tunnel._output.join()
+
+
+def test_output_reader_forwards_frpc_lines_at_their_level(caplog):
+    import logging
+
+    tunnel = _make_started_tunnel()
+    lines = [
+        "\x1b[1;34m2026-09-24 18:09:58.067 [I] [client/service.go:295] "
+        "[2985857c77023140] login to server success, get run id [2985857c77023140]\x1b[0m\n",
+        "2026-09-24 18:09:58.000 [W] [client/control.go:171] "
+        "[2985857c77023140] control writer is closing\n",
+        "2026-09-24 18:09:58.001 [E] [client/service.go:303] connect to server error: EOF\n",
+        "2026-09-24 18:09:58.002 [D] [client/control.go:88] heartbeat\n",
+    ]
+
+    with caplog.at_level(logging.DEBUG, logger="prime_tunnel.frpc"):
+        _drain(tunnel, lines)
+
+    records = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "prime_tunnel.frpc"]
+    assert records == [
+        (logging.INFO, "frpc t-test123: login to server success, get run id [2985857c77023140]"),
+        (logging.WARNING, "frpc t-test123: control writer is closing"),
+        (logging.ERROR, "frpc t-test123: connect to server error: EOF"),
+        (logging.DEBUG, "frpc t-test123: heartbeat"),
+    ]
+    assert len(tunnel.recent_output) == 4
+
+
+def test_output_reader_keeps_a_replaced_process_out_of_the_new_buffer():
+    import io
+    import os
+
+    tunnel = _make_started_tunnel()
+    read_fd, write_fd = os.pipe()
+    old_process = MagicMock()
+    old_process.stdout = os.fdopen(read_fd, "r")
+    old_process.stderr = io.StringIO("")
+    tunnel._start_output_reader(old_process)
+    old_output = tunnel._output
+
+    new_process = MagicMock()
+    new_process.stdout = io.StringIO("new frpc line\n")
+    new_process.stderr = io.StringIO("")
+    tunnel._process = new_process
+    tunnel._start_output_reader(new_process)
+    tunnel._output.join()
+
+    with os.fdopen(write_fd, "w") as old_stdout:
+        old_stdout.write("late line from the old frpc\n")
+    old_output.join()
+
+    assert tunnel.recent_output == ["new frpc line"]
+
+
+def test_output_reader_logs_unparsed_lines_at_info(caplog):
+    import logging
+
+    tunnel = _make_started_tunnel()
+
+    with caplog.at_level(logging.INFO, logger="prime_tunnel.frpc"):
+        _drain(tunnel, [], ["panic: something unexpected\n"])
+
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, "frpc t-test123: panic: something unexpected"),
+    ]
+
+
+def test_prime_tunnel_logger_has_null_handler():
+    import logging
+
+    import prime_tunnel  # noqa: F401
+
+    handlers = logging.getLogger("prime_tunnel").handlers
+    assert any(isinstance(h, logging.NullHandler) for h in handlers)
+
+
+# -- gone registrations and status --
+
+
+def _registration(tunnel: Tunnel, status: str) -> TunnelInfo:
+    return tunnel._tunnel_info.model_copy(update={"status": status})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["expired", "terminated", "TERMINATED"])
+async def test_check_registered_returns_false_for_a_terminal_registration(status):
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = _registration(tunnel, status)
+    assert await tunnel.check_registered() is False
+
+
+@pytest.mark.asyncio
+async def test_status_reports_the_process_and_the_registration():
+    tunnel = _make_started_tunnel()
+    tunnel._process.poll.return_value = None
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = _registration(tunnel, "disconnected")
+
+    status = await tunnel.status()
+
+    assert status.tunnel_id == "t-test123"
+    assert status.running is True
+    assert status.registration == "disconnected"
+    assert status.gone is False
+    assert tunnel.is_gone is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["expired", "terminated", None])
+async def test_status_marks_a_terminal_or_missing_registration_gone(status):
+    tunnel = _make_started_tunnel()
+    tunnel._client = AsyncMock()
+    tunnel._client.get_tunnel.return_value = (
+        _registration(tunnel, status) if status is not None else None
+    )
+
+    result = await tunnel.status()
+
+    assert result.registration == status
+    assert result.gone is True
+    assert tunnel.is_gone is True
+
+
+@pytest.mark.asyncio
+async def test_status_requires_started_tunnel():
+    with pytest.raises(TunnelError, match="not started"):
+        await Tunnel(local_port=8080).status()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_connection_fails_fast_when_the_proxy_is_refused():
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    tunnel = Tunnel(local_port=8080, connection_timeout=5.0)
+    process, write_fd = _make_fake_frpc(
+        [
+            _frpc_line("I", "login to server success, get run id [abc]"),
+            _frpc_line("W", "[t-test123] start error: proxy [t-test123] already exists"),
+        ]
+    )
+    tunnel._process = process
+    tunnel._start_output_reader(process)
+    try:
+        with pytest.raises(TunnelConnectionError, match="already exists") as exc_info:
+            await tunnel._wait_for_connection()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+    assert not isinstance(exc_info.value, TunnelGoneError)
+
+
+@pytest.mark.asyncio
+async def test_restart_raises_gone_when_the_registration_is_inactive():
+    tunnel = _make_started_tunnel()
+    tunnel.connection_timeout = 5.0
+    process, write_fd = _make_fake_frpc(
+        [_frpc_line("W", "connect to server error: Tunnel is inactive")]
+    )
+    try:
+        with (
+            patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+            patch("prime_tunnel.tunnel.subprocess.Popen", return_value=process),
+            pytest.raises(TunnelGoneError, match="Tunnel is inactive"),
+        ):
+            await tunnel.restart()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+    assert tunnel.is_gone is True
+
+
+@pytest.mark.asyncio
+async def test_successful_restart_clears_gone():
+    tunnel = _make_started_tunnel()
+    tunnel._gone = True
+    frpc_path, popen, wait, drain = _patch_restart(tunnel, MagicMock())
+
+    with frpc_path, popen, wait, drain:
+        await tunnel.restart()
+
+    assert tunnel.is_gone is False
+
+
+@pytest.mark.asyncio
+async def test_restart_keeps_a_rejection_that_follows_the_connect():
+    tunnel = _make_started_tunnel()
+    tunnel._gone = True
+    tunnel.connection_timeout = 5.0
+    process, write_fd = _make_fake_frpc(
+        [
+            _frpc_line("I", "[t-test123] start proxy success"),
+            _frpc_line("W", "connect to server error: Tunnel is inactive"),
+        ]
+    )
+    real_wait = tunnel._wait_for_connection
+
+    async def wait_after_both_lines(process):
+        while len(tunnel._output.lines()) < 2:
+            await asyncio.sleep(0.01)
+        await real_wait(process)
+
+    try:
+        with (
+            patch("prime_tunnel.tunnel.get_frpc_path", return_value="/bin/frpc"),
+            patch("prime_tunnel.tunnel.subprocess.Popen", return_value=process),
+            patch.object(tunnel, "_wait_for_connection", new=wait_after_both_lines),
+        ):
+            await tunnel.restart()
+    finally:
+        _close_fake_frpc(tunnel, process, write_fd)
+
+    assert tunnel.is_gone is True
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_keeps_gone():
+    tunnel = _make_started_tunnel()
+    tunnel._gone = True
+    frpc_path, popen, _, reader = _patch_restart(tunnel, MagicMock())
+    failing_wait = patch.object(
+        tunnel, "_wait_for_connection", new=AsyncMock(side_effect=TunnelTimeoutError("timed out"))
+    )
+
+    with frpc_path, popen, failing_wait, reader:
+        with pytest.raises(TunnelTimeoutError):
+            await tunnel.restart()
+
+    assert tunnel.is_gone is True
+
+
+def test_output_reader_marks_the_tunnel_gone_when_a_reconnect_is_rejected():
+    tunnel = _make_started_tunnel()
+    _drain(
+        tunnel,
+        [
+            _frpc_line("I", "try to connect to server...") + "\n",
+            _frpc_line("W", "connect to server error: Tunnel is inactive") + "\n",
+        ],
+    )
+    assert tunnel.is_gone is True
+
+
+def test_output_reader_ignores_transient_reconnect_failures():
+    tunnel = _make_started_tunnel()
+    _drain(tunnel, [_frpc_line("W", "connect to server error: i/o timeout") + "\n"])
+    assert tunnel.is_gone is False
+
+
+def test_output_reader_ignores_a_replaced_process_when_marking_gone():
+    import io
+
+    tunnel = _make_started_tunnel()
+    old_process = MagicMock()
+    old_process.stdout = io.StringIO(
+        _frpc_line("W", "connect to server error: Tunnel is inactive") + "\n"
+    )
+    old_process.stderr = io.StringIO("")
+    tunnel._process = MagicMock()
+    tunnel._start_output_reader(old_process)
+    tunnel._output.join()
+
+    assert tunnel.is_gone is False
+
+
+# -- one reader from launch --
+
+
+def test_output_reader_reports_every_event_and_keeps_the_first():
+    import io
+
+    from prime_tunnel.frpc import FrpcOutput
+
+    process = MagicMock()
+    process.stdout = io.StringIO(
+        _frpc_line("I", "[t-test123] start proxy success")
+        + "\n"
+        + _frpc_line("W", "connect to server error: Tunnel is inactive")
+        + "\n"
+    )
+    process.stderr = io.StringIO("")
+    events = []
+
+    output = FrpcOutput(process, "t-test123", on_event=events.append)
+    output.join()
+
+    assert events == [FrpcEvent.CONNECTED, FrpcEvent.GONE]
+    assert output.first_event is FrpcEvent.CONNECTED
+
+
+def test_output_reader_keeps_reading_when_the_callback_fails():
+    import io
+
+    from prime_tunnel.frpc import FrpcOutput
+
+    process = MagicMock()
+    process.stdout = io.StringIO(
+        _frpc_line("I", "[t-test123] start proxy success") + "\nlater line\n"
+    )
+    process.stderr = io.StringIO("")
+
+    def failing(event):
+        raise RuntimeError("callback bug")
+
+    output = FrpcOutput(process, "t-test123", on_event=failing)
+    output.join()
+
+    assert output.lines()[-1] == "later line"
+    assert output.first_event is FrpcEvent.CONNECTED
+
+
+def _fake_frpc_binary(tmp_path: Path, script: str) -> Path:
+    path = tmp_path / "frpc"
+    path.write_text("#!/bin/sh\n" + script)
+    path.chmod(0o755)
+    return path
+
+
+def _client_for(tunnel: Tunnel) -> AsyncMock:
+    client = AsyncMock()
+    client.create_tunnel.return_value = _make_started_tunnel()._tunnel_info
+    tunnel._client = client
+    return client
+
+
+@pytest.mark.asyncio
+async def test_start_reads_a_real_process_from_launch(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    connected = _frpc_line("I", "[t-test123] start proxy success")
+    # More output than a pipe buffer holds, so an unread pipe would block it.
+    frpc = _fake_frpc_binary(
+        tmp_path,
+        "i=0; while [ $i -lt 3000 ]; do echo 'padding padding padding padding'; i=$((i+1)); done\n"
+        f"echo '{connected}'\nexec sleep 30\n",
+    )
+    tunnel = Tunnel(local_port=8080, connection_timeout=10.0)
+    client = _client_for(tunnel)
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
+        url = await tunnel.start()
+    try:
+        assert url == "https://t-test123.tunnel.example.com"
+        assert tunnel.is_running
+        assert tunnel.recent_output[-1] == connected
+        assert len(tunnel.recent_output) == 50
+    finally:
+        await tunnel.stop()
+
+    client.delete_tunnel.assert_awaited_once_with("t-test123")
+
+
+@pytest.mark.asyncio
+async def test_start_reports_a_real_process_that_exits(monkeypatch, tmp_path):
+    from prime_tunnel.exceptions import TunnelConnectionError
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    failure = _frpc_line("E", "something broke")
+    frpc = _fake_frpc_binary(tmp_path, f"echo '{failure}' >&2\nexit 3\n")
+    tunnel = Tunnel(local_port=8080, connection_timeout=10.0)
+    _client_for(tunnel)
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
+        with pytest.raises(TunnelConnectionError, match="something broke"):
+            await tunnel.start()
+
+    assert tunnel.recent_output == [failure]
+    assert not tunnel.is_running
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_reconnect_of_a_real_process_marks_the_tunnel_gone(monkeypatch, tmp_path):
+    import asyncio
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    connected = _frpc_line("I", "[t-test123] start proxy success")
+    rejected = _frpc_line("W", "connect to server error: Tunnel is inactive")
+    frpc = _fake_frpc_binary(
+        tmp_path, f"echo '{connected}'\nsleep 0.3\necho '{rejected}'\nexec sleep 30\n"
+    )
+    tunnel = Tunnel(local_port=8080, connection_timeout=10.0)
+    _client_for(tunnel)
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
+        await tunnel.start()
+    try:
+        assert tunnel.is_gone is False
+        for _ in range(50):
+            if tunnel.is_gone:
+                break
+            await asyncio.sleep(0.1)
+        assert tunnel.is_gone is True
+        assert tunnel.is_running
+    finally:
+        await tunnel.stop()

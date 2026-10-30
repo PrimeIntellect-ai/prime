@@ -6,19 +6,262 @@ own helm release on a registered PrimeCluster. Auth is the standard API
 token; admin role is gated server-side.
 """
 
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, List, Literal, Optional
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
-from prime_cli.core import APIClient
+from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agent
+
+# The only repo the hosted source overlay runs code from. The platform and
+# validator enforce the same restriction server-side; the CLI just resolves
+# `--pr N` against it so a fork PR fails here with a clear message instead
+# of a 422 from the backend.
+PRIME_RL_GITHUB_REPO = "PrimeIntellect-ai/prime-rl"
+_GITHUB_API = "https://api.github.com"
+
+
+# Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
+# Only the read wait grows: an unreachable host still fails in 10s.
+CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
+
+class PreparedTrainingRuntime(BaseModel):
+    repository: Literal["ghcr.io/primeintellect-ai/prime-rl"]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    image_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_commit: Optional[str] = Field(None, pattern=r"^[0-9a-f]{40}$")
+    schema_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class SchemaInstallInputs(BaseModel):
+    python: Literal["3.12"]
+    requirements: List[str]
+    constraints: List[str]
+
+
+class LocalValidationPreparation(BaseModel):
+    contract_version: Literal[1]
+    mode: Literal["rl", "sft"]
+    runtime: PreparedTrainingRuntime
+    schema_install: SchemaInstallInputs
+    submission_supported: bool
 
 
 class HostedTrainingRunResponse(BaseModel):
-    """Response from POST /v1/training/runs."""
+    """Response from POST /v1/training/runs.
+
+    The placement fields are informational: the backend derives whether a
+    run lands on reserved or billed capacity (the caller does not ask for
+    either), so echoing the resolved type and rate is the only way the
+    caller learns what the run costs before it starts. All default to
+    None/False so an older backend that omits them still parses.
+    """
 
     run_id: str = Field(..., alias="runId")
-    job_id: str = Field(..., alias="jobId")
     token_value: str = Field(..., alias="tokenValue")
+    on_demand: bool = Field(False, alias="onDemand")
+    gpu_type: str | None = Field(None, alias="gpuType")
+    price_per_gpu_hour: float | None = Field(None, alias="pricePerGpuHour")
+    estimated_cost_per_hour: float | None = Field(None, alias="estimatedCostPerHour")
+    is_beta: bool = Field(False, alias="isBeta")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AvailableGpuTypesResponse(BaseModel):
+    """Response from GET /v1/training/available-gpu-types."""
+
+    gpu_types: List[str] = Field(default_factory=list, alias="gpuTypes")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class FFTModelClusterInfo(BaseModel):
+    """One cluster the caller can dispatch an FFT run to that already has
+    the parent model cached.
+
+    Intentionally narrower than the backend `FFTModelClusterInfo`
+    schema: `cache_synced_at` is dropped because cache freshness is an
+    implementation detail the user shouldn't reason about — the
+    dispatch picker already gates on PRESENT-cache clusters, so any
+    entry surfaced here is warm.
+    """
+
+    cluster_id: str = Field(..., alias="clusterId")
+    cluster_name: str = Field(..., alias="clusterName")
+    gpu_type: str | None = Field(None, alias="gpuType")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AvailableFFTModel(BaseModel):
+    """A model that is cached and ready for FFT dispatch on at least one
+    eligible PrimeCluster."""
+
+    name: str = Field(..., description="Model name")
+    clusters: list[FFTModelClusterInfo] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class OnDemandGpuTypeAvailability(BaseModel):
+    """A GPU type purchasable on shared on-demand capacity.
+
+    Needs no ClusterAllocation and bills per GPU-hour, so it shows up for
+    callers who have no reserved clusters at all. Unlike the cache-keyed
+    `models` list, an on-demand run downloads a model that is not cached
+    rather than being rejected, so the models table is a speed hint here
+    rather than a list of what you may train.
+
+    `available_now` is a coarse capacity hint, not an admission decision:
+    it says the backend currently reports some free pool headroom for the
+    GPU type, never that this run will start now — actual placement also
+    needs headroom for the run's GPU count and topology, which the
+    discovery endpoint knows nothing about (and the backend's physical
+    free capacity can even be unknown). Rendered as available/busy with a
+    queue caveat, never a start-time promise.
+    """
+
+    gpu_type: str = Field(..., alias="gpuType")
+    price_per_gpu_hour: float = Field(..., alias="pricePerGpuHour")
+    discount_label: str | None = Field(None, alias="discountLabel")
+    available_now: bool = Field(False, alias="availableNow")
+    # Server-driven so the label retires without a CLI release.
+    is_beta: bool = Field(False, alias="isBeta")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AvailableFFTModelsResponse(BaseModel):
+    """Response from GET /v1/training/available-fft-models."""
+
+    models: list[AvailableFFTModel] = Field(default_factory=list)
+    on_demand: list[OnDemandGpuTypeAvailability] = Field(default_factory=list, alias="onDemand")
+    # Three states. Explicit False: the account is not enrolled in the
+    # on-demand beta, so an empty `on_demand` list is an access denial —
+    # the only case where "contact support to request access" is the right
+    # message. Explicit True: enrolled, an empty list just means no
+    # capacity is currently listed. None: no enrollment signal reached us
+    # (older backend that omits the field, a swallowed 404/discovery
+    # error) — must never be rendered as a denial.
+    on_demand_beta_access: bool | None = Field(None, alias="onDemandBetaAccess")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class Volume(BaseModel):
+    """A named volume (GET/POST /v1/training/volumes)."""
+
+    name: str
+    size: Optional[str] = None
+    status: str
+    cluster_id: str = Field(..., alias="clusterId")
+    # Cluster name; absent from older backends.
+    cluster: Optional[str] = None
+    pvc_name: str = Field(..., alias="pvcName")
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    # The creator's display name and email; absent from older backends.
+    created_by_name: Optional[str] = Field(None, alias="createdByName")
+    created_by_email: Optional[str] = Field(None, alias="createdByEmail")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VolumeSessionGateway(BaseModel):
+    host: str
+    port: int
+    cert_sha256: str = Field(alias="certSha256")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VolumeSession(BaseModel):
+    id: str
+    volume_name: str = Field(alias="volumeName")
+    status: str
+    read_only: bool = Field(alias="readOnly")
+    # Same per-session endpoint carries shell, sftp/scp and rsync.
+    ssh_connection: Optional[str] = Field(None, alias="sshConnection")
+    # Public gateway that reaches the session from outside the tailnet.
+    gateway: Optional[VolumeSessionGateway] = None
+    # The session pod's sshd host public key, for scoped known_hosts pinning.
+    host_public_key: Optional[str] = Field(None, alias="hostPublicKey")
+    # Why the session failed (FAILED/TOMBSTONED only).
+    error_message: Optional[str] = Field(None, alias="errorMessage")
+    # Absent from older backends.
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    # creating | staging | ready | syncing | finalizing | stopped | failed;
+    # absent from older backends.
+    phase: Optional[str] = None
+    # The latest rclone stats line while the session copies data in (staging).
+    progress: Optional[str] = None
+    # A live view (platform ENG-7113): the run or read-write session whose
+    # volume this read-only session mounts as it is now. Absent otherwise.
+    live_view_of: Optional[str] = Field(None, alias="liveViewOf")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VolumeTransferRoute(BaseModel):
+    """POST …/volumes/{name}/transfer: where a get/put should go. `via` is
+    "session" (the caller's live read-write session, in `session`) or "r2"
+    (scoped credentials for the volume's `prefix` in `bucket`)."""
+
+    via: str
+    session: Optional[VolumeSession] = None
+    endpoint: Optional[str] = None
+    bucket: Optional[str] = None
+    prefix: Optional[str] = None
+    access_key_id: Optional[str] = Field(None, alias="accessKeyId")
+    secret_access_key: Optional[str] = Field(None, alias="secretAccessKey")
+    session_token: Optional[str] = Field(None, alias="sessionToken")
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
+    # A put's upload lease (platform#6358): sent back on refresh, released
+    # when the put ends. Absent on gets and from older backends.
+    lease_id: Optional[str] = Field(None, alias="leaseId")
+    # A live get that still reads R2: why (e.g. the run is syncing back).
+    note: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VolumeTransferProgress(BaseModel):
+    """The latest rclone stats line of a running volume transfer.
+
+    Values are rclone's own human strings ("412.345 GiB", "182.400 MiB/s",
+    "1h48m0s"); only present once the transfer is running.
+    """
+
+    transferred: Optional[str] = None
+    total: Optional[str] = None
+    percentage: Optional[int] = None
+    rate: Optional[str] = None
+    eta: Optional[str] = None
+    errors: Optional[int] = None
+
+
+class VolumeTransfer(BaseModel):
+    """An S3 import/export of a named volume (…/volumes/{name}/transfers).
+
+    Credentials are never part of this model: the API accepts them in the
+    create request body only, and no response or log ever carries them.
+    """
+
+    id: str
+    volume_name: str = Field(..., alias="volumeName")
+    direction: str
+    path: str
+    url: str
+    status: str
+    progress: Optional[VolumeTransferProgress] = None
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    started_at: Optional[str] = Field(None, alias="startedAt")
+    completed_at: Optional[str] = Field(None, alias="completedAt")
+    error_message: Optional[str] = Field(None, alias="errorMessage")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -29,6 +272,13 @@ class HostedTrainingClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
+    def prepare_local_validation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        response = self.client.post("/training/runs/prepare", json=payload)
+        try:
+            return LocalValidationPreparation.model_validate(response).model_dump()
+        except PydanticValidationError as exc:
+            raise APIError(f"Failed to parse local validation preparation: {exc}") from exc
+
     def create_run(self, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
         """POST /v1/training/runs. Backend mints a per-run API token and
         kicks off the helm install asynchronously; returns immediately with
@@ -38,7 +288,10 @@ class HostedTrainingClient:
         …) propagate so callers can branch by exception class instead of
         string-matching the message.
         """
-        response = self.client.post("/training/runs", json=payload)
+        # The backend validates the config through the rl-validator before
+        # answering, and a cold validator alone may take up to its 60s
+        # timeout (ENG-6696); the client default of 30s gave up first.
+        response = self.client.post("/training/runs", json=payload, timeout=CREATE_RUN_TIMEOUT)
         return HostedTrainingRunResponse.model_validate(response)
 
     def delete_run(self, run_id: str) -> Dict[str, Any]:
@@ -52,6 +305,341 @@ class HostedTrainingClient:
         response = self.client.request("DELETE", f"/training/runs/{run_id}")
         return response if isinstance(response, dict) else {"runId": run_id}
 
+    def pause_run(self, run_id: str) -> Dict[str, Any]:
+        return self.client.post(f"/training/runs/{run_id}/pause")
+
+    def resume_run(self, run_id: str, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
+        """POST /v1/training/runs/{run_id}/resume: a new run continuing a
+        PAUSED one from its stored config. Validates like a create, so it
+        shares the create timeout."""
+        response = self.client.post(
+            f"/training/runs/{run_id}/resume", json=payload, timeout=CREATE_RUN_TIMEOUT
+        )
+        return HostedTrainingRunResponse.model_validate(response)
+
+    def create_volume(
+        self,
+        name: str,
+        size: str,
+        team_id: Optional[str] = None,
+        cluster: Optional[str] = None,
+        warm: bool = True,
+    ) -> Volume:
+        payload: Dict[str, Any] = {"name": name, "size": size, "warm": warm}
+        if team_id:
+            payload["teamId"] = team_id
+        if cluster:
+            payload["cluster"] = cluster
+        return Volume.model_validate(self.client.post("/training/volumes", json=payload))
+
+    def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get("/training/volumes", params=params)
+        return [Volume.model_validate(v) for v in response.get("volumes", [])]
+
+    def expand_volume(self, name: str, size: str, team_id: Optional[str] = None) -> Volume:
+        payload: Dict[str, Any] = {"size": size}
+        if team_id:
+            payload["teamId"] = team_id
+        return Volume.model_validate(self.client.patch(f"/training/volumes/{name}", json=payload))
+
+    def delete_volume(self, name: str, team_id: Optional[str] = None) -> None:
+        params = {"teamId": team_id} if team_id else None
+        self.client.delete(f"/training/volumes/{name}", params=params)
+
+    def create_volume_session(
+        self,
+        name: str,
+        *,
+        read_only: bool = True,
+        allow_writable: bool = False,
+        team_id: Optional[str] = None,
+    ) -> VolumeSession:
+        payload: Dict[str, Any] = {"readOnly": read_only}
+        if allow_writable:
+            payload["allowWritable"] = True
+        if team_id:
+            payload["teamId"] = team_id
+        return VolumeSession.model_validate(
+            self.client.post(f"/training/volumes/{name}/sessions", json=payload)
+        )
+
+    def get_volume_session(
+        self, name: str, session_id: str, *, team_id: Optional[str] = None
+    ) -> VolumeSession:
+        params = {"teamId": team_id} if team_id else None
+        return VolumeSession.model_validate(
+            self.client.get(f"/training/volumes/{name}/sessions/{session_id}", params=params)
+        )
+
+    def stop_volume_session(
+        self, name: str, session_id: str, *, team_id: Optional[str] = None
+    ) -> None:
+        params = {"teamId": team_id} if team_id else None
+        self.client.delete(f"/training/volumes/{name}/sessions/{session_id}", params=params)
+
+    def list_volume_sessions(
+        self, name: str, *, team_id: Optional[str] = None
+    ) -> List[VolumeSession]:
+        """GET …/volumes/{name}/sessions. The caller's own sessions on the
+        volume, newest first (what `prime volumes sessions` shows)."""
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get(f"/training/volumes/{name}/sessions", params=params)
+        return [VolumeSession.model_validate(s) for s in response.get("sessions", [])]
+
+    def route_volume_transfer(
+        self,
+        name: str,
+        mode: str,
+        path: str = "",
+        entries: Optional[List[str]] = None,
+        *,
+        team_id: Optional[str] = None,
+        lease_id: Optional[str] = None,
+        live: bool = False,
+    ) -> VolumeTransferRoute:
+        """POST …/volumes/{name}/transfer with mode "get" or "put" and the
+        volume-relative path ("" = root): the get source or the put
+        destination. A root put also sends `entries`, the top-level names it
+        writes; a put's credential refresh sends its `lease_id` to extend
+        that lease. A `live` get reads a volume a run or read-write session
+        holds through a read-only live view of it (older backends ignore
+        it). Raises NotFoundError on backends without the route."""
+        payload: Dict[str, Any] = {"mode": mode, "path": path}
+        if live:
+            payload["live"] = True
+        if entries is not None:
+            payload["entries"] = entries
+        if lease_id:
+            payload["leaseId"] = lease_id
+        if team_id:
+            payload["teamId"] = team_id
+        return VolumeTransferRoute.model_validate(
+            self.client.post(f"/training/volumes/{name}/transfer", json=payload)
+        )
+
+    def release_volume_transfer(
+        self, name: str, lease_id: str, *, team_id: Optional[str] = None
+    ) -> None:
+        """POST …/volumes/{name}/transfer/release: end a direct put's upload
+        lease (204, idempotent). Unreleased, it expires on its own."""
+        payload: Dict[str, Any] = {"leaseId": lease_id}
+        if team_id:
+            payload["teamId"] = team_id
+        self.client.post(f"/training/volumes/{name}/transfer/release", json=payload)
+
+    def create_volume_transfer(
+        self,
+        name: str,
+        *,
+        direction: str,
+        path: str,
+        url: str,
+        credentials: Dict[str, Any],
+        region: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> VolumeTransfer:
+        """POST …/volumes/{name}/transfers. Queues an rclone job on the
+        volume's cluster and returns at once with a transfer id.
+
+        `credentials` is the `{accessKeyId, secretAccessKey, sessionToken}`
+        mapping built from the caller's AWS environment; it travels in this
+        request body only and is never persisted or returned.
+        """
+        payload: Dict[str, Any] = {
+            "direction": direction,
+            "path": path,
+            "url": url,
+            "credentials": credentials,
+        }
+        if region:
+            payload["region"] = region
+        if endpoint_url:
+            payload["endpointUrl"] = endpoint_url
+        if team_id:
+            payload["teamId"] = team_id
+        return VolumeTransfer.model_validate(
+            self.client.post(f"/training/volumes/{name}/transfers", json=payload)
+        )
+
+    def list_volume_transfers(
+        self, name: str, *, team_id: Optional[str] = None
+    ) -> List[VolumeTransfer]:
+        """GET …/volumes/{name}/transfers. The caller's transfers on this
+        volume, newest first, finished ones included."""
+        params = {"teamId": team_id} if team_id else None
+        response = self.client.get(f"/training/volumes/{name}/transfers", params=params)
+        return [VolumeTransfer.model_validate(t) for t in response.get("transfers", [])]
+
+    def get_volume_transfer(
+        self, name: str, transfer_id: str, *, team_id: Optional[str] = None
+    ) -> VolumeTransfer:
+        """GET …/volumes/{name}/transfers/{id}."""
+        params = {"teamId": team_id} if team_id else None
+        return VolumeTransfer.model_validate(
+            self.client.get(f"/training/volumes/{name}/transfers/{transfer_id}", params=params)
+        )
+
+    def cancel_volume_transfer(
+        self, name: str, transfer_id: str, *, team_id: Optional[str] = None
+    ) -> None:
+        """DELETE …/volumes/{name}/transfers/{id}. Tears down the job and its
+        Secret; the row stays as `cancelled`. Idempotent."""
+        params = {"teamId": team_id} if team_id else None
+        self.client.delete(f"/training/volumes/{name}/transfers/{transfer_id}", params=params)
+
+    def list_available_gpu_types(self, team_id: Optional[str] = None) -> AvailableGpuTypesResponse:
+        """GET /v1/training/available-gpu-types. Distinct GPU types the
+        caller could dispatch a dedicated FFT run on. Same principal
+        collapse as the dispatch picker: `team_id` wins when set,
+        otherwise the caller's personal allocations.
+        """
+        params: Dict[str, Any] = {}
+        if team_id:
+            params["team_id"] = team_id
+        response = self.client.get("/training/available-gpu-types", params=params)
+        return AvailableGpuTypesResponse.model_validate(response)
+
+    def get_available_fft(self, team_id: str | None = None) -> AvailableFFTModelsResponse:
+        """GET /v1/training/available-fft-models, whole response.
+
+        Carries both capacity paths: `models` is reserved capacity (repos
+        cached on clusters the caller has an allocation on) and
+        `on_demand` is the shared pool, which needs no allocation. Use
+        this rather than `list_available_fft_models` when you need both,
+        so the two sections come from one request and cannot disagree.
+
+        404 is swallowed to an empty response (whose beta-enrollment flag
+        is unknown, not denied) so the CLI still renders on older
+        backends that haven't shipped the endpoint. Every other
+        error (auth failure, forbidden, server errors) propagates — the
+        caller decides whether to surface or hide it based on whether the
+        LoRA section already ran.
+
+        A schema-drifted response (pydantic ValidationError) is re-raised
+        as APIError so the command layer's existing `except APIError`
+        fallback catches it — otherwise a non-conforming backend payload
+        would kill the LoRA table too.
+        """
+        params: dict[str, Any] = {}
+        if team_id:
+            params["team_id"] = team_id
+        try:
+            response = self.client.get("/training/available-fft-models", params=params)
+        except NotFoundError:
+            return AvailableFFTModelsResponse()
+        try:
+            return AvailableFFTModelsResponse.model_validate(response)
+        except PydanticValidationError as exc:
+            raise APIError(f"Failed to parse available FFT models response: {exc}") from exc
+
+    def list_available_fft_models(self, team_id: str | None = None) -> list[AvailableFFTModel]:
+        """Reserved-capacity models only. See `get_available_fft`."""
+        return self.get_available_fft(team_id=team_id).models
+
+
+def _github_error_body(resp: httpx.Response) -> Dict[str, str]:
+    """The string fields of a GitHub error body (`message`,
+    `documentation_url`), or {} when the body isn't a JSON object."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    return {k: v for k, v in body.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _github_message(resp: httpx.Response) -> str:
+    """`: <message>` from a GitHub error body, or "" when there is none."""
+    message = _github_error_body(resp).get("message")
+    return f": {message}" if message else ""
+
+
+def _github_rate_limited(resp: httpx.Response) -> bool:
+    """Whether a 403 / 429 from GitHub is a quota, not a refusal.
+
+    A primary limit sets x-ratelimit-remaining: 0 and a secondary limit
+    usually sets retry-after, but GitHub documents both headers as optional
+    on a secondary limit; the one guaranteed signal there is the error
+    message ("You have exceeded a secondary rate limit", or the older "abuse
+    detection mechanism"), so fall back to the body. Any other 403 (SSO
+    enforcement, a bad token) is a refusal and must not be reported as
+    "retry later".
+    """
+    if resp.status_code == 429:
+        return True
+    if resp.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in resp.headers:
+        return True
+    body = _github_error_body(resp)
+    text = f"{body.get('message', '')} {body.get('documentation_url', '')}".lower()
+    return "rate limit" in text or "rate-limit" in text or "abuse detection" in text
+
+
+def resolve_pull_request_head(pr_number: int) -> str:
+    """Head commit sha of a prime-rl pull request, for `prime train --pr N`.
+
+    Public GitHub API (prime-rl is public); a GITHUB_TOKEN / GH_TOKEN in the
+    environment is sent so a shared egress IP (CI, office NAT) isn't stuck
+    on the anonymous 60/hour quota. Only PRs whose head branch lives in the
+    canonical repo are accepted:
+    the hosted pods can only fetch refs from PrimeIntellect-ai/prime-rl,
+    so a fork PR would fail at dispatch anyway. Raises APIError with a
+    user-facing message on any failure so the command layer can print
+    and exit without string-matching.
+    """
+    url = f"{_GITHUB_API}/repos/{PRIME_RL_GITHUB_REPO}/pulls/{pr_number}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": default_user_agent(),
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        resp = httpx.get(url, headers=headers, timeout=15.0)
+    except httpx.HTTPError as exc:
+        raise APIError(f"Could not reach GitHub to resolve PR #{pr_number}: {exc}") from exc
+    if resp.status_code == 404:
+        raise APIError(f"PR #{pr_number} not found in {PRIME_RL_GITHUB_REPO}.")
+    if resp.status_code in (403, 429):
+        if _github_rate_limited(resp):
+            hint = "" if token else " (set GITHUB_TOKEN to lift the anonymous limit)"
+            raise APIError(
+                f"GitHub API rate limit hit while resolving PR #{pr_number}; retry "
+                f"later{hint}, or pass --ref <branch-or-sha> directly."
+            )
+        raise APIError(
+            f"GitHub refused the request for PR #{pr_number} (HTTP 403"
+            f"{_github_message(resp)}); pass --ref <branch-or-sha> directly."
+        )
+    if resp.status_code != 200:
+        raise APIError(f"GitHub returned HTTP {resp.status_code} while resolving PR #{pr_number}.")
+    try:
+        pull = resp.json()
+        head = pull["head"]
+        head_repo = (head.get("repo") or {}).get("full_name")
+        sha = head["sha"]
+        merged = bool(pull.get("merged"))
+        merge_commit = pull.get("merge_commit_sha")
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise APIError(f"Unexpected GitHub response while resolving PR #{pr_number}.") from exc
+    if merged:
+        # A merged PR's head sha is usually gone from the repo's branches
+        # (deleted branch, squash merge), so the platform would refuse it as
+        # a commit it can't attribute; the merged code lives on main.
+        via = f" (its merge commit is {merge_commit})" if isinstance(merge_commit, str) else ""
+        raise APIError(f"PR #{pr_number} is already merged; run its code with --ref main{via}.")
+    if not isinstance(head_repo, str) or head_repo.lower() != PRIME_RL_GITHUB_REPO.lower():
+        raise APIError(
+            f"PR #{pr_number} comes from a fork ({head_repo or 'unknown'}); fork PRs are "
+            f"not supported. Push the branch to {PRIME_RL_GITHUB_REPO} and use --ref."
+        )
+    if not isinstance(sha, str) or not sha:
+        raise APIError(f"PR #{pr_number} has no head commit sha in the GitHub response.")
+    return sha
+
 
 def build_payload_from_toml(
     cfg: Dict[str, Any],
@@ -61,6 +649,11 @@ def build_payload_from_toml(
     image_tag: Optional[str] = None,
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
+    gpu_type: Optional[str] = None,
+    volume: Optional[str] = None,
+    mode: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    resume_from: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the /v1/training/runs payload from a prime-rl-style TOML dict.
 
@@ -68,18 +661,38 @@ def build_payload_from_toml(
     per-component (trainer / orchestrator / inference) and bake each
     into the corresponding pod's startup command. Anything outside the
     handful of platform-authoritative overlays (chart-side scrape ports,
-    monitor URL, secret name) flows through unchanged — same e2e
+    monitor URL, secret name) flows through unchanged - same e2e
     behaviour as `uv run rl @ rl.toml`.
 
     What stays out of `config`:
       - secrets (wandb / hf): materialised into a per-run k8s Secret,
       - run name: lives on the platform's RFTRun row, not the TOML,
       - team_id: links the RFTRun to a team for billing/access scoping,
-      - image_tag: chart-level (which prime-rl image to pull).
+      - image_tag: chart-level (which prime-rl image to pull),
+      - gpu_type: narrows the backend picker to clusters with matching
+        PrimeCluster.gpuType (e.g. "H200_141GB"); omit for the default
+        auto-pick with no type preference.
+      - volume: a named volume the run writes its outputs to, under
+        runs/<runId>/, instead of a per-run PVC. For SFT runs the volume
+        also supplies the dataset: it is mounted read-only at /volume,
+        so config data.name must point at a path on the volume (e.g.
+        "/volume/datasets/<name>" or the relative "datasets/<name>" —
+        the platform resolves it).
+      - mode: the prime-rl schema family the config belongs to ("rl" or
+        "sft"). Omitted by default so existing RL payloads stay
+        byte-compatible; set to "sft" for SFT configs so the backend +
+        validator dispatch to SFTConfig instead of the RL schema.
+      - source_ref: a prime-rl git ref (branch / tag / sha) the pods
+        overlay onto the image at startup, for testing unmerged code
+        without an image build. The platform pins the resolved commit.
+      - resume_from: a PAUSED run to continue from. The platform attaches
+        that run's volume when none is given.
 
     Cluster targeting is backend-side (auto-pick first uncordoned).
     """
     payload: Dict[str, Any] = {"config": cfg}
+    if mode:
+        payload["mode"] = mode
     if name:
         payload["name"] = name
     if team_id:
@@ -90,4 +703,12 @@ def build_payload_from_toml(
         payload["wandbApiKey"] = wandb_api_key
     if hf_token:
         payload["hfToken"] = hf_token
+    if gpu_type:
+        payload["gpuType"] = gpu_type
+    if volume:
+        payload["volume"] = volume
+    if source_ref:
+        payload["sourceRef"] = source_ref
+    if resume_from is not None:
+        payload["resumeFrom"] = resume_from
     return payload

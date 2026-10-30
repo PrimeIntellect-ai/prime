@@ -5,10 +5,13 @@ from .client import (
     APIError,
     APITimeoutError,
     AsyncAPIClient,
+    MethodNotAllowedError,
     NotFoundError,
     PaymentRequiredError,
+    ServerError,
     UnauthorizedError,
     ValidationError,
+    default_user_agent,
 )
 from .config import Config
 
@@ -18,8 +21,11 @@ __all__ = [
     "APITimeoutError",
     "AsyncAPIClient",
     "Config",
+    "MethodNotAllowedError",
     "NotFoundError",
     "PaymentRequiredError",
+    "ServerError",
     "UnauthorizedError",
     "ValidationError",
+    "default_user_agent",
 ]

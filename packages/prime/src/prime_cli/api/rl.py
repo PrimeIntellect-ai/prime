@@ -1,62 +1,11 @@
 """Hosted Training API client."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-from prime_cli.core import APIClient, APIError, ValidationError
-
-
-class RLModel(BaseModel):
-    """Model available for Hosted Training."""
-
-    name: str = Field(..., description="Model name")
-    at_capacity: bool = Field(False, alias="atCapacity")
-    training_price_per_mtok: Optional[float] = Field(None, alias="trainingPricePerMtok")
-    inference_input_price_per_mtok: Optional[float] = Field(
-        None, alias="inferenceInputPricePerMtok"
-    )
-    inference_output_price_per_mtok: Optional[float] = Field(
-        None, alias="inferenceOutputPricePerMtok"
-    )
-    list_training_price_per_mtok: Optional[float] = Field(None, alias="listTrainingPricePerMtok")
-    list_inference_input_price_per_mtok: Optional[float] = Field(
-        None, alias="listInferenceInputPricePerMtok"
-    )
-    list_inference_output_price_per_mtok: Optional[float] = Field(
-        None, alias="listInferenceOutputPricePerMtok"
-    )
-    effective_training_price_per_mtok: Optional[float] = Field(
-        None, alias="effectiveTrainingPricePerMtok"
-    )
-    effective_inference_input_price_per_mtok: Optional[float] = Field(
-        None, alias="effectiveInferenceInputPricePerMtok"
-    )
-    effective_inference_output_price_per_mtok: Optional[float] = Field(
-        None, alias="effectiveInferenceOutputPricePerMtok"
-    )
-    promo_label: Optional[str] = Field(None, alias="promoLabel")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    def resolve_prices(self, category: str) -> tuple[Optional[float], Optional[float]]:
-        """Return ``(list_price, effective_price)`` for ``category``.
-
-        Categories: ``training``, ``inference_input``, ``inference_output``.
-
-        Post-swap backends populate ``list_*`` with the un-discounted price and
-        the legacy ``*_price_per_mtok`` with the effective (charged) price.
-        Pre-swap backends omit ``list_*`` and keep ``legacy = list``,
-        ``effective = charged``.
-        """
-        list_attr = f"list_{category}_price_per_mtok"
-        legacy_attr = f"{category}_price_per_mtok"
-        effective_attr = f"effective_{category}_price_per_mtok"
-        list_value = getattr(self, list_attr)
-        if list_value is not None:
-            return list_value, getattr(self, legacy_attr)
-        return getattr(self, legacy_attr), getattr(self, effective_attr)
+from prime_cli.core import APIClient, APIError
 
 
 class RLRun(BaseModel):
@@ -67,6 +16,10 @@ class RLRun(BaseModel):
     user_id: str = Field(..., alias="userId")
     team_id: Optional[str] = Field(None, alias="teamId")
     cluster_id: Optional[str] = Field(None, alias="rftClusterId")
+    # DEDICATED_FULL_FT: the PrimeCluster hosting the run's helm release.
+    # The backend writes rftClusterId NULL for dedicated runs, so this is
+    # the only cluster field they carry (shared runs use cluster_id).
+    prime_cluster_id: Optional[str] = Field(None, alias="primeClusterId")
     status: str = Field(..., description="Run status")
     # Discriminator: SHARED_RFT_HOSTED (LoRA) | DEDICATED_FULL_FT (own
     # helm release on a PrimeCluster) | EXTERNAL (CLI-side prime-rl).
@@ -97,6 +50,13 @@ class RLRun(BaseModel):
     max_inflight_rollouts: Optional[int] = Field(None, alias="maxInflightRollouts")
     oversampling_factor: Optional[float] = Field(None, alias="oversamplingFactor")
     max_async_level: Optional[int] = Field(None, alias="maxAsyncLevel")
+    # User-facing name of the named volume a DEDICATED_FULL_FT run
+    # mounted via --volume (outputs under runs/<runId>/ on it). Only
+    # set on the run-detail read; None for runs without a volume.
+    volume_name: Optional[str] = Field(None, alias="volumeName")
+    # Resolved GPU footprint (trainer + inference). NULL on legacy rows
+    # that pre-date the column.
+    gpu_count: Optional[int] = Field(None, alias="gpuCount")
 
     # Monitoring
     wandb_entity: Optional[str] = Field(None, alias="wandbEntity")
@@ -118,6 +78,11 @@ class RLRun(BaseModel):
     # Automated failure classification (only set for terminal FAILED runs).
     # Stored as a dict to stay forward-compatible if the API adds new fields.
     failure_analysis: Optional[Dict[str, Any]] = Field(None, alias="failureAnalysis")
+
+    # Full-FT source overlay: the prime-rl commit the pods run on top of the
+    # image when the run was dispatched with `--ref` / `--pr`. None for runs
+    # that use the image's baked source.
+    source_commit: Optional[str] = Field(None, alias="sourceCommit")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -148,200 +113,56 @@ class EnvServerInfo(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RLRunPage(BaseModel):
+    """One page of GET /rft/runs, as returned by the backend.
+
+    The pagination metadata fields are Optional: a backend that hasn't
+    deployed pagination support yet silently ignores the page/limit/mine
+    query params (FastAPI drops undeclared query params rather than
+    erroring) and returns the old `{"runs": [...]}` shape - the caller
+    must detect that (via `total is None`) and fall back to client-side
+    filtering/pagination over the full list it got back.
+    """
+
+    runs: List[RLRun] = Field(default_factory=list)
+    total: Optional[int] = Field(None, description="Total number of matching runs")
+    page: Optional[int] = Field(None, description="Current page number")
+    limit: Optional[int] = Field(None, description="Runs per page")
+    total_pages: Optional[int] = Field(None, alias="total_pages")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class RLClient:
     """Client for the Hosted Training API."""
 
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
-    def list_models(self, team_id: Optional[str] = None) -> List[RLModel]:
-        """List available models for Hosted Training."""
+    def list_runs(
+        self,
+        team_id: Optional[str] = None,
+        *,
+        mine: bool = False,
+        page: int = 1,
+        limit: int = 20,
+    ) -> RLRunPage:
+        """List Hosted Training runs for the authenticated user, one page
+        at a time - pagination and the `mine` filter are applied
+        server-side rather than fetched-in-full-then-sliced locally.
+        """
         try:
-            params = {}
+            params: Dict[str, Any] = {"page": page, "limit": limit}
             if team_id:
                 params["team_id"] = team_id
-            response = self.client.get("/rft/models", params=params if params else None)
-            models_data = response.get("models", [])
-            return [RLModel.model_validate(model) for model in models_data]
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to list Hosted Training models: {e.response.text}")
-            raise APIError(f"Failed to list Hosted Training models: {str(e)}")
-
-    def list_runs(self, team_id: Optional[str] = None) -> List[RLRun]:
-        """List Hosted Training runs for the authenticated user."""
-        try:
-            params = {}
-            if team_id:
-                params["team_id"] = team_id
-            response = self.client.get("/rft/runs", params=params if params else None)
-            runs_data = response.get("runs", [])
-            return [RLRun.model_validate(run) for run in runs_data]
+            if mine:
+                params["mine"] = "true"
+            response = self.client.get("/rft/runs", params=params)
+            return RLRunPage.model_validate(response)
         except Exception as e:
             if hasattr(e, "response") and hasattr(e.response, "text"):
                 raise APIError(f"Failed to list Hosted Training runs: {e.response.text}")
             raise APIError(f"Failed to list Hosted Training runs: {str(e)}")
-
-    def create_run(
-        self,
-        model_name: str,
-        environments: List[Dict[str, Any]],
-        rollouts_per_example: int = 8,
-        max_steps: int = 100,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        temp_scheduler: Optional[Dict[str, Any]] = None,
-        extra_body: Optional[Dict[str, Any]] = None,
-        batch_size: int = 128,
-        name: Optional[str] = None,
-        wandb_entity: Optional[str] = None,
-        wandb_project: Optional[str] = None,
-        wandb_run_name: Optional[str] = None,
-        secrets: Optional[Dict[str, str]] = None,
-        team_id: Optional[str] = None,
-        eval_config: Optional[Dict[str, Any]] = None,
-        val_config: Optional[Dict[str, Any]] = None,
-        pre_batch_filters: Optional[List[Dict[str, Any]]] = None,
-        post_batch_filters: Optional[List[Dict[str, Any]]] = None,
-        learning_rate: Optional[float] = None,
-        lora_alpha: Optional[int] = None,
-        max_inflight_rollouts: Optional[int] = None,
-        oversampling_factor: Optional[float] = None,
-        checkpoints_config: Optional[Dict[str, Any]] = None,
-        adapters_config: Optional[Dict[str, Any]] = None,
-        checkpoint_id: Optional[str] = None,
-        cluster_name: Optional[str] = None,
-        infrastructure_config: Optional[Dict[str, Any]] = None,
-        tailscale_config: Optional[Dict[str, Any]] = None,
-        enable_thinking: Optional[bool] = None,
-        reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
-        run_config: Optional[Dict[str, Any]] = None,
-        loss: str = "rl",
-        teacher: Optional[Dict[str, Any]] = None,
-    ) -> RLRun:
-        """Create a new Hosted Training run."""
-        try:
-            secrets_list: List[Dict[str, str]] = []
-            if secrets:
-                for key, value in secrets.items():
-                    secrets_list.append({"key": key, "value": value})
-
-            payload: Dict[str, Any] = {
-                "model": {"name": model_name},
-                "environments": environments,
-                "rollouts_per_example": rollouts_per_example,
-                "max_steps": max_steps,
-                "batch_size": batch_size,
-                "secrets": secrets_list,
-            }
-
-            if loss != "rl":
-                payload["loss"] = loss
-
-            if teacher:
-                payload["teacher"] = teacher
-
-            if name:
-                payload["name"] = name
-
-            # Add monitoring config if any W&B field is set (backend validates completeness)
-            if wandb_entity or wandb_project or wandb_run_name:
-                wandb_config: Dict[str, Any] = {}
-                if wandb_entity:
-                    wandb_config["entity"] = wandb_entity
-                if wandb_project:
-                    wandb_config["project"] = wandb_project
-                if wandb_run_name:
-                    wandb_config["name"] = wandb_run_name
-                payload["monitoring"] = {"wandb": wandb_config}
-
-            if team_id:
-                payload["team_id"] = team_id
-
-            if max_tokens:
-                payload["max_tokens"] = max_tokens
-
-            if temperature is not None:
-                payload["temperature"] = temperature
-
-            if temp_scheduler is not None:
-                payload["temp_scheduler"] = temp_scheduler
-
-            if extra_body is not None:
-                payload["extra_body"] = extra_body
-
-            if eval_config:
-                payload["eval"] = eval_config
-
-            if val_config:
-                payload["val"] = val_config
-
-            # `is not None` rather than truthiness: an explicit empty list
-            # overrides prime-rl's default filters and must be sent.
-            if pre_batch_filters is not None:
-                payload["pre_batch_filters"] = pre_batch_filters
-
-            if post_batch_filters is not None:
-                payload["post_batch_filters"] = post_batch_filters
-
-            if learning_rate is not None:
-                payload["learning_rate"] = learning_rate
-
-            if lora_alpha is not None:
-                payload["lora_alpha"] = lora_alpha
-
-            if max_inflight_rollouts is not None:
-                payload["max_inflight_rollouts"] = max_inflight_rollouts
-
-            if oversampling_factor is not None:
-                payload["oversampling_factor"] = oversampling_factor
-
-            if checkpoints_config:
-                payload["checkpoints"] = checkpoints_config
-
-            if adapters_config:
-                payload["adapters"] = adapters_config
-
-            if checkpoint_id:
-                payload["checkpoint_id"] = checkpoint_id
-
-            if cluster_name:
-                payload["cluster_name"] = cluster_name
-
-            if infrastructure_config:
-                if "compute_size" in infrastructure_config:
-                    payload["compute_size"] = infrastructure_config["compute_size"]
-
-            if tailscale_config:
-                payload["tailscale"] = tailscale_config
-
-            if enable_thinking is not None:
-                payload["enable_thinking"] = enable_thinking
-
-            if reasoning_effort is not None:
-                payload["reasoning_effort"] = reasoning_effort
-
-            if run_config:
-                payload["run_config"] = run_config
-
-            response = self.client.post("/rft/runs", json=payload)
-            return RLRun.model_validate(response.get("run"))
-        except ValidationError:
-            raise  # Let ValidationError pass through for proper CLI handling
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to create Hosted Training run: {e.response.text}")
-            raise APIError(f"Failed to create Hosted Training run: {str(e)}")
-
-    def preview_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Preview or validate an RL run payload without creating a run."""
-
-        try:
-            return self.client.post("/rft/runs/preview", json=payload)
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to preview RL run: {e.response.text}")
-            raise APIError(f"Failed to preview RL run: {str(e)}")
 
     def stop_run(self, run_id: str) -> RLRun:
         """Stop a running Hosted Training run."""
@@ -395,10 +216,19 @@ class RLClient:
                 raise APIError(f"Failed to list checkpoints: {e.response.text}")
             raise APIError(f"Failed to list checkpoints: {str(e)}")
 
-    def get_run(self, run_id: str) -> RLRun:
-        """Get details of a specific Hosted Training run."""
+    def get_run(self, run_id: str, timeout: Optional[int] = None) -> RLRun:
+        """Get details of a specific Hosted Training run.
+
+        `timeout` bounds this specific request (e.g. so a caller polling
+        against a wall-clock deadline can't have a single stalled request
+        blow past it) - the client-wide default applies when omitted.
+        """
         try:
-            response = self.client.get(f"/rft/runs/{run_id}")
+            # Only forward `timeout` when a caller actually set it, so
+            # existing callers/mocks that don't expect the kwarg at all
+            # see the exact same call shape as before.
+            kwargs = {"timeout": timeout} if timeout is not None else {}
+            response = self.client.get(f"/rft/runs/{run_id}", **kwargs)
             return RLRun.model_validate(response.get("run"))
         except APIError:
             # Preserve typed subclasses (NotFoundError, UnauthorizedError, …)
@@ -606,13 +436,3 @@ class RLClient:
                     f"Failed to get Hosted Training run distributions: {e.response.text}"
                 )
             raise APIError(f"Failed to get Hosted Training run distributions: {str(e)}")
-
-    def get_environment_status(self, owner: str, name: str) -> Dict[str, Any]:
-        """Get status for an environment including latest version and action info."""
-        try:
-            response = self.client.get(f"/environmentshub/{owner}/{name}/status")
-            return response.get("data") or {}
-        except Exception as e:
-            if hasattr(e, "response") and hasattr(e.response, "text"):
-                raise APIError(f"Failed to get status for {owner}/{name}: {e.response.text}")
-            raise APIError(f"Failed to get status for {owner}/{name}: {str(e)}")

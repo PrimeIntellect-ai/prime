@@ -392,6 +392,46 @@ class EvalsClient:
         )
         return response
 
+    def create_hosted_evaluation(
+        self,
+        environment_ids: List[str],
+        inference_model: str,
+        eval_config: Dict[str, Any],
+        *,
+        name: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Start a hosted evaluation on the platform.
+
+        environment_ids must be resolved environment IDs; this method performs
+        no environment resolution. Single non-idempotent POST: no retry is
+        attempted on transport/server failure, so an ambiguous failure never
+        creates duplicate evaluations.
+
+        eval_config is passed through verbatim, so inference credentials
+        (api_base_url, api_key_var, custom_secrets, headers) stay caller-owned.
+
+        Returns the raw API response, containing ``evaluation_id`` and/or
+        ``evaluation_ids`` for multi-environment runs.
+        """
+        payload: Dict[str, Any] = {
+            "environment_ids": environment_ids,
+            "inference_model": inference_model,
+            "eval_config": eval_config,
+        }
+        if name is not None:
+            payload["name"] = name
+        if team_id is None:
+            team_id = self.client.config.team_id
+        if team_id:
+            payload["team_id"] = team_id
+
+        return self.client.request("POST", "/hosted-evaluations", json=payload)
+
+    def cancel_hosted_evaluation(self, evaluation_id: str) -> Dict[str, Any]:
+        """Cancel a running hosted evaluation. Returns the raw API response."""
+        return self.client.request("PATCH", f"/hosted-evaluations/{evaluation_id}/cancel")
+
 
 class AsyncEvalsClient:
     """Async client for Prime Evals API"""
@@ -743,6 +783,46 @@ class AsyncEvalsClient:
             "GET", f"/evaluations/{evaluation_id}/samples", params=params
         )
         return response
+
+    async def create_hosted_evaluation(
+        self,
+        environment_ids: List[str],
+        inference_model: str,
+        eval_config: Dict[str, Any],
+        *,
+        name: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Start a hosted evaluation on the platform.
+
+        environment_ids must be resolved environment IDs; this method performs
+        no environment resolution. Single non-idempotent POST: no retry is
+        attempted on transport/server failure, so an ambiguous failure never
+        creates duplicate evaluations.
+
+        eval_config is passed through verbatim, so inference credentials
+        (api_base_url, api_key_var, custom_secrets, headers) stay caller-owned.
+
+        Returns the raw API response, containing ``evaluation_id`` and/or
+        ``evaluation_ids`` for multi-environment runs.
+        """
+        payload: Dict[str, Any] = {
+            "environment_ids": environment_ids,
+            "inference_model": inference_model,
+            "eval_config": eval_config,
+        }
+        if name is not None:
+            payload["name"] = name
+        if team_id is None:
+            team_id = self.client.config.team_id
+        if team_id:
+            payload["team_id"] = team_id
+
+        return await self.client.request("POST", "/hosted-evaluations", json=payload)
+
+    async def cancel_hosted_evaluation(self, evaluation_id: str) -> Dict[str, Any]:
+        """Cancel a running hosted evaluation. Returns the raw API response."""
+        return await self.client.request("PATCH", f"/hosted-evaluations/{evaluation_id}/cancel")
 
     async def aclose(self) -> None:
         """Close the async client"""

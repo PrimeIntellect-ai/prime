@@ -48,6 +48,11 @@ from .config import Config
 #: budget — see ``TracesClient._send_with_retry``.
 IDEMPOTENT_RETRY_ATTEMPTS = 3
 
+#: Gzip level for upload bodies. Level 1 compresses a multi-MB episode about 9x
+#: faster than the default 9 for ~13% more bytes; the upload thread is otherwise
+#: CPU-bound on compression and falls behind a fast producer.
+GZIP_LEVEL = 1
+
 #: Retryable statuses that leave it unknown whether the request reached the
 #: service. 502/504 come from a gateway, which may already have forwarded the
 #: request upstream and then lost or timed out the response.
@@ -379,7 +384,9 @@ class TracesAPIClient(BaseTracesAPIClient):
         self._check_auth()
 
         # mtime=0 keeps the compressed bytes reproducible across retries.
-        compressed = gzip_module.compress(body, mtime=0) if compress else None
+        compressed = None
+        if compress:
+            compressed = gzip_module.compress(body, compresslevel=GZIP_LEVEL, mtime=0)
         files = self._multipart_files(
             body, schema_version=schema_version, context=context, compressed=compressed
         )

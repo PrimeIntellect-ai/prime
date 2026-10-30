@@ -19,7 +19,8 @@ authors = [
 # `tenacity`. Nothing is added to what verifiers and prime-rl already carry.
 dependencies = [
     "httpx>=0.25.0",
-    "prime-traces>=0.0.3",
+    "orjson>=3.10.0",
+    "prime-traces>=0.0.11",
 ]
 keywords = ["evals", "evaluations", "training", "runs", "traces", "observability"]
 classifiers = [

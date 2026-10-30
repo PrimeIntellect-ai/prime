@@ -61,6 +61,7 @@ from .models import (
     LanNetwork,
     LanNetworkMember,
     LanRule,
+    LocalhostForward,
     PersonalImageOwner,
     PlatformImageOwner,
     ReadFileResponse,
@@ -84,7 +85,7 @@ from .models import (
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -117,6 +118,7 @@ __all__ = [
     "LanNetwork",
     "LanNetworkMember",
     "LanRule",
+    "LocalhostForward",
     "AdvancedConfigs",
     "BackgroundJob",
     "BackgroundJobStatus",

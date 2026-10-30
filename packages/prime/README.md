@@ -31,7 +31,6 @@ Prime is the official CLI and Python SDK for [Prime Intellect](https://primeinte
 **What can you do with Prime?**
 
 - Deploy GPU pods with H100, A100, and other high-performance GPUs
-- Set up Lab workspaces for verifiers environments, evals, GEPA, and training
 - Discover and launch Hosted Training runs against verifiers environments
 - Create and manage isolated sandbox environments for running code
 - Access hundreds of pre-configured development environments
@@ -87,9 +86,6 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 # Browse environments on the hub
 prime env list
 
-# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
-prime lab setup
-
 # See available Hosted Training models, capacity, and pricing
 prime train models
 
@@ -111,14 +107,11 @@ prime sandbox create python:3.11
 
 ## Features
 
-### Lab and Hosted Training
+### Hosted Training
 
-Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
+Build and evaluate environments with [verifiers](https://github.com/PrimeIntellect-ai/verifiers) (`uv add verifiers`). Use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
 
 ```bash
-# Set up a Lab workspace
-prime lab setup
-
 # List cached models and on-demand GPU capacity and pricing
 prime train models
 
@@ -254,7 +247,7 @@ not a resumption of a failed transfer.
 
 ### Volume contents
 
-Inspect stored files without starting an SSH session:
+Inspect a volume's files:
 
 ```bash
 prime volumes list                         # List volumes
@@ -275,9 +268,14 @@ whole volume with its cap, even when a file or subtree is selected.
 Directory marker objects count toward the object total; internal SSH sync
 metadata is excluded. These commands report usage without enforcing the cap.
 
-Reads use the stored copy. Read-write SSH changes appear after the next
-sync, normally about 60 seconds later. This freshness note is printed to
-stderr; `cat` writes only the file's bytes to stdout, without adding a newline.
+While a run or read-write session holds the volume, `ls`, `du`, `cat` and
+`get` read it live, as that writer has it right now: the CLI starts (or
+reuses) a read-only SSH view of the writer's volume and runs the read there,
+so a run's checkpoints are visible and downloadable mid-run. This needs your
+SSH key (`prime config set-ssh-key-path`); the view stops after 30 minutes
+idle. Otherwise, and while a finished writer is still syncing back, reads use
+the stored copy. Notes about the source go to stderr; `cat` writes only the
+file's bytes to stdout, without adding a newline.
 
 ### Team Management
 
@@ -412,6 +410,40 @@ prime pods ssh <pod-id>
 ## Related Packages
 
 - **prime-sandboxes** - Lightweight SDK for sandboxes only (if you don't need the full CLI)
+
+## Local dedicated-training validation (experimental)
+
+Validate a dedicated RL or SFT config against the schema of the runtime selected
+by Platform, including its default image:
+
+```bash
+prime train validate rl.toml
+prime train validate rl.toml --ref your-branch
+prime train validate sft.toml --sft --artifact-out normalized.json
+```
+
+The CLI needs `uv` to cache a CPU-only schema environment. An existing matching
+interpreter can be supplied with `--schema-python`. No FFT checkout is required.
+Schema setup precompiles Python bytecode to speed up later validations, and the
+CLI removes cached environments unused for 14 days or beyond the four most recent.
+Platform supplies the pinned image digest and schema commit before local parsing;
+`--image-tag`, `--ref`, and `--pr` override runtime selection when needed.
+With `--ref`, `--pr`, or a top-level `source_ref`, validation installs and runs
+that prime-rl commit's schema package on your machine, including on `prime train`
+before the confirmation prompt.
+
+Validation checks and normalizes the config locally. Platform owns deployment
+adaptation and rendering. Environment plugins and dispatch policy remain deferred.
+Validation creates no run. `--artifact-out` can save the normalized config for
+inspection.
+
+Dedicated submissions (`prime train rl.toml` or `prime train sft.toml --sft`)
+perform local validation automatically before creating a run or volume. Platform
+checks the runtime pins and deployment policy, applies hosted settings, and
+renders the deployment internally. Queued runs keep the same pinned runtime and
+resolved configs. A changed image tag or source branch requires a fresh retry.
+This requires a Platform deployment with JSON-config chart support enabled;
+unsupported deployments return an error before submission.
 
 ## License
 

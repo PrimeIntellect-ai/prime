@@ -1,92 +1,59 @@
-"""Lab workspace commands."""
-
-from pathlib import Path
+"""Removed Lab workspace commands, kept so old invocations explain the removal."""
 
 import typer
 
 from ..utils import PlainTyper, get_console
 
 app = PlainTyper(
-    help="Set up and maintain Lab workspaces",
+    help="Removed: Lab workspaces are no longer set up by the CLI.",
     no_args_is_help=True,
 )
 console = get_console()
 
-
-@app.command(
-    add_help_option=False,
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-    },
+_LAB_REMOVED_NOTE = (
+    "[yellow]`prime lab` was removed.[/yellow] It downloaded workspace files that "
+    "verifiers no longer publishes. Add verifiers to your own project with "
+    "`uv add verifiers`, and start Hosted Training runs from the prime-rl examples: "
+    "https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples"
 )
-def setup(ctx: typer.Context) -> None:
-    """Set up a Lab workspace."""
-    from ..lab_setup import run_lab_setup
-
-    code = run_lab_setup(list(ctx.args), console=console)
-    if code != 0:
-        raise typer.Exit(code)
-
-
-@app.command(
-    add_help_option=False,
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-    },
+_HYGIENE_WORKFLOW_NOTE = (
+    "Remove .github/workflows/prime-lab-hygiene.yml from your repository; "
+    "this check no longer does anything."
 )
-def sync(ctx: typer.Context) -> None:
-    """Refresh Lab skills and local agent guidance."""
-    from ..lab_setup import run_lab_sync
-
-    code = run_lab_sync(list(ctx.args), console=console)
-    if code != 0:
-        raise typer.Exit(code)
+_IGNORE_LEGACY_FLAGS = {"allow_extra_args": True, "ignore_unknown_options": True}
 
 
-@app.command(
-    add_help_option=False,
-    context_settings={
-        "allow_extra_args": True,
-        "ignore_unknown_options": True,
-    },
-)
-def doctor(ctx: typer.Context) -> None:
-    """Check a Lab workspace."""
-    from ..lab_setup import run_lab_doctor
-
-    code = run_lab_doctor(list(ctx.args), console=console)
-    if code != 0:
-        raise typer.Exit(code)
+def _lab_removed() -> None:
+    console.print(_LAB_REMOVED_NOTE)
+    raise typer.Exit(1)
 
 
-@app.command("hygiene")
-def hygiene(
-    fix: bool = typer.Option(
-        False,
-        "--fix",
-        help="Apply safe local remediations such as dirs and gitignore entries.",
-    ),
-) -> None:
-    """Check cheap Lab git hygiene."""
-
-    from ..lab_hygiene import LabHygieneOptions, run_lab_hygiene_preflight
-
-    result = run_lab_hygiene_preflight(
-        LabHygieneOptions(fix=fix, fail_on_tracked=True),
-        workspace=Path.cwd(),
-        emit=lambda message: console.print(message, markup=False),
-    )
-    if result.exit_code != 0:
-        raise typer.Exit(result.exit_code)
+@app.command(add_help_option=False, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
+def setup() -> None:
+    """Removed: Lab workspaces are no longer set up by the CLI."""
+    _lab_removed()
 
 
-@app.command("register-github")
+@app.command(add_help_option=False, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
+def sync() -> None:
+    """Removed: Lab workspaces are no longer set up by the CLI."""
+    _lab_removed()
+
+
+@app.command(add_help_option=False, deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
+def doctor() -> None:
+    """Removed: Lab workspaces are no longer set up by the CLI."""
+    _lab_removed()
+
+
+@app.command(deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
+def hygiene() -> None:
+    """Removed: exits 0 so existing prime-lab-hygiene workflows keep passing."""
+    console.print(_LAB_REMOVED_NOTE)
+    console.print(_HYGIENE_WORKFLOW_NOTE)
+
+
+@app.command("register-github", deprecated=True, context_settings=_IGNORE_LEGACY_FLAGS)
 def register_github() -> None:
-    """Write the GitHub workflow for Lab git hygiene."""
-
-    from ..lab_hygiene import write_lab_github_workflow
-
-    path = write_lab_github_workflow(Path.cwd())
-    console.print(f"Wrote {path}", markup=False)
+    """Removed: Lab workspaces are no longer set up by the CLI."""
+    _lab_removed()

@@ -254,15 +254,30 @@ def _build_messages(message: str, system: Optional[str]) -> List[Dict[str, str]]
 
 
 def _print_stream(chunks: Iterable[Dict[str, Any]]) -> None:
+    in_reasoning = False
     for chunk in chunks:
         choices = chunk.get("choices") or []
         if not choices:
             continue
         delta = choices[0].get("delta") or {}
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            if not in_reasoning:
+                sys.stderr.write("<think>\n")
+                in_reasoning = True
+            sys.stderr.write(reasoning)
+            sys.stderr.flush()
         piece = delta.get("content")
         if piece:
+            if in_reasoning:
+                sys.stderr.write("\n</think>\n\n")
+                sys.stderr.flush()
+                in_reasoning = False
             sys.stdout.write(piece)
             sys.stdout.flush()
+    if in_reasoning:
+        sys.stderr.write("\n</think>\n")
+        sys.stderr.flush()
     sys.stdout.write("\n")
     sys.stdout.flush()
 
@@ -274,12 +289,19 @@ def chat(
         None, help="User message. If omitted, reads from stdin."
     ),
     system: Optional[str] = typer.Option(None, "--system", "-s", help="System prompt"),
-    stream: bool = typer.Option(False, "--stream", help="Stream tokens as they arrive"),
+    stream: bool = typer.Option(
+        False, "--stream", help="Stream answer tokens to stdout and reasoning to stderr"
+    ),
     temperature: Optional[float] = typer.Option(
         None, "--temperature", "-t", help="Sampling temperature"
     ),
     max_tokens: Optional[int] = typer.Option(
         None, "--max-tokens", help="Maximum tokens to generate"
+    ),
+    reasoning_effort: Optional[str] = typer.Option(
+        None,
+        "--reasoning-effort",
+        help="Reasoning effort (e.g. low, medium, high). Supported values depend on the model.",
     ),
     output: str = typer.Option("text", "--output", "-o", help="text|json"),
 ) -> None:
@@ -289,6 +311,7 @@ def chat(
       prime inference chat <model-id> "say hi"
       echo "explain RL in one line" | prime inference chat <model-id>
       prime inference chat <model-id> "hi" --stream
+      prime inference chat <model-id> "solve this" --reasoning-effort high
     """
     if output not in ("text", "json"):
         console.print(f"[red]Error:[/red] invalid output format '{output}'. Supported: text, json")
@@ -315,6 +338,8 @@ def chat(
         payload["temperature"] = temperature
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
     if stream:
         payload["stream"] = True
 

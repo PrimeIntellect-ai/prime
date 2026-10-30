@@ -18,7 +18,6 @@ episode-grouped uploads); and the dot-path query compiler (needs the server-side
 field registry).
 """
 
-import json
 import tempfile
 import time
 from pathlib import Path
@@ -36,6 +35,8 @@ from typing import (
     Union,
 )
 from urllib.parse import quote
+
+import orjson
 
 from .batching import (
     DEFAULT_TARGET_BATCH_BYTES,
@@ -77,6 +78,8 @@ class SupportsToRecord(Protocol):
 
 TraceRecord = Union[Mapping[str, Any], SupportsToRecord]
 
+RECORD_OPTIONS = orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS | orjson.OPT_APPEND_NEWLINE
+
 
 def _encode_record(record: TraceRecord, record_number: int) -> bytes:
     """Serialize one in-memory record as a compact UTF-8 JSONL line.
@@ -95,18 +98,9 @@ def _encode_record(record: TraceRecord, record_number: int) -> bytes:
         if not isinstance(value, Mapping):
             raise TypeError(f"Record {record_number} to_record() must return a mapping")
 
-    # Compact separators match common JSONL writers, ensure_ascii=False
-    # keeps the wire representation UTF-8, and allow_nan=False prevents
-    # emitting JavaScript-only NaN/Infinity values that strict JSON rejects.
-    return (
-        json.dumps(
-            dict(value),
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        + b"\n"
-    )
+    # orjson writes compact UTF-8 and encodes NaN/Infinity as null, which
+    # strict JSON parsers accept. Numpy arrays let callers skip a list copy.
+    return orjson.dumps(dict(value), option=RECORD_OPTIONS)
 
 
 def _record_lines(records: Iterable[TraceRecord]) -> Iterator[bytes]:

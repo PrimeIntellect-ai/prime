@@ -7,7 +7,7 @@ token; admin role is gated server-side.
 """
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +26,28 @@ _GITHUB_API = "https://api.github.com"
 # Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
 # Only the read wait grows: an unreachable host still fails in 10s.
 CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
+
+class PreparedTrainingRuntime(BaseModel):
+    repository: Literal["ghcr.io/primeintellect-ai/prime-rl"]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    image_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_commit: Optional[str] = Field(None, pattern=r"^[0-9a-f]{40}$")
+    schema_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class SchemaInstallInputs(BaseModel):
+    python: Literal["3.12"]
+    requirements: List[str]
+    constraints: List[str]
+
+
+class LocalValidationPreparation(BaseModel):
+    contract_version: Literal[1]
+    mode: Literal["rl", "sft"]
+    runtime: PreparedTrainingRuntime
+    schema_install: SchemaInstallInputs
+    submission_supported: bool
 
 
 class HostedTrainingRunResponse(BaseModel):
@@ -177,6 +199,9 @@ class VolumeSession(BaseModel):
     phase: Optional[str] = None
     # The latest rclone stats line while the session copies data in (staging).
     progress: Optional[str] = None
+    # A live view (platform ENG-7113): the run or read-write session whose
+    # volume this read-only session mounts as it is now. Absent otherwise.
+    live_view_of: Optional[str] = Field(None, alias="liveViewOf")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -198,6 +223,8 @@ class VolumeTransferRoute(BaseModel):
     # A put's upload lease (platform#6358): sent back on refresh, released
     # when the put ends. Absent on gets and from older backends.
     lease_id: Optional[str] = Field(None, alias="leaseId")
+    # A live get that still reads R2: why (e.g. the run is syncing back).
+    note: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -244,6 +271,13 @@ class HostedTrainingClient:
 
     def __init__(self, client: APIClient) -> None:
         self.client = client
+
+    def prepare_local_validation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        response = self.client.post("/training/runs/prepare", json=payload)
+        try:
+            return LocalValidationPreparation.model_validate(response).model_dump()
+        except PydanticValidationError as exc:
+            raise APIError(f"Failed to parse local validation preparation: {exc}") from exc
 
     def create_run(self, payload: Dict[str, Any]) -> HostedTrainingRunResponse:
         """POST /v1/training/runs. Backend mints a per-run API token and
@@ -362,13 +396,18 @@ class HostedTrainingClient:
         *,
         team_id: Optional[str] = None,
         lease_id: Optional[str] = None,
+        live: bool = False,
     ) -> VolumeTransferRoute:
         """POST …/volumes/{name}/transfer with mode "get" or "put" and the
         volume-relative path ("" = root): the get source or the put
         destination. A root put also sends `entries`, the top-level names it
         writes; a put's credential refresh sends its `lease_id` to extend
-        that lease. Raises NotFoundError on backends without the route."""
+        that lease. A `live` get reads a volume a run or read-write session
+        holds through a read-only live view of it (older backends ignore
+        it). Raises NotFoundError on backends without the route."""
         payload: Dict[str, Any] = {"mode": mode, "path": path}
+        if live:
+            payload["live"] = True
         if entries is not None:
             payload["entries"] = entries
         if lease_id:

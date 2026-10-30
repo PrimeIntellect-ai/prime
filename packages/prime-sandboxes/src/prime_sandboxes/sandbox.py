@@ -84,6 +84,7 @@ from .models import (
     LanNetwork,
     LanNetworkMember,
     LanRule,
+    LocalhostForward,
     ReadFileResponse,
     Sandbox,
     SandboxCheckpoint,
@@ -1951,6 +1952,20 @@ def _raise_sandbox_gone(
     _raise_not_running_error(sandbox_id, ctx, command=command, cause=cause)
 
 
+def _parse_local_forwards(body: Dict[str, Any]) -> List[LocalhostForward]:
+    return [LocalhostForward.model_validate(f) for f in body.get("forwards") or []]
+
+
+def _raise_local_forwards_error(sandbox_id: str, error: httpx.HTTPStatusError) -> NoReturn:
+    status = error.response.status_code
+    if status == 404:
+        raise APIError(
+            f"Sandbox {sandbox_id} does not support localhost forwards; "
+            "recreate the sandbox to use them"
+        ) from error
+    raise APIError(f"Localhost forwards failed (HTTP {status}): {error.response.text}") from error
+
+
 def _raise_not_running_error(
     sandbox_id: str,
     ctx: dict,
@@ -1990,6 +2005,14 @@ def _auth_refresh_cutoff(auth_info: Dict[str, Any]) -> datetime:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     return expires_at - timedelta(seconds=AUTH_REFRESH_MARGIN_SECONDS)
+
+
+def _write_auth_cache(cache_file: Any, data: str) -> None:
+    cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with os.fdopen(os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        with contextlib.suppress(OSError):
+            cache_file.chmod(0o600)
+        f.write(data)
 
 
 def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
@@ -2038,9 +2061,7 @@ class SandboxAuthCache:
     def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                json.dump(self._auth_cache, f)
+            _write_auth_cache(self._cache_file, json.dumps(self._auth_cache))
         except Exception:
             pass
 
@@ -2125,14 +2146,8 @@ class AsyncSandboxAuthCache:
     async def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         data = json.dumps(self._auth_cache)
-
-        def _write() -> None:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                f.write(data)
-
         try:
-            await asyncio.to_thread(_write)
+            await asyncio.to_thread(_write_auth_cache, self._cache_file, data)
         except Exception:
             pass
 
@@ -2412,6 +2427,9 @@ class SandboxClient:
             idempotent_post=True,
         )
         sandbox = Sandbox.model_validate(response)
+        # Seed the auth cache so the first gateway call skips POST /auth.
+        if auth := response.get("gatewayAuth"):
+            self._auth_cache.set(sandbox.id, auth)
         if request.lan_network_id is not None:
             self._pending_lan_joins[sandbox.id] = (request.lan_network_id, request.lan_tags)
         return sandbox
@@ -2780,6 +2798,54 @@ class SandboxClient:
             json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
+
+    def get_localhost_forwards(self, sandbox_id: str) -> List[LocalhostForward]:
+        """Get the localhost forwards of a running VM sandbox."""
+        return self._local_forwards_request(sandbox_id, None)
+
+    def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> List[LocalhostForward]:
+        """Replace the localhost forwards of a running VM sandbox; returns the new set.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox. The peer must share a LAN network whose rules allow the port.
+        Each call is a complete replacement, never a merge; an empty list removes
+        all forwards. Applied before this returns.
+        """
+        payload = {"forwards": [f.model_dump(by_alias=True) for f in forwards]}
+        return self._local_forwards_request(sandbox_id, payload)
+
+    def _local_forwards_request(
+        self, sandbox_id: str, payload: Optional[Dict[str, Any]]
+    ) -> List[LocalhostForward]:
+        """GET (payload None) or POST sandboxd's local-forwards through the gateway."""
+        reauthed = False
+        while True:
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/network/local-forwards"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            try:
+                if payload is None:
+                    response = self._gateway_get(url, headers=headers, params={}, timeout=30)
+                else:
+                    response = self._gateway_post(url, headers=headers, timeout=30, json=payload)
+                response.raise_for_status()
+                return _parse_local_forwards(response.json())
+            except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
+                    reauthed = True
+                    continue
+                _raise_local_forwards_error(sandbox_id, e)
+            except httpx.RequestError as e:
+                raise APIError(
+                    f"Localhost forwards request failed: {_format_exception_diagnostic(e)}"
+                ) from e
 
     def bulk_delete(
         self,
@@ -4062,6 +4128,9 @@ class AsyncSandboxClient:
             idempotent_post=True,
         )
         sandbox = Sandbox.model_validate(response)
+        # Seed the auth cache so the first gateway call skips POST /auth.
+        if auth := response.get("gatewayAuth"):
+            await self._auth_cache.set(sandbox.id, auth)
         if request.lan_network_id is not None:
             self._pending_lan_joins[sandbox.id] = (request.lan_network_id, request.lan_tags)
         return sandbox
@@ -4445,6 +4514,58 @@ class AsyncSandboxClient:
             json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
+
+    async def get_localhost_forwards(self, sandbox_id: str) -> List[LocalhostForward]:
+        """Get the localhost forwards of a running VM sandbox."""
+        return await self._local_forwards_request(sandbox_id, None)
+
+    async def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> List[LocalhostForward]:
+        """Replace the localhost forwards of a running VM sandbox; returns the new set.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox. The peer must share a LAN network whose rules allow the port.
+        Each call is a complete replacement, never a merge; an empty list removes
+        all forwards. Applied before this returns.
+        """
+        payload = {"forwards": [f.model_dump(by_alias=True) for f in forwards]}
+        return await self._local_forwards_request(sandbox_id, payload)
+
+    async def _local_forwards_request(
+        self, sandbox_id: str, payload: Optional[Dict[str, Any]]
+    ) -> List[LocalhostForward]:
+        """GET (payload None) or POST sandboxd's local-forwards through the gateway."""
+        reauthed = False
+        while True:
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/network/local-forwards"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            try:
+                if payload is None:
+                    response = await self._gateway_get(url, headers=headers, params={}, timeout=30)
+                else:
+                    response = await self._gateway_post(
+                        url, headers=headers, timeout=30, json=payload
+                    )
+                response.raise_for_status()
+                return _parse_local_forwards(response.json())
+            except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
+                if e.response.status_code == 401 and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
+                _raise_local_forwards_error(sandbox_id, e)
+            except httpx.RequestError as e:
+                raise APIError(
+                    f"Localhost forwards request failed: {_format_exception_diagnostic(e)}"
+                ) from e
 
     async def bulk_delete(
         self,

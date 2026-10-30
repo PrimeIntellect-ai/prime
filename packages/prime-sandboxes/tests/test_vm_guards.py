@@ -26,11 +26,23 @@ def _auth_payload():
 
 
 class _FakeCache:
+    def __init__(self):
+        self.seeded: dict = {}
+
+    def set(self, sandbox_id: str, auth_info: dict):
+        self.seeded[sandbox_id] = auth_info
+
     def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
 
 
 class _AsyncFakeCache:
+    def __init__(self):
+        self.seeded: dict = {}
+
+    async def set(self, sandbox_id: str, auth_info: dict):
+        self.seeded[sandbox_id] = auth_info
+
     async def get_or_refresh(self, _sandbox_id: str):
         return _auth_payload()
 
@@ -84,6 +96,21 @@ def test_sync_create_injects_vm_true_on_the_wire():
     payload = client.client.request.call_args.kwargs["json"]
     assert payload["vm"] is True
     assert isinstance(sandbox, Sandbox)
+    assert cast(Any, client)._auth_cache.seeded == {}
+
+
+def test_sync_create_seeds_auth_cache_from_inline_gateway_auth():
+    client = _make_sync_client()
+    client.client = MagicMock()
+    client.client.config.team_id = None
+    client.client.request.return_value = {
+        **_sandbox_response(),
+        "gatewayAuth": _auth_payload(),
+    }
+
+    client.create(CreateSandboxRequest(name="t", docker_image="img"))
+
+    assert cast(Any, client)._auth_cache.seeded == {"sbx-1": _auth_payload()}
 
 
 @pytest.mark.asyncio
@@ -98,6 +125,21 @@ async def test_async_create_injects_vm_true_on_the_wire():
     payload = client.client.request.call_args.kwargs["json"]
     assert payload["vm"] is True
     assert isinstance(sandbox, Sandbox)
+    assert cast(Any, client)._auth_cache.seeded == {}
+
+
+@pytest.mark.asyncio
+async def test_async_create_seeds_auth_cache_from_inline_gateway_auth():
+    client = _make_async_client()
+    client.client = MagicMock()
+    client.client.config.team_id = None
+    client.client.request = AsyncMock(
+        return_value={**_sandbox_response(), "gatewayAuth": _auth_payload()}
+    )
+
+    await client.create(CreateSandboxRequest(name="t", docker_image="img"))
+
+    assert cast(Any, client)._auth_cache.seeded == {"sbx-1": _auth_payload()}
 
 
 def _ssh_response() -> dict:

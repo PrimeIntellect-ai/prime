@@ -8,6 +8,8 @@ from prime_cli.core import APIError
 from prime_cli.main import app
 from typer.testing import CliRunner
 
+pytestmark = pytest.mark.usefixtures("stub_local_schema_validation")
+
 runner = CliRunner()
 
 TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
@@ -166,6 +168,39 @@ def _fake_run_payload(status: str, run_id: str = "run-1") -> dict[str, Any]:
         "createdAt": "2026-08-25T00:00:00Z",
         "updatedAt": "2026-08-25T00:00:00Z",
     }
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("│┃").split("│" if "│" in line else "┃")]
+
+
+def test_train_list_shows_gpu_count(monkeypatch) -> None:
+    runs = [
+        {**_fake_run_payload("RUNNING", run_id="run-gpu"), "gpuCount": 16},
+        _fake_run_payload("COMPLETED", run_id="run-legacy"),
+    ]
+
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        return {"runs": runs, "total": len(runs)}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+
+    result = runner.invoke(
+        app,
+        ["train", "list"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    header = next(cells for line in lines if (cells := _table_cells(line))[:1] == ["ID"])
+    gpus = {
+        cells[0]: cells[header.index("GPUs")]
+        for line in lines
+        if (cells := _table_cells(line))[:1] and cells[0].startswith("run-")
+    }
+    assert gpus == {"run-gpu": "16", "run-legacy": "-"}
 
 
 def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:
@@ -515,6 +550,7 @@ def test_train_resume_from_a_pausing_run_shows_the_detail(monkeypatch, tmp_path:
 
     assert result.exit_code == 1, result.output
     assert result.output.splitlines() == [
+        "✓ Run config validation succeeded",
         f"Error: {detail}",
         "Tip: a run resumes once `prime train get paused-1` shows PAUSED",
     ]

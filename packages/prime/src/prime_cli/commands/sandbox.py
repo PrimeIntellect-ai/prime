@@ -19,6 +19,7 @@ from prime_sandboxes import (
     EgressPolicyStatus,
     LanNetwork,
     LanRule,
+    LocalhostForward,
     PaymentRequiredError,
     Sandbox,
     SandboxCheckpoint,
@@ -670,6 +671,59 @@ def lan_rules(
         _lan_error(exc)
 
 
+def _parse_localhost_forward(raw: str) -> LocalhostForward:
+    """Parse ``PORT:PEER_SANDBOX_ID``, e.g. ``5432:sbx-db``."""
+    port, sep, peer = raw.partition(":")
+    if not sep or not port.strip().isdigit() or not peer.strip():
+        raise ValueError(f"invalid forward {raw!r}: expected PORT:PEER_SANDBOX_ID")
+    if not 1 <= int(port) <= 65535:
+        raise ValueError(f"invalid forward {raw!r}: port must be 1-65535")
+    return LocalhostForward(port=int(port), sandbox_id=peer.strip())
+
+
+def _print_localhost_forwards(forwards: List[LocalhostForward], output: str) -> None:
+    if output == "json":
+        output_data_as_json({"forwards": [f.model_dump() for f in forwards]}, console)
+        return
+    if not forwards:
+        console.print("No localhost forwards.")
+    for f in forwards:
+        console.print(f"localhost:{f.port} -> {escape(f.sandbox_id)}.sandbox.internal:{f.port}")
+
+
+@network_app.command("localhost", no_args_is_help=True)
+def localhost_forwards(
+    sandbox_id: str,
+    forward: Optional[List[str]] = typer.Argument(
+        None,
+        help="PORT:PEER_SANDBOX_ID, e.g. 5432:sbx-db makes localhost:5432 reach "
+        "sbx-db's port 5432. Replaces all forwards.",
+        show_default=False,
+    ),
+    clear: bool = typer.Option(False, "--clear", help="Remove all localhost forwards"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Show or replace the localhost forwards of a VM sandbox. Each forward makes the
+    sandbox's own 127.0.0.1:PORT and [::1]:PORT reach PEER.sandbox.internal:PORT. The
+    peer must share a LAN network whose rules allow PORT, or connections are reset."""
+    validate_output_format(output, console)
+    try:
+        if clear and forward:
+            raise ValueError("provide forwards or --clear, not both")
+        client = SandboxClient(APIClient())
+        if clear or forward:
+            forwards = [_parse_localhost_forward(f) for f in forward or []]
+            ports = [f.port for f in forwards]
+            if len(ports) != len(set(ports)):
+                raise ValueError("each port can be forwarded only once")
+            current = client.set_localhost_forwards(sandbox_id, forwards)
+        else:
+            current = client.get_localhost_forwards(sandbox_id)
+        _print_localhost_forwards(current, output)
+    except (ValueError, APIError) as exc:
+        _lan_error(exc)
+
+
 checkpoint_app = PlainTyper(help="Manage filesystem checkpoints", no_args_is_help=True)
 app.add_typer(checkpoint_app, name="checkpoint")
 app.add_typer(sandbox_volumes_app, name="volumes")
@@ -969,15 +1023,17 @@ def create(
         "--network-allow",
         help=(
             "Repeatable. Allow egress only to these domains/IPv4 CIDRs "
-            "(hostname-aware). Mutually exclusive with --network-deny."
+            "(hostname-aware), optionally with :port or :low-high (domains: 80 or 443). "
+            "Mutually exclusive with --network-deny."
         ),
     ),
     network_deny: Optional[List[str]] = typer.Option(
         None,
         "--network-deny",
         help=(
-            "Repeatable. Deny egress to these domains/IPv4 CIDRs and "
-            "allow everything else. Mutually exclusive with --network-allow."
+            "Repeatable. Deny egress to these domains/IPv4 CIDRs, optionally with "
+            ":port or :low-high (domains: 80 or 443), and allow everything else. "
+            "Mutually exclusive with --network-allow."
         ),
     ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
@@ -1535,7 +1591,8 @@ def network(
         "--allow",
         help=(
             "Replace the allowed destinations with a comma-separated list of "
-            "domains/IPv4 CIDRs. Use '*' to allow all."
+            "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
+            "Use '*' to allow all."
         ),
     ),
     deny: Optional[str] = typer.Option(
@@ -1543,7 +1600,8 @@ def network(
         "--deny",
         help=(
             "Replace the denied destinations with a comma-separated list of "
-            "domains/IPv4 CIDRs. Use '*' to deny all."
+            "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
+            "Use '*' to deny all."
         ),
     ),
 ) -> None:

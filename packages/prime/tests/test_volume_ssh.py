@@ -1363,7 +1363,7 @@ def _direct(monkeypatch, s3):
 
     routes, scopes = [], {}
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None):
+    def route(name, mode, path, entries=None, team_id=None, lease_id=None, live=False):
         routes.append((mode, path))
         lease = {}
         if mode == "put":
@@ -1509,7 +1509,7 @@ def test_get_of_runs_with_a_live_session_goes_direct(monkeypatch, tmp_path):
     s3 = FakeS3({"vol1/runs/r1/m": b"m"})
     asked = []
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None):
+    def route(name, mode, path, entries=None, team_id=None, lease_id=None, live=False):
         asked.append((mode, path))
         live = {
             "via": "session",

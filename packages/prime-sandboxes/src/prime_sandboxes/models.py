@@ -21,18 +21,24 @@ class SandboxStatus(str, Enum):
     TIMEOUT = "TIMEOUT"
 
 
-MAX_EGRESS_POLICY_ENTRIES = 256
+MAX_EGRESS_POLICY_ENTRIES = 1024
+
+# Domain entries are matched by HTTP Host or TLS SNI, read only on these ports.
+DOMAIN_RULE_PORTS = (80, 443)
 
 
 def _validate_egress_entry(entry: str) -> None:
     """Client-side mirror of the API's egress entry contract.
 
     Accepts an exact hostname, a leftmost-label ``*.`` wildcard, an IPv4
-    address, or an IPv4 CIDR. Schemes, credentials, ports, paths, query
-    strings, bare ``*``, IPv6, and wildcards in other positions are rejected.
-    The server canonicalizes entries further (lowercase, IDNA, /32).
+    address, or an IPv4 CIDR, optionally followed by ``:port`` or
+    ``:low-high``; domains accept only ports 80 and 443. Schemes, credentials,
+    paths, query strings, bare ``*``, IPv6, and wildcards in other positions
+    are rejected. The server canonicalizes entries further (lowercase, IDNA,
+    /32) and rejects ports until the platform enables them.
     """
     import ipaddress
+    import re
 
     value = entry.strip()
     if not value:
@@ -47,6 +53,22 @@ def _validate_egress_entry(entry: str) -> None:
             raise ValueError(f"'{entry}': IPv6 is not supported")
         return
 
+    host, separator, ports = value.rpartition(":")
+    if separator and "://" not in value and not _is_ip_network(value):
+        match = re.fullmatch(r"([0-9]{1,5})(?:-([0-9]{1,5}))?", ports)
+        low, high = (int(match[1]), int(match[2] or match[1])) if match else (0, 0)
+        if not 1 <= low <= high <= 65535:
+            raise ValueError(
+                f"'{entry}': port must be a number from 1 to 65535 or a low-high range"
+            )
+        _validate_egress_entry(host)
+        if not _is_ip_network(host) and (low != high or low not in DOMAIN_RULE_PORTS):
+            raise ValueError(
+                f"'{entry}': domain entries support only ports 80 and 443; "
+                "use an IP or CIDR entry for other ports"
+            )
+        return
+
     if "/" in value:
         try:
             network = ipaddress.ip_network(value, strict=False)
@@ -59,7 +81,6 @@ def _validate_egress_entry(entry: str) -> None:
     for forbidden, reason in (
         ("://", "schemes are not supported"),
         ("@", "credentials are not supported"),
-        (":", "ports are not supported"),
         ("?", "query strings are not supported"),
     ):
         if forbidden in value:
@@ -74,6 +95,16 @@ def _validate_egress_entry(entry: str) -> None:
     for label in domain.split("."):
         if not label:
             raise ValueError(f"'{entry}' contains an empty label")
+
+
+def _is_ip_network(value: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return False
+    return True
 
 
 def validate_egress_lists(allowlist: Optional[List[str]], denylist: Optional[List[str]]) -> None:
@@ -111,6 +142,17 @@ class EgressPolicyStatus(BaseModel):
     generation: int
     applied_generation: int
     applied: bool
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class LocalhostForward(BaseModel):
+    """Forward the sandbox's own loopback ``port`` (127.0.0.1 and [::1]) to the same
+    port on peer ``sandbox_id`` (``<sandbox_id>.sandbox.internal``). The peer must
+    share a LAN network whose rules allow ``port``, or connections are reset."""
+
+    port: int = Field(ge=1, le=65535)
+    sandbox_id: str = Field(alias="peer_sandbox_id")
 
     model_config = ConfigDict(populate_by_name=True)
 

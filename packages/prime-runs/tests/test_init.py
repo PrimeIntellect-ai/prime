@@ -315,13 +315,15 @@ def test_a_forked_child_does_not_duplicate_the_parents_records_or_close_its_run(
     assert handler.paths().count("POST /api/v1/evaluations/eval-abc/finalize") == 1
 
 
-def test_records_reject_nonfinite_json_instead_of_sending_an_opaque_400(online):
-    run, _ = online(on_error="raise")
-    run.log_traces([{"sample_id": "bad", "reward": float("nan")}])
-
-    with pytest.raises(ValueError, match="Out of range float values"):
-        run.flush()
+def test_records_send_nonfinite_floats_as_null_instead_of_an_opaque_400(online):
+    run, handler = online(on_error="raise")
+    run.log_traces([{"sample_id": "nan", "reward": float("nan")}])
+    run.flush()
     run.finish()
+
+    posted = handler.bodies_for("/api/v1/evaluations/eval-abc/samples")
+    (sample,) = [s for body in posted for s in body["samples"]]
+    assert sample["sample_id"] == "nan" and sample["reward"] is None
 
 
 # ----------------------------------------------------------------- training

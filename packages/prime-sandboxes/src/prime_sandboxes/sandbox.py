@@ -2007,6 +2007,14 @@ def _auth_refresh_cutoff(auth_info: Dict[str, Any]) -> datetime:
     return expires_at - timedelta(seconds=AUTH_REFRESH_MARGIN_SECONDS)
 
 
+def _write_auth_cache(cache_file: Any, data: str) -> None:
+    cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with os.fdopen(os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        with contextlib.suppress(OSError):
+            cache_file.chmod(0o600)
+        f.write(data)
+
+
 def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
     """Load auth cache from file and clean expired entries."""
     try:
@@ -2053,9 +2061,7 @@ class SandboxAuthCache:
     def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                json.dump(self._auth_cache, f)
+            _write_auth_cache(self._cache_file, json.dumps(self._auth_cache))
         except Exception:
             pass
 
@@ -2140,14 +2146,8 @@ class AsyncSandboxAuthCache:
     async def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         data = json.dumps(self._auth_cache)
-
-        def _write() -> None:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                f.write(data)
-
         try:
-            await asyncio.to_thread(_write)
+            await asyncio.to_thread(_write_auth_cache, self._cache_file, data)
         except Exception:
             pass
 

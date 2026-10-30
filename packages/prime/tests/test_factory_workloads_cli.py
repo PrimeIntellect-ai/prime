@@ -144,8 +144,13 @@ class _DummyAPIClient:
         self.calls.append({"endpoint": endpoint, "params": params})
         return self._payloads[endpoint]
 
-    def workloads_params(self) -> Optional[Dict[str, Any]]:
-        return next(c["params"] for c in self.calls if c["endpoint"] == "/factory/workloads")
+    def workloads_params(self, *, state: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        return next(
+            c["params"]
+            for c in self.calls
+            if c["endpoint"] == "/factory/workloads"
+            and (state is None or c["params"].get("state") == state)
+        )
 
 
 def _install(
@@ -1499,12 +1504,14 @@ def test_workloads_cluster_with_terminal_state_uses_widest_page(
     )
 
     assert result.exit_code == 0, result.output
-    assert dummy.workloads_params()["limit"] == 200
+    # The table concurrently fetches running Slurm jobs for usage counts.
+    # Select the history request explicitly; thread order is not guaranteed.
+    assert dummy.workloads_params(state="completed")["limit"] == 200
     # without --cluster, the terminal default stays 50
     dummy = _install(monkeypatch, _workloads_payload([row]))
     plain = runner.invoke(app, ["factory", "workloads", "--state", "completed"], env=TEST_ENV)
     assert plain.exit_code == 0, plain.output
-    assert dummy.workloads_params()["limit"] == 50
+    assert dummy.workloads_params(state="completed")["limit"] == 50
 
 
 def test_workloads_cluster_terminal_empty_says_bounded_window(

@@ -230,11 +230,7 @@ class VolumeTransferRoute(BaseModel):
 
 
 class VolumeTransferProgress(BaseModel):
-    """The latest rclone stats line of a running volume transfer.
-
-    Values are rclone's own human strings ("412.345 GiB", "182.400 MiB/s",
-    "1h48m0s"); only present once the transfer is running.
-    """
+    """Progress of an S3 copy, with optional human-readable sizes and times."""
 
     transferred: Optional[str] = None
     total: Optional[str] = None
@@ -253,10 +249,10 @@ class VolumeTransfer(BaseModel):
 
     id: str
     volume_name: str = Field(..., alias="volumeName")
-    direction: str
+    direction: Literal["import", "export"]
     path: str
     url: str
-    status: str
+    status: Literal["pending", "running", "succeeded", "failed", "cancelled"]
     progress: Optional[VolumeTransferProgress] = None
     created_at: Optional[str] = Field(None, alias="createdAt")
     started_at: Optional[str] = Field(None, alias="startedAt")
@@ -432,7 +428,7 @@ class HostedTrainingClient:
         self,
         name: str,
         *,
-        direction: str,
+        direction: Literal["import", "export"],
         path: str,
         url: str,
         credentials: Dict[str, Any],
@@ -440,12 +436,11 @@ class HostedTrainingClient:
         endpoint_url: Optional[str] = None,
         team_id: Optional[str] = None,
     ) -> VolumeTransfer:
-        """POST …/volumes/{name}/transfers. Queues an rclone job on the
-        volume's cluster and returns at once with a transfer id.
+        """Queue a platform copy between AWS S3 and durable volume storage.
 
-        `credentials` is the `{accessKeyId, secretAccessKey, sessionToken}`
-        mapping built from the caller's AWS environment; it travels in this
-        request body only and is never persisted or returned.
+        Credentials travel in the request body, are encrypted while the
+        transfer is active, and are removed when it finishes. Responses
+        never include credentials. No volume session or GPU is needed.
         """
         payload: Dict[str, Any] = {
             "direction": direction,
@@ -484,8 +479,10 @@ class HostedTrainingClient:
     def cancel_volume_transfer(
         self, name: str, transfer_id: str, *, team_id: Optional[str] = None
     ) -> None:
-        """DELETE …/volumes/{name}/transfers/{id}. Tears down the job and its
-        Secret; the row stays as `cancelled`. Idempotent."""
+        """Request cancellation (204); poll status to confirm completion.
+
+        Already copied objects remain. Repeated cancellation is safe.
+        """
         params = {"teamId": team_id} if team_id else None
         self.client.delete(f"/training/volumes/{name}/transfers/{transfer_id}", params=params)
 

@@ -11,6 +11,15 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from .core import APIError, AsyncAPIClient
 from .exceptions import EvalsAPIError, InvalidEvaluationError
 
+try:
+    from prime_cli.core import APIError as PrimeCLIAPIError
+except ImportError:
+    _API_ERRORS = (APIError,)
+else:
+    # The CLI supplies its own APIClient to EvalsClient, so its APIError must be
+    # treated as an eval API error too. Keep the import optional for standalone use.
+    _API_ERRORS = (APIError, PrimeCLIAPIError)
+
 
 def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
@@ -60,7 +69,7 @@ class EvalsClient:
             lookup_data: Dict[str, Any] = {"id": env_id}
             response = self.client.post("/environmentshub/lookup", json=lookup_data)
             return response["data"]["id"]
-        except APIError as e:
+        except _API_ERRORS as e:
             raise EvalsAPIError(
                 f"Environment with ID '{env_id}' does not exist in the hub. "
                 f"Please verify the environment ID is correct."
@@ -77,7 +86,7 @@ class EvalsClient:
             response = self.client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
             details = response.get("data", response)
             return details["id"]
-        except APIError as e:
+        except _API_ERRORS as e:
             raise EvalsAPIError(
                 f"Environment '{owner_slug}/{name}' does not exist in the hub. "
                 f"Please ensure the environment exists and you have access to it."
@@ -100,7 +109,7 @@ class EvalsClient:
             response = self.client.post("/environmentshub/resolve", json=resolve_data)
             return response["data"]["id"]
 
-        except APIError as e:
+        except _API_ERRORS as e:
             raise EvalsAPIError(
                 f"Environment '{env_name}' does not exist in the hub. "
                 f"Please push the environment first with: prime env push"
@@ -450,7 +459,7 @@ class AsyncEvalsClient:
             lookup_data: Dict[str, Any] = {"id": env_id}
             response = await self.client.post("/environmentshub/lookup", json=lookup_data)
             return response["data"]["id"]
-        except APIError as e:
+        except _API_ERRORS as e:
             raise EvalsAPIError(
                 f"Environment with ID '{env_id}' does not exist in the hub. "
                 f"Please verify the environment ID is correct."
@@ -467,7 +476,7 @@ class AsyncEvalsClient:
             response = await self.client.get(f"/environmentshub/{owner_slug}/{name}/@latest")
             details = response.get("data", response)
             return details["id"]
-        except APIError as e:
+        except _API_ERRORS as e:
             raise EvalsAPIError(
                 f"Environment '{owner_slug}/{name}' does not exist in the hub. "
                 f"Please ensure the environment exists and you have access to it."
@@ -490,7 +499,7 @@ class AsyncEvalsClient:
             response = await self.client.post("/environmentshub/resolve", json=resolve_data)
             return response["data"]["id"]
 
-        except APIError as e:
+        except _API_ERRORS as e:
             raise EvalsAPIError(
                 f"Environment '{env_name}' does not exist in the hub. "
                 f"Please push the environment first with: prime env push"

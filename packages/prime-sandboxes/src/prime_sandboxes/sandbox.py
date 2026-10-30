@@ -2010,7 +2010,8 @@ def _auth_refresh_cutoff(auth_info: Dict[str, Any]) -> datetime:
 def _write_auth_cache(cache_file: Any, data: str) -> None:
     cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with os.fdopen(os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-        cache_file.chmod(0o600)
+        with contextlib.suppress(OSError):
+            cache_file.chmod(0o600)
         f.write(data)
 
 

@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -116,6 +117,7 @@ class TestTracesOptOut:
         assert "Traces Opt Out" in result.output
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 class TestConfigPermissions:
     def test_credentials_are_private(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -133,3 +135,19 @@ class TestConfigPermissions:
         assert stat.S_IMODE((config_dir / "environments").stat().st_mode) == 0o700
         assert stat.S_IMODE((config_dir / "config.json").stat().st_mode) == 0o600
         assert stat.S_IMODE((config_dir / "environments" / "staging.json").stat().st_mode) == 0o600
+
+    def test_chmod_failure_still_writes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = Config()
+
+        def deny(*_: object) -> None:
+            raise PermissionError
+
+        monkeypatch.setattr(Path, "chmod", deny)
+
+        config.set_api_key("key")
+
+        assert json.loads((tmp_path / ".prime" / "config.json").read_text())["api_key"] == "key"

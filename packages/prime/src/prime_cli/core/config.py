@@ -11,7 +11,8 @@ from pydantic import BaseModel, ConfigDict
 
 def _write_private(path: Path, text: str) -> None:
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-        path.chmod(0o600)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
         f.write(text)
 
 

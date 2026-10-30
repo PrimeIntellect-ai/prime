@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -588,6 +589,7 @@ class TestSandboxAuthRetry:
         assert str(transport.requests[0].url).endswith("/api/v1/sandbox/sandbox-1/auth")
         await client.client.aclose()
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
     def test_auth_cache_file_is_private(self, tmp_path):
         cache_file = tmp_path / "auth_cache.json"
         cache_file.write_text("{}")

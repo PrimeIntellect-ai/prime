@@ -9,6 +9,7 @@ from prime_sandboxes import (
     APIClient,
     AsyncSandboxClient,
     CreateSandboxRequest,
+    Sandbox,
     SandboxCheckpoint,
     SandboxClient,
 )
@@ -577,3 +578,45 @@ async def test_async_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) 
         await client.resume("sandbox-1")
 
     assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]
+
+
+def _statuses(client: SandboxClient, monkeypatch: pytest.MonkeyPatch, *states: dict) -> None:
+    """Make get() return sandbox_response() overlaid with each state in turn."""
+    responses = iter(states)
+    monkeypatch.setattr(
+        client, "get", lambda _: Sandbox.model_validate({**sandbox_response(), **next(responses)})
+    )
+    monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", lambda _: None)
+
+
+def test_wait_for_pause_and_resume(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    _statuses(client, monkeypatch, {"status": "RUNNING"}, {"status": "PAUSED"})
+    assert client.wait_for_pause("sandbox-1").status == "PAUSED"
+
+    _statuses(client, monkeypatch, {"status": "PAUSED"}, {"status": "RUNNING"})
+    assert client.wait_for_resume("sandbox-1").status == "RUNNING"
+
+
+def test_wait_for_pause_and_resume_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    _statuses(
+        client,
+        monkeypatch,
+        {"status": "RUNNING", "errorType": "PAUSE_FAILED", "errorMessage": "node is full"},
+    )
+    with pytest.raises(RuntimeError, match="node is full"):
+        client.wait_for_pause("sandbox-1")
+
+    _statuses(client, monkeypatch, {"status": "PAUSED"}, {"status": "ERROR"})
+    with pytest.raises(RuntimeError, match="status=ERROR"):
+        client.wait_for_resume("sandbox-1")
+
+    # A pause failure is not a resume failure.
+    _statuses(
+        client,
+        monkeypatch,
+        {"status": "PAUSED", "errorType": "PAUSE_FAILED"},
+        {"status": "RUNNING"},
+    )
+    assert client.wait_for_resume("sandbox-1").status == "RUNNING"

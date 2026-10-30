@@ -368,7 +368,6 @@ class AsyncTracesClient:
     async def list(
         self,
         *,
-        query: Optional[str] = None,
         run_id: Optional[str] = None,
         upload_id: Optional[UploadIds] = None,
         environment_id: Optional[str] = None,
@@ -389,13 +388,6 @@ class AsyncTracesClient:
     ) -> TraceListPage:
         """List trace summaries, newest first (max 100 per page).
 
-        ``query`` is a case-insensitive substring scanned across the listing's
-        identifier columns (trace, run, environment, model, task, agent and
-        outcome), 1 to 256 characters. It does **not** reach message text: only
-        ``search`` reads a trace's content, and only within one run. Unlike the
-        run-scoped search it is a query parameter, so it works for a run ID
-        containing '/'.
-
         ``created_after``/``created_before`` also prune storage partitions, so
         they are the cheapest filters available. ``context`` filters are
         equality-only against the batch-supplied map. ``upload_id`` is the ID
@@ -404,7 +396,6 @@ class AsyncTracesClient:
         """
         params = _build_params(
             (
-                ("query", query),
                 ("run_id", run_id),
                 ("upload_id", _upload_ids(upload_id)),
                 ("environment_id", environment_id),

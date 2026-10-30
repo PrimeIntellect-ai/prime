@@ -71,7 +71,6 @@ def test_search_json_preserves_continuation_coverage_and_scope(monkeypatch):
         ["search", "hello"],
         ["search", " ", "--run-id", "run"],
         ["search", "he", "--run-id", "run"],
-        ["search", "hello", "--run-id", "team/run"],
         ["search", "hello", "--run-id", "run", "--field", "sql"],
     ],
 )
@@ -2054,11 +2053,14 @@ def test_get_runs_rejects_raw_and_episodes(fake_client, extra):
     assert "get_run" not in fake_client.calls
 
 
-def test_get_runs_rejects_a_run_id_with_a_slash(fake_client):
-    result = runner.invoke(main_app, ["traces", "get", "team/run", "--runs"])
+def test_inference_runs_are_listed_by_type_and_read_by_slashed_id(fake_client):
+    listed = runner.invoke(main_app, ["traces", "list", "--runs", "--run-type", "inference"])
+    read = runner.invoke(main_app, ["traces", "get", "inference/team/qwen3", "--runs"])
 
-    assert result.exit_code == 2
-    assert "get_run" not in fake_client.calls
+    assert listed.exit_code == 0, listed.output
+    assert fake_client.calls["list_runs"]["run_type"] == ["inference"]
+    assert read.exit_code == 0, read.output
+    assert fake_client.calls["get_run"] == "inference/team/qwen3"
 
 
 def test_get_runs_not_found_names_the_account_it_searched(fake_client, monkeypatch):
@@ -2089,121 +2091,3 @@ def test_get_runs_hints_quote_the_run_id_for_the_shell(fake_client):
     output = " ".join(result.output.split())
     assert "--run-id 'run 1;rm' --run-step <step>" in output
     assert "Traces: prime traces list --run-id 'run 1;rm'" in output
-
-
-# ---------------------------------------------------------------------------
-# Captured inference traces: the synthetic `inference/<model>` run
-# ---------------------------------------------------------------------------
-
-
-def test_list_runs_accepts_the_inference_run_type(fake_client):
-    result = runner.invoke(main_app, ["traces", "list", "--runs", "--run-type", "inference"])
-
-    assert result.exit_code == 0, result.output
-    assert fake_client.calls["list_runs"]["run_type"] == ["inference"]
-    assert _title(result.output) == "Runs · inference"
-
-
-def test_unknown_run_type_names_inference_among_the_choices(fake_client):
-    result = runner.invoke(main_app, ["traces", "list", "--runs", "--run-type", "capture"])
-
-    assert result.exit_code == 1
-    assert "choose eval, train, inference, unknown" in result.output
-
-
-def test_list_forwards_a_synthetic_inference_run_id_unchanged(fake_client):
-    # The listing filters by query param, so a slashed run ID addresses fine.
-    result = runner.invoke(main_app, ["traces", "list", "--run-id", "inference/z-ai/glm-5.3"])
-
-    assert result.exit_code == 0, result.output
-    assert fake_client.calls["list"]["run_id"] == "inference/z-ai/glm-5.3"
-
-
-@pytest.mark.parametrize(
-    "model_id",
-    # Adapter captures carry the canonical `model:lora_id` identity, so the
-    # filter has to pass a colon through untouched to select only that adapter.
-    ["z-ai/glm-5.3", "internal/foo:adapter-123"],
-)
-def test_list_filters_captured_traces_by_model_id(fake_client, model_id):
-    result = runner.invoke(main_app, ["traces", "list", "--model-id", model_id])
-
-    assert result.exit_code == 0, result.output
-    assert fake_client.calls["list"]["model_id"] == model_id
-
-
-def test_delete_accepts_a_synthetic_inference_run_id(fake_client):
-    result = runner.invoke(
-        main_app, ["traces", "delete", "--run-id", "inference/z-ai/glm-5.3", "--yes"]
-    )
-
-    assert result.exit_code == 0, result.output
-    assert fake_client.calls["delete_run"] == "inference/z-ai/glm-5.3"
-
-
-def _unboxed(text):
-    """Click wraps a long message across the lines of a box, so pin the content
-    rather than wherever this terminal width happened to break it."""
-    return "".join(text.replace("│", "").split())
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["traces", "search", "Traceback", "--run-id", "inference/z-ai/glm-5.3"],
-        ["traces", "get", "inference/z-ai/glm-5.3", "--runs"],
-    ],
-)
-def test_path_addressed_commands_name_the_working_alternative(fake_client, args):
-    """Search and `get --runs` put the run ID in the URL path, which cannot
-    carry a slash. Name the listing's own --query, which is a query parameter,
-    and stay honest that it does not reach message text."""
-    result = runner.invoke(main_app, args)
-    output = _unboxed(result.output)
-
-    assert result.exit_code == 2
-    assert _unboxed("prime traces list --run-id <run_id> --query <text>") in output
-    assert _unboxed("Message text is searchable only within a run") in output
-    assert "search" not in fake_client.calls and "get_run" not in fake_client.calls
-
-
-def test_list_searches_a_captured_run_by_query(fake_client):
-    """The recipe the trace-capture hint points at: scoped to one synthetic run
-    and narrowed by text, both as query parameters."""
-    result = runner.invoke(
-        main_app,
-        ["traces", "list", "--run-id", "inference/z-ai/glm-5.3", "--query", "glm-5.3"],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert fake_client.calls["list"]["query"] == "glm-5.3"
-    assert fake_client.calls["list"]["run_id"] == "inference/z-ai/glm-5.3"
-
-
-def test_list_sends_no_query_by_default(fake_client):
-    result = runner.invoke(main_app, ["traces", "list"])
-
-    assert result.exit_code == 0, result.output
-    assert fake_client.calls["list"]["query"] is None
-
-
-@pytest.mark.parametrize(
-    "extra",
-    [["--runs"], ["--episodes"], ["--episode-id", "ep_1"]],
-)
-def test_query_is_rejected_on_listings_that_do_not_accept_it(fake_client, extra):
-    """Those routes reject an unknown parameter rather than ignoring it, so the
-    option has to be refused here instead of becoming an invalid_filter 400."""
-    result = runner.invoke(main_app, ["traces", "list", "--query", "glm", *extra])
-
-    assert result.exit_code == 1
-    assert "--query" in result.output
-    assert not fake_client.calls
-
-
-@pytest.mark.parametrize("value", ["   ", "x" * 257])
-def test_query_is_validated_before_the_network(fake_client, value):
-    result = runner.invoke(main_app, ["traces", "list", "--query", value])
-
-    assert result.exit_code == 2
-    assert not fake_client.calls

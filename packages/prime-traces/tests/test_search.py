@@ -87,9 +87,9 @@ def test_search_preserves_not_found_error(make_client, code):
     assert exc.value.code == code
 
 
-def test_search_refuses_a_run_id_that_cannot_be_one_path_segment(make_client):
+def test_search_encodes_the_slashes_of_an_inference_run_id(make_client):
     def handler(request):
-        pytest.fail("an unaddressable run must not make a network request")
+        assert request.url.raw_path.startswith(b"/api/v1/runs/inference%2Fteam%2Fqwen3/search?")
+        return httpx.Response(200, json={"items": [], "next_cursor": None})
 
-    with pytest.raises(ValueError, match="run_id"):
-        make_client(handler).search("hello", run_id="team/run")
+    make_client(handler).search("hello", run_id="inference/team/qwen3")

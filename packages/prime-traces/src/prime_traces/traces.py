@@ -138,9 +138,9 @@ RunTypes = Union[RunType, Sequence[RunType]]
 UserIds = Union[str, Sequence[str]]
 
 
-def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
-    """Encode a resource ID as one URL path segment."""
-    if "/" in identifier:
+def _encoded_id_segment(identifier: str, *, parameter_name: str, slash_ok: bool = False) -> str:
+    """Encode a resource ID as one URL path segment, a '/' included as %2F."""
+    if "/" in identifier and not slash_ok:
         # ASGI decodes %2F before Starlette route matching, so the service's
         # /{resource}/{id} routes see an extra path segment and return 404.
         # Fail locally until that route accepts a path-valued parameter rather
@@ -166,7 +166,9 @@ def _trace_endpoint(trace_id: str) -> str:
 
 def _run_endpoint(run_id: str) -> str:
     """Build a run endpoint with the ID encoded as one path segment."""
-    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id')}"
+    # Captured inference runs are named inference/<model>[:<lora_id>], so the run
+    # routes accept a percent-encoded '/' that the other resource routes do not.
+    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id', slash_ok=True)}"
 
 
 def _run_search_endpoint(run_id: str) -> str:
@@ -361,7 +363,6 @@ class TracesClient:
     def list(
         self,
         *,
-        query: Optional[str] = None,
         run_id: Optional[str] = None,
         upload_id: Optional[UploadIds] = None,
         environment_id: Optional[str] = None,
@@ -382,13 +383,6 @@ class TracesClient:
     ) -> TraceListPage:
         """List trace summaries, newest first (max 100 per page).
 
-        ``query`` is a case-insensitive substring scanned across the listing's
-        identifier columns (trace, run, environment, model, task, agent and
-        outcome), 1 to 256 characters. It does **not** reach message text: only
-        ``search`` reads a trace's content, and only within one run. Unlike the
-        run-scoped search it is a query parameter, so it works for a run ID
-        containing '/'.
-
         ``created_after``/``created_before`` also prune storage partitions, so
         they are the cheapest filters available. ``context`` filters are
         equality-only against the batch-supplied map. ``upload_id`` is the ID
@@ -397,7 +391,6 @@ class TracesClient:
         """
         params = _build_params(
             (
-                ("query", query),
                 ("run_id", run_id),
                 ("upload_id", _upload_ids(upload_id)),
                 ("environment_id", environment_id),

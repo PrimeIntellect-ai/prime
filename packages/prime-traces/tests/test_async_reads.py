@@ -63,21 +63,6 @@ class TestList:
         assert summary.model.id == "deepseek-v4-flash"
 
     @pytest.mark.asyncio
-    async def test_query_is_a_filter_so_a_slashed_run_id_stays_addressable(self, make_async_client):
-        captured = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["params"] = dict(request.url.params)
-            return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
-
-        await make_async_client(handler).list(query="glm-5.3", run_id="inference/z-ai/glm-5.3")
-
-        assert captured["params"] == {
-            "query": "glm-5.3",
-            "run_id": "inference/z-ai/glm-5.3",
-        }
-
-    @pytest.mark.asyncio
     async def test_iter_follows_cursor(self, make_async_client):
         pages = {
             None: {"items": [{**SUMMARY, "trace_id": "t1"}], "next_cursor": "c1"},

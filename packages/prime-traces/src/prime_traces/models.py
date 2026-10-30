@@ -17,8 +17,6 @@ from pydantic import BaseModel, ConfigDict
 
 SearchField = Literal["content", "reasoning_content", "tool_calls"]
 # The service classifies a run from its newest trace's upload context.
-# ``inference`` is the gateway's captured inference calls, which carry a
-# synthetic ``inference/<model>[:<lora_id>]`` run rather than a producer's own.
 RunType = Literal["eval", "train", "inference", "unknown"]
 
 

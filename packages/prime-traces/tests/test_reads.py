@@ -64,22 +64,6 @@ class TestList:
         assert summary.total_tokens == 84213
         assert summary.episode_id is None
 
-    def test_query_is_a_filter_so_a_slashed_run_id_stays_addressable(self, make_client):
-        """The run-scoped search puts the run ID in the path and so cannot take a
-        slash; the listing takes both as query parameters."""
-        captured = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["params"] = dict(request.url.params)
-            return httpx.Response(200, json={"items": [SUMMARY], "next_cursor": None})
-
-        make_client(handler).list(query="glm-5.3", run_id="inference/z-ai/glm-5.3")
-
-        assert captured["params"] == {
-            "query": "glm-5.3",
-            "run_id": "inference/z-ai/glm-5.3",
-        }
-
     def test_unscored_reward_stays_none_not_zero(self, make_client):
         unscored = {**SUMMARY, "score": {"reward": None, "outcome": None}}
 
@@ -866,13 +850,20 @@ class TestRuns:
         client.list_run_steps(RESERVED_RUN_ID)
         assert paths == [ENCODED_RUN_PATH, ENCODED_RUN_PATH + b"/steps"]
 
-    @pytest.mark.parametrize("method", ["get_run", "list_run_steps"])
-    def test_run_reads_reject_run_id_with_slash_before_request(self, make_client, method):
-        def handler(request: httpx.Request) -> httpx.Response:
-            pytest.fail(f"unexpected request: {request.url}")
+    def test_run_reads_encode_the_slashes_of_an_inference_run_id(self, make_client):
+        paths = []
 
-        with pytest.raises(ValueError, match="run_id cannot contain '/'"):
-            getattr(make_client(handler), method)("team/run")
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.raw_path)
+            if request.url.raw_path.endswith(b"/steps"):
+                return httpx.Response(200, json=RUN_STEPS)
+            return httpx.Response(200, json={**RUN, "run_id": "inference/team/qwen3:lora-1"})
+
+        client = make_client(handler)
+        client.get_run("inference/team/qwen3:lora-1")
+        client.list_run_steps("inference/team/qwen3:lora-1")
+        path = b"/api/v1/runs/inference%2Fteam%2Fqwen3%3Alora-1"
+        assert paths == [path, path + b"/steps"]
 
 
 NODE = {

@@ -1688,32 +1688,52 @@ def _print_network_status(
     console.print(f"  [cyan]{label}:[/cyan] {escape(value)}")
 
 
-def _request_pause_or_resume(sandbox_id: str, resume: bool) -> None:
-    """Send a pause or resume request and report the accepted transition."""
+def _request_pause_or_resume(
+    sandbox_id: str, resume: bool, wait: bool, wait_timeout: float
+) -> None:
+    """Send a pause or resume request and, with wait, block until it settles."""
+    target = "RUNNING" if resume else "PAUSED"
+    action = "Resume" if resume else "Pause"
     try:
         client = SandboxClient(APIClient())
         sandbox = client.resume(sandbox_id) if resume else client.pause(sandbox_id)
-    except APIError as exc:
+        if wait:
+            with console.status(f"[bold blue]Waiting for {target}...", spinner="dots"):
+                if resume:
+                    client.wait_for_resume(sandbox_id, timeout_seconds=wait_timeout)
+                else:
+                    client.wait_for_pause(sandbox_id, timeout_seconds=wait_timeout)
+    except (APIError, RuntimeError, TimeoutError) as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
-    target = "RUNNING" if resume else "PAUSED"
+    if wait:
+        console.print(f"[green]✓[/green] [cyan]{escape(sandbox_id)}[/cyan] is {target}")
+        return
     console.print(
-        f"{'Resume' if resume else 'Pause'} requested for [cyan]{escape(sandbox_id)}[/cyan] "
+        f"{action} requested for [cyan]{escape(sandbox_id)}[/cyan] "
         f"(status {escape(sandbox.status)}); it becomes {target} once the node finishes. "
         f"Check with 'prime sandbox get {escape(sandbox_id)}'."
     )
 
 
+_WAIT_OPTION = typer.Option(True, "--wait/--no-wait", help="Wait until the transition finishes")
+_WAIT_TIMEOUT_OPTION = typer.Option(300, help="Seconds to wait with --wait")
+
+
 @app.command(no_args_is_help=True)
-def pause(sandbox_id: str) -> None:
+def pause(
+    sandbox_id: str, wait: bool = _WAIT_OPTION, wait_timeout: float = _WAIT_TIMEOUT_OPTION
+) -> None:
     """Pause a running VM sandbox, keeping its memory and disk on its node."""
-    _request_pause_or_resume(sandbox_id, resume=False)
+    _request_pause_or_resume(sandbox_id, resume=False, wait=wait, wait_timeout=wait_timeout)
 
 
 @app.command(no_args_is_help=True)
-def resume(sandbox_id: str) -> None:
+def resume(
+    sandbox_id: str, wait: bool = _WAIT_OPTION, wait_timeout: float = _WAIT_TIMEOUT_OPTION
+) -> None:
     """Resume a paused VM sandbox on the node that holds it."""
-    _request_pause_or_resume(sandbox_id, resume=True)
+    _request_pause_or_resume(sandbox_id, resume=True, wait=wait, wait_timeout=wait_timeout)
 
 
 @app.command(no_args_is_help=True)

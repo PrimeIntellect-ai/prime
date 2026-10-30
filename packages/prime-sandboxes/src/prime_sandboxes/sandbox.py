@@ -1596,6 +1596,18 @@ class _AsyncBackgroundJobOutputCoordinator:
             raise
 
 
+def _pause_or_resume_settled(sandbox: Sandbox, target: str, failure: str) -> bool:
+    """True once a pause or resume reached target; raises once it cannot."""
+    if sandbox.status == target:
+        return True
+    if sandbox.error_type == failure or sandbox.status in ("ERROR", "TERMINATED", "TIMEOUT"):
+        raise RuntimeError(
+            f"Sandbox {sandbox.id} did not become {target} (status={sandbox.status}): "
+            f"{sandbox.error_message or 'no error details'}"
+        )
+    return False
+
+
 def _creation_poll_delay(poll_index: int) -> float:
     """Jittered exponential backoff delay for the Nth creation status poll."""
     delay = min(
@@ -2478,6 +2490,44 @@ class SandboxClient:
         """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
+
+    def wait_for_pause(self, sandbox_id: str, timeout_seconds: float = 300) -> Sandbox:
+        """Wait for a requested pause to reach PAUSED.
+
+        Raises RuntimeError if the pause fails (the sandbox stays RUNNING with
+        error_type PAUSE_FAILED) or the sandbox ends, and TimeoutError on expiry.
+        """
+        return self._wait_for_pause_or_resume(sandbox_id, "PAUSED", "PAUSE_FAILED", timeout_seconds)
+
+    def wait_for_resume(self, sandbox_id: str, timeout_seconds: float = 300) -> Sandbox:
+        """Wait for a requested resume to reach RUNNING.
+
+        Raises RuntimeError if the resume fails (the sandbox stays PAUSED with
+        error_type RESUME_FAILED) or the sandbox ends, and TimeoutError on expiry.
+        """
+        return self._wait_for_pause_or_resume(
+            sandbox_id, "RUNNING", "RESUME_FAILED", timeout_seconds
+        )
+
+    def _wait_for_pause_or_resume(
+        self, sandbox_id: str, target: str, failure: str, timeout_seconds: float
+    ) -> Sandbox:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while time.monotonic() < deadline:
+            sandbox = self.get(sandbox_id)
+            if _pause_or_resume_settled(sandbox, target, failure):
+                return sandbox
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        raise TimeoutError(
+            f"Sandbox {sandbox_id} did not become {target} within {timeout_seconds:g}s"
+        )
 
     def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
         """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
@@ -4188,6 +4238,46 @@ class AsyncSandboxClient:
         """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
+
+    async def wait_for_pause(self, sandbox_id: str, timeout_seconds: float = 300) -> Sandbox:
+        """Wait for a requested pause to reach PAUSED.
+
+        Raises RuntimeError if the pause fails (the sandbox stays RUNNING with
+        error_type PAUSE_FAILED) or the sandbox ends, and TimeoutError on expiry.
+        """
+        return await self._wait_for_pause_or_resume(
+            sandbox_id, "PAUSED", "PAUSE_FAILED", timeout_seconds
+        )
+
+    async def wait_for_resume(self, sandbox_id: str, timeout_seconds: float = 300) -> Sandbox:
+        """Wait for a requested resume to reach RUNNING.
+
+        Raises RuntimeError if the resume fails (the sandbox stays PAUSED with
+        error_type RESUME_FAILED) or the sandbox ends, and TimeoutError on expiry.
+        """
+        return await self._wait_for_pause_or_resume(
+            sandbox_id, "RUNNING", "RESUME_FAILED", timeout_seconds
+        )
+
+    async def _wait_for_pause_or_resume(
+        self, sandbox_id: str, target: str, failure: str, timeout_seconds: float
+    ) -> Sandbox:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while time.monotonic() < deadline:
+            sandbox = await self.get(sandbox_id)
+            if _pause_or_resume_settled(sandbox, target, failure):
+                return sandbox
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+        raise TimeoutError(
+            f"Sandbox {sandbox_id} did not become {target} within {timeout_seconds:g}s"
+        )
 
     async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
         """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""

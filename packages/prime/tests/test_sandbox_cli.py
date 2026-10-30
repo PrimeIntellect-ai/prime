@@ -98,9 +98,7 @@ def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch)
             updated_at=datetime.now(timezone.utc),
         )
 
-    monkeypatch.setattr(
-        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint
-    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint)
 
     for checkpoint_id, (state, error) in states.items():
         result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])
@@ -1324,11 +1322,41 @@ def test_pause_and_resume_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.pause", pause)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.resume", resume)
 
-    paused = runner.invoke(app, ["sandbox", "pause", "sandbox-1"])
+    paused = runner.invoke(app, ["sandbox", "pause", "sandbox-1", "--no-wait"])
     assert paused.exit_code == 0, paused.output
     assert "becomes PAUSED" in strip_ansi(paused.output)
 
-    resumed = runner.invoke(app, ["sandbox", "resume", "sandbox-1"])
+    resumed = runner.invoke(app, ["sandbox", "resume", "sandbox-1", "--no-wait"])
     assert resumed.exit_code == 0, resumed.output
     assert "becomes RUNNING" in strip_ansi(resumed.output)
     assert calls == [("pause", "sandbox-1"), ("resume", "sandbox-1")]
+
+
+def test_pause_and_resume_wait_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[tuple[str, str, float]] = []
+
+    def wait(name: str):
+        def waiter(self: Any, sandbox_id: str, timeout_seconds: float) -> SimpleNamespace:
+            calls.append((name, sandbox_id, timeout_seconds))
+            if name == "resume":
+                raise RuntimeError("Sandbox sandbox-1 did not become RUNNING: node lost")
+            return SimpleNamespace(status="PAUSED")
+
+        return waiter
+
+    for name in ("pause", "resume"):
+        monkeypatch.setattr(
+            f"prime_cli.commands.sandbox.SandboxClient.{name}",
+            lambda self, sandbox_id: SimpleNamespace(status="RUNNING"),
+        )
+        monkeypatch.setattr(f"prime_cli.commands.sandbox.SandboxClient.wait_for_{name}", wait(name))
+
+    paused = runner.invoke(app, ["sandbox", "pause", "sandbox-1", "--wait-timeout", "30"])
+    assert paused.exit_code == 0, paused.output
+    assert "sandbox-1 is PAUSED" in strip_ansi(paused.output)
+
+    resumed = runner.invoke(app, ["sandbox", "resume", "sandbox-1"])
+    assert resumed.exit_code == 1
+    assert "node lost" in strip_ansi(resumed.output)
+    assert calls == [("pause", "sandbox-1", 30.0), ("resume", "sandbox-1", 300.0)]

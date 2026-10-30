@@ -25,8 +25,6 @@ app = PlainTyper(
 )
 console = get_console()
 
-# Trace capture configures an inference model, so it belongs here rather than
-# under `prime traces`, which talks to a different host.
 app.add_typer(trace_capture_app, name="trace-capture")
 
 MODELS_JSON_HELP = json_output_help(

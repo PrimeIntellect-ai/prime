@@ -1,7 +1,9 @@
 """`prime factory slurm` — the team's Slurm deployment roster."""
 
+import re
 import time
-from typing import List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
@@ -317,6 +319,201 @@ def remove_member(
     )
 
 
+def _create_error_hint(error: APIError) -> Optional[str]:
+    """Status-code-specific guidance for a failed create request."""
+    error_str = str(error)
+    for status, hint in CREATE_ERROR_HINTS.items():
+        if status in error_str:
+            return hint
+    return None
+
+
+def _get_platform_user() -> Optional[Dict[str, str]]:
+    """Get the logged-in platform user from the API.
+
+    Returns dict with 'id' and 'username' (slug sanitized to regex), or None if unavailable.
+    """
+    try:
+        client = APIClient()
+        response = client.get("/user/whoami")
+        data = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(data, dict):
+            return None
+
+        user_id = data.get("id")
+        slug = data.get("slug")
+
+        if not user_id or not slug:
+            return None
+
+        # Sanitize slug to match username regex
+        username = _sanitize_username(slug)
+        if not username:
+            return None
+
+        return {"id": user_id, "username": username}
+    except Exception:
+        return None
+
+
+def _sanitize_username(slug: str) -> Optional[str]:
+    """Sanitize a platform slug to match Slurm username requirements.
+
+    Converts to lowercase, replaces invalid chars with hyphens, ensures it matches
+    ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32.
+    """
+    if not slug:
+        return None
+
+    # Convert to lowercase
+    sanitized = slug.lower()
+
+    # Replace invalid characters with hyphens
+    sanitized = re.sub(r"[^a-z0-9-]", "-", sanitized)
+
+    # Ensure it starts with a letter
+    if not sanitized or not sanitized[0].isalpha():
+        sanitized = "u" + sanitized
+
+    # Ensure it doesn't end with hyphen
+    sanitized = sanitized.rstrip("-")
+    if not sanitized or not sanitized[-1].isalnum():
+        sanitized = sanitized + "0"
+
+    # Truncate to 32 chars max
+    if len(sanitized) > 32:
+        sanitized = (
+            sanitized[:31] + sanitized[-1] if sanitized[-1].isalnum() else sanitized[:31] + "0"
+        )
+
+    # Ensure minimum length
+    if len(sanitized) < 2:
+        sanitized = sanitized + "0"
+
+    # Validate it matches the regex
+    if _validate_username(sanitized):
+        return sanitized
+
+    return None
+
+
+def _read_ssh_keys(key_file: Optional[str] = None) -> List[str]:
+    """Read SSH public keys from a file or ~/.ssh/*.pub.
+
+    Args:
+        key_file: Specific key file to read. If None, reads all ~/.ssh/*.pub files.
+
+    Returns:
+        List of SSH public key strings.
+    """
+    keys = []
+
+    if key_file:
+        # Read from specified file
+        path = Path(key_file).expanduser()
+        if not path.exists():
+            console.print(f"[yellow]Warning:[/yellow] SSH key file not found: {key_file}")
+            return []
+        try:
+            content = path.read_text().strip()
+            if content:
+                keys.append(content)
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] Could not read {key_file}: {escape(str(e))}")
+            return []
+    else:
+        # Default: read from ~/.ssh/*.pub
+        ssh_dir = Path.home() / ".ssh"
+        if ssh_dir.exists():
+            for pub_file in sorted(ssh_dir.glob("*.pub")):
+                try:
+                    content = pub_file.read_text().strip()
+                    if content:
+                        keys.append(content)
+                except Exception:
+                    # Silently skip unreadable files
+                    pass
+
+    return keys
+
+
+def _validate_username(username: str) -> bool:
+    """Validate username against Slurm cluster requirements."""
+    if not (2 <= len(username) <= 32):
+        return False
+    return USERNAME_REGEX.match(username) is not None
+
+
+def _parse_member_spec(spec: str, platform_user: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """Parse a member specification in format USER[:KEYFILE].
+
+    Args:
+        spec: Member specification string
+        platform_user: Platform user dict for validation of default member
+
+    Returns:
+        Dict with 'username' and 'keyfile' (optional)
+
+    Raises:
+        ValueError: If the spec is invalid
+    """
+    if ":" in spec:
+        username, keyfile = spec.split(":", 1)
+        return {"username": username, "keyfile": keyfile}
+    else:
+        # Bare username - only valid if it's the caller's own username
+        if platform_user and spec == platform_user["username"]:
+            return {"username": spec, "keyfile": None}
+        else:
+            raise ValueError(
+                f"Member '{spec}' requires a key file. Use --member {spec}:KEYFILE. "
+                f"Only the default member (your platform username) can omit the key file."
+            )
+
+
+def _wait_for_status(
+    team_id: str, cluster_id: str, err_console: Console, timeout_s: int = 300
+) -> None:
+    """Poll the cluster list until RUNNING or FAILED; exit 1 on timeout or failure."""
+    err_console.print("Waiting for cluster to reach RUNNING status...")
+    elapsed = 0
+    poll_interval_s = 5
+    while True:
+        try:
+            cluster = _find_cluster(team_id, cluster_id, err_console)
+            err_console.print(f"  Status: {escape(cluster.status)}")
+            if cluster.status == "RUNNING":
+                err_console.print("[green]✓[/green] Cluster is RUNNING")
+                return
+            if cluster.status == "FAILED":
+                err_console.print("[red]✗[/red] Cluster deployment FAILED")
+                raise typer.Exit(1)
+        except (APIError, ValueError) as e:
+            err_console.print(f"[yellow]Warning:[/yellow] Status check failed: {escape(str(e))}")
+        if elapsed >= timeout_s:
+            break
+        time.sleep(poll_interval_s)
+        elapsed += poll_interval_s
+
+    err_console.print(
+        f"[yellow]Timeout:[/yellow] Cluster did not reach RUNNING status "
+        f"within {timeout_s} seconds."
+    )
+    err_console.print(
+        "The deployment may still be in progress. Check status with: prime factory slurm list"
+    )
+    raise typer.Exit(1)
+
+
+CREATE_JSON_HELP = json_output_help(
+    ". = {id, primeClusterId, status, createdAt}",
+    "id: cluster/job identifier for subsequent commands",
+    "primeClusterId: target Model Factory or dedicated cluster",
+    "status: deployment status (starts PENDING)",
+    "createdAt: timestamp when the cluster was created",
+    "--team: use a different team than the selected account context",
+)
+
 RESIZE_JSON_HELP = json_output_help(
     ". = {numNodes, added[], removed[]}",
     "numNodes: new total node count after resize",
@@ -325,6 +522,25 @@ RESIZE_JSON_HELP = json_output_help(
     "--team: use a different team than the selected account context",
 )
 
+
+USERNAME_REGEX = re.compile(r"^[a-z][a-z0-9-]{0,30}[a-z0-9]$")
+
+CREATE_ERROR_HINTS = {
+    "HTTP 403": (
+        "Creating clusters requires an API key with the slurm_clusters:write scope "
+        "and team admin privileges."
+    ),
+    "HTTP 404": "Prime cluster not found. Check the cluster ID.",
+    "HTTP 409": (
+        "Conflict: A Slurm cluster with this name may already exist, not enough nodes "
+        "are available, or there is a port conflict."
+    ),
+    "HTTP 422": (
+        "Validation error: Check that all fields are valid. Username must match "
+        "^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32, and at least one SSH key "
+        "and member are required."
+    ),
+}
 
 RESIZE_ERROR_HINTS = {
     "HTTP 400": ("Ensure numNodes is >= 1 and <= max(64, current size) with sufficient resources."),
@@ -342,8 +558,232 @@ RESIZE_ERROR_HINTS = {
 }
 LOOKUP_403_HINT = "Looking up the cluster requires an API key with the slurm_clusters:read scope."
 
+CREATE_WAIT_TIMEOUT_S = 300
 RESIZE_WAIT_TIMEOUT_S = 300
 RESIZE_POLL_INTERVAL_S = 5
+
+
+@app.command(name="create", no_args_is_help=True, epilog=CREATE_JSON_HELP)
+def create_cluster(
+    prime_cluster_id: str = typer.Argument(
+        ..., help="Target Model Factory or dedicated cluster ID"
+    ),
+    name: str = typer.Option(..., "--name", "-n", help="Display name for the Slurm cluster"),
+    nodes: int = typer.Option(..., "--nodes", help="Number of nodes to deploy"),
+    member: List[str] = typer.Option(
+        [],
+        "--member",
+        help=(
+            "Member in format USER[:KEYFILE] (repeatable). "
+            "Defaults to your platform username with ~/.ssh/*.pub keys if not specified. "
+            "Other members require :KEYFILE."
+        ),
+    ),
+    sudo: bool = typer.Option(
+        False,
+        "--sudo",
+        help="Grant sudo privileges to the default member (your platform user)",
+    ),
+    gpus_per_node: Optional[int] = typer.Option(
+        None,
+        "--gpus-per-node",
+        help="Number of GPUs per node",
+    ),
+    home_size: Optional[str] = typer.Option(
+        None,
+        "--home-size",
+        help="Home directory size (e.g., '100Gi')",
+    ),
+    containers: bool = typer.Option(
+        False,
+        "--containers",
+        help="Enable container support",
+    ),
+    tailscale_auth_key: Optional[str] = typer.Option(
+        None,
+        "--tailscale-auth-key",
+        envvar="TAILSCALE_AUTH_KEY",
+        help="Tailscale auth key (or set TAILSCALE_AUTH_KEY env var)",
+    ),
+    team: Optional[str] = TEAM_OPTION,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompt",
+    ),
+    wait: bool = typer.Option(
+        False,
+        "--wait",
+        "-w",
+        help=(
+            f"Wait until RUNNING or FAILED status "
+            f"(polls every 5s; exits 1 after {CREATE_WAIT_TIMEOUT_S}s or on failure)"
+        ),
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the API response as JSON (same as --output json)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Create a new Slurm cluster deployment.
+
+    Deploys a Slurm cluster on the specified Model Factory or dedicated cluster.
+    Requires team admin privileges and an API key with the slurm_clusters:write scope
+    (plus slurm_clusters:read for --wait polling).
+
+    At least one member with SSH access is required. Members are specified as USER[:KEYFILE].
+    If no --member is given, defaults to your platform username with SSH keys from ~/.ssh/*.pub.
+    Other members must specify a key file (e.g., --member alice:~/.ssh/alice.pub).
+    """
+    if json_output:
+        output = "json"
+    validate_output_format(output, console)
+    err_console = _stderr_console_for(output)
+
+    # Validate nodes
+    if nodes <= 0:
+        err_console.print(f"[red]Error:[/red] --nodes must be positive (got {nodes}).")
+        raise typer.Exit(1)
+
+    team_id = _resolve_team_id(team, err_console)
+    if not team_id:
+        return
+
+    # Get platform user for default member
+    platform_user = _get_platform_user()
+
+    # Build members list
+    members_list: List[Dict[str, Any]] = []
+    member_specs = member if member else []
+
+    if not member_specs:
+        # Default to platform user
+        if not platform_user:
+            err_console.print(
+                "[red]Error:[/red] Could not determine your platform username. "
+                "Please specify members explicitly with --member USER:KEYFILE."
+            )
+            raise typer.Exit(1)
+
+        # Read default SSH keys for platform user
+        ssh_keys = _read_ssh_keys()
+        if not ssh_keys:
+            err_console.print(
+                "[red]Error:[/red] No SSH keys found in ~/.ssh/*.pub. "
+                "Specify a key file with --member USER:KEYFILE."
+            )
+            raise typer.Exit(1)
+
+        member_dict: Dict[str, Any] = {
+            "username": platform_user["username"],
+            "sshAuthorizedKeys": ssh_keys,
+            "sudo": sudo,
+            "linkedUserId": platform_user["id"],
+        }
+        members_list.append(member_dict)
+    else:
+        # Parse member specifications
+        for spec in member_specs:
+            try:
+                parsed = _parse_member_spec(spec, platform_user)
+            except ValueError as e:
+                err_console.print(f"[red]Error:[/red] {escape(str(e))}")
+                raise typer.Exit(1)
+
+            username = parsed["username"]
+            keyfile = parsed.get("keyfile")
+
+            # Validate username
+            if not _validate_username(username):
+                err_console.print(
+                    f"[red]Error:[/red] Invalid username '{escape(username)}'. "
+                    "Must match ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ with length 2-32."
+                )
+                raise typer.Exit(1)
+
+            # Read SSH keys for this member
+            ssh_keys = _read_ssh_keys(keyfile)
+            if not ssh_keys:
+                err_console.print(
+                    f"[red]Error:[/red] No SSH keys found for member '{escape(username)}'. "
+                    f"Specify a valid key file."
+                )
+                raise typer.Exit(1)
+
+            member_dict: Dict[str, Any] = {
+                "username": username,
+                "sshAuthorizedKeys": ssh_keys,
+                "sudo": False,  # Only default member gets sudo
+            }
+
+            # Set linkedUserId and sudo for platform user
+            if platform_user and username == platform_user["username"]:
+                member_dict["linkedUserId"] = platform_user["id"]
+                member_dict["sudo"] = sudo
+
+            members_list.append(member_dict)
+
+    # Show confirmation prompt unless --yes
+    if not yes:
+        err_console.print("[yellow]Create Slurm cluster:[/yellow]")
+        err_console.print(f"  Name:           {escape(name)}")
+        err_console.print(f"  Prime Cluster:  {escape(prime_cluster_id)}")
+        err_console.print(f"  Nodes:          {nodes}")
+        if gpus_per_node:
+            err_console.print(f"  GPUs per node:  {gpus_per_node}")
+        err_console.print(f"  Members:        {', '.join(m['username'] for m in members_list)}")
+        if any(m.get("sudo") for m in members_list):
+            sudo_members = [m["username"] for m in members_list if m.get("sudo")]
+            err_console.print(f"  Sudo:           {', '.join(sudo_members)}")
+        if containers:
+            err_console.print("  Containers:     enabled")
+        if home_size:
+            err_console.print(f"  Home size:      {home_size}")
+        err_console.print()
+    if not confirm_or_skip("Proceed with deployment?", yes, err=output == "json"):
+        err_console.print("Deployment cancelled.")
+        raise typer.Exit(0)
+
+    try:
+        response = _client().create_cluster(
+            team_id=team_id,
+            prime_cluster_id=prime_cluster_id,
+            slurm_cluster_name=name,
+            num_nodes=nodes,
+            members=members_list,
+            gpus_per_node=gpus_per_node,
+            home_size=home_size,
+            tailscale_auth_key=tailscale_auth_key,
+            containers_enabled=containers,
+        )
+    except APIError as e:
+        err_console.print(f"[red]Error:[/red] {escape(str(e))}")
+        hint = _create_error_hint(e)
+        if hint:
+            err_console.print(f"[dim]{hint}[/dim]")
+        raise typer.Exit(1)
+
+    # Parse the response to get cluster ID
+    if not isinstance(response, dict) or "id" not in response:
+        err_console.print("[red]Error:[/red] Slurm cluster API returned a malformed response body.")
+        raise typer.Exit(1)
+
+    cluster_id = response["id"]
+    status = response.get("status", "UNKNOWN")
+
+    if output != "json":
+        console.print(f"[green]Slurm cluster '{escape(name)}' created[/green]")
+        console.print(f"Cluster ID: {escape(cluster_id)}")
+        console.print(f"Status: {escape(status)}")
+        console.print(f"Prime Cluster: {escape(response.get('primeClusterId', prime_cluster_id))}")
+
+    if wait:
+        err_console.print()
+        _wait_for_status(team_id, cluster_id, err_console, CREATE_WAIT_TIMEOUT_S)
+
+    if output == "json":
+        output_data_as_json(response, console)
 
 
 def _resize_error_hint(error: APIError) -> Optional[str]:

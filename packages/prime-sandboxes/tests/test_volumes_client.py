@@ -123,6 +123,24 @@ def test_volume_client_create_personal_scope_omits_team_id():
     assert captured["json"] == {"name": "dataset"}
 
 
+def test_volume_client_create_sends_requested_size_gb():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(), captured)
+
+    volumes.create("dataset", size_gb=512)
+
+    assert captured["json"] == {"name": "dataset", "size_gb": 512}
+
+
+def test_volume_client_create_omits_size_gb_when_unset():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(), captured)
+
+    volumes.create("dataset")
+
+    assert captured["json"] == {"name": "dataset"}
+
+
 def test_volume_client_list_forwards_pagination_and_explicit_team():
     captured: dict[str, Any] = {}
     response_body = _volume_list_response()
@@ -214,6 +232,40 @@ def test_volume_client_delete_personal_scope_omits_team_id():
     assert captured["params"] == {}
 
 
+def test_volume_client_resize_sends_patch_with_size_gb():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(size_gb=512), captured, team_id="team-configured")
+
+    volume = volumes.resize("dataset", 512, team_id="team-explicit")
+
+    assert captured == {
+        "method": "PATCH",
+        "path": "/sandbox/volumes/dataset",
+        "json": {"size_gb": 512},
+        "params": {"team_id": "team-explicit"},
+    }
+    assert isinstance(volume, Volume)
+    assert volume.size_gb == 512
+
+
+def test_volume_client_resize_uses_configured_team_by_default():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(size_gb=512), captured, team_id="team-configured")
+
+    volumes.resize("dataset", 512)
+
+    assert captured["params"] == {"team_id": "team-configured"}
+
+
+def test_volume_client_resize_quotes_names_outside_the_valid_character_set():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(), captured)
+
+    volumes.resize("a/b", 512)
+
+    assert captured["path"] == "/sandbox/volumes/a%2Fb"
+
+
 def test_async_volume_namespace_is_cached_on_the_parent_client():
     async def scenario() -> None:
         async with AsyncSandboxClient(api_key="test-key") as client:
@@ -251,6 +303,24 @@ def test_async_volume_client_crud_wire_contract(monkeypatch: pytest.MonkeyPatch)
         volume = await client.volumes.create("dataset", team_id="team-explicit")
         assert volume.id == "cuid-1"
         assert captured["json"] == {"name": "dataset", "team_id": "team-explicit"}
+
+        response = _volume_response(size_gb=512)
+        grown = await client.volumes.create("dataset", team_id="team-explicit", size_gb=512)
+        assert isinstance(grown, Volume)
+        assert captured["json"] == {
+            "name": "dataset",
+            "team_id": "team-explicit",
+            "size_gb": 512,
+        }
+
+        response = _volume_response(size_gb=512)
+        resized = await client.volumes.resize("dataset", 512, team_id="team-explicit")
+        assert isinstance(resized, Volume)
+        assert resized.size_gb == 512
+        assert captured["method"] == "PATCH"
+        assert captured["path"] == "/sandbox/volumes/dataset"
+        assert captured["json"] == {"size_gb": 512}
+        assert captured["params"] == {"team_id": "team-explicit"}
 
         response = _volume_list_response()
         page = await client.volumes.list(page=2, per_page=25)
@@ -621,6 +691,15 @@ def test_volume_model_parses_head_checkpoint_id():
 
     response = VolumeListResponse.model_validate(_volume_list_response())
     assert response.volumes[0].head_checkpoint_id is None
+
+
+def test_volume_model_parses_size_gb():
+    volume = Volume.model_validate(_volume_response(size_gb=512))
+    assert volume.size_gb == 512
+
+    # Older responses omit the field entirely; null means the base image size.
+    assert Volume.model_validate(_volume_response()).size_gb is None
+    assert VolumeListResponse.model_validate(_volume_list_response()).volumes[0].size_gb is None
 
 
 def test_volume_model_parses_storage_fields():

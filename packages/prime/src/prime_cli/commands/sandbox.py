@@ -1688,6 +1688,34 @@ def _print_network_status(
     console.print(f"  [cyan]{label}:[/cyan] {escape(value)}")
 
 
+def _request_pause_or_resume(sandbox_id: str, resume: bool) -> None:
+    """Send a pause or resume request and report the accepted transition."""
+    try:
+        client = SandboxClient(APIClient())
+        sandbox = client.resume(sandbox_id) if resume else client.pause(sandbox_id)
+    except APIError as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    target = "RUNNING" if resume else "PAUSED"
+    console.print(
+        f"{'Resume' if resume else 'Pause'} requested for [cyan]{escape(sandbox_id)}[/cyan] "
+        f"(status {escape(sandbox.status)}); it becomes {target} once the node finishes. "
+        f"Check with 'prime sandbox get {escape(sandbox_id)}'."
+    )
+
+
+@app.command(no_args_is_help=True)
+def pause(sandbox_id: str) -> None:
+    """Pause a running VM sandbox, keeping its memory and disk on its node."""
+    _request_pause_or_resume(sandbox_id, resume=False)
+
+
+@app.command(no_args_is_help=True)
+def resume(sandbox_id: str) -> None:
+    """Resume a paused VM sandbox on the node that holds it."""
+    _request_pause_or_resume(sandbox_id, resume=True)
+
+
 @app.command(no_args_is_help=True)
 def logs(sandbox_id: str) -> None:
     """Get logs from a sandbox"""

@@ -1307,3 +1307,28 @@ def test_checkpoint_delete_by_ids_and_sandbox(monkeypatch: pytest.MonkeyPatch) -
     both = runner.invoke(app, ["sandbox", "checkpoint", "delete", "c1", "--sandbox", "sbx-1"])
     assert both.exit_code == 1
     assert calls == ["c1", "c2", "c3", ("sandbox", "sbx-1")]
+
+
+def test_pause_and_resume_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[tuple[str, str]] = []
+
+    def pause(self: Any, sandbox_id: str) -> SimpleNamespace:
+        calls.append(("pause", sandbox_id))
+        return SimpleNamespace(status="RUNNING")
+
+    def resume(self: Any, sandbox_id: str) -> SimpleNamespace:
+        calls.append(("resume", sandbox_id))
+        return SimpleNamespace(status="PAUSED")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.pause", pause)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.resume", resume)
+
+    paused = runner.invoke(app, ["sandbox", "pause", "sandbox-1"])
+    assert paused.exit_code == 0, paused.output
+    assert "becomes PAUSED" in strip_ansi(paused.output)
+
+    resumed = runner.invoke(app, ["sandbox", "resume", "sandbox-1"])
+    assert resumed.exit_code == 0, resumed.output
+    assert "becomes RUNNING" in strip_ansi(resumed.output)
+    assert calls == [("pause", "sandbox-1"), ("resume", "sandbox-1")]

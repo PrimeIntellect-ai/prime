@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -586,6 +587,16 @@ class TestSandboxAuthRetry:
         assert [request.method for request in transport.requests] == ["POST", "POST"]
         assert str(transport.requests[0].url).endswith("/api/v1/sandbox/sandbox-1/auth")
         await client.client.aclose()
+
+    def test_auth_cache_file_is_private(self, tmp_path):
+        cache_file = tmp_path / "auth_cache.json"
+        cache_file.write_text("{}")
+        cache_file.chmod(0o644)
+        cache = SandboxAuthCache(cache_file, APIClient(api_key="test-key"))
+
+        cache.set("sandbox-1", _auth_response())
+
+        assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
 
 
 class TestSyncGatewayRetry:

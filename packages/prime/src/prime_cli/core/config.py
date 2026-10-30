@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import re
@@ -6,6 +7,12 @@ from typing import Optional
 
 from prime_traces.core.config import Config as _TracesSdkConfig
 from pydantic import BaseModel, ConfigDict
+
+
+def _write_private(path: Path, text: str) -> None:
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        path.chmod(0o600)
+        f.write(text)
 
 
 class ConfigModel(BaseModel):
@@ -59,8 +66,10 @@ class Config:
 
     def _ensure_config_dir(self) -> None:
         """Create config directory if it doesn't exist"""
-        self.config_dir.mkdir(exist_ok=True)
-        self.environments_dir.mkdir(exist_ok=True)
+        for path in (self.config_dir, self.environments_dir):
+            path.mkdir(mode=0o700, exist_ok=True)
+            with contextlib.suppress(OSError):
+                path.chmod(0o700)
         if not self.config_file.exists():
             self._save_config(
                 ConfigModel(
@@ -85,7 +94,7 @@ class Config:
 
     def _save_config(self, config: dict) -> None:
         """Save configuration to file"""
-        self.config_file.write_text(json.dumps(config, indent=2))
+        _write_private(self.config_file, json.dumps(config, indent=2))
         self.config = config
 
     @property
@@ -254,7 +263,7 @@ class Config:
 
         if update_root:
             root_config["traces_url"] = traces_url
-            self.config_file.write_text(json.dumps(root_config, indent=2))
+            _write_private(self.config_file, json.dumps(root_config, indent=2))
 
         if selected_environment != "production":
             sanitized = self._sanitize_environment_name(selected_environment)
@@ -264,7 +273,7 @@ class Config:
                 if not isinstance(env_config, dict):
                     raise ValueError(f"Invalid configuration in {env_file}")
                 env_config["traces_url"] = traces_url
-                env_file.write_text(json.dumps(env_config, indent=2))
+                _write_private(env_file, json.dumps(env_config, indent=2))
 
         self.config["traces_url"] = traces_url
 
@@ -371,7 +380,7 @@ class Config:
             "inference_url": self.inference_url,
             "traces_url": self._configured_traces_url(),
         }
-        env_file.write_text(json.dumps(env_config, indent=2))
+        _write_private(env_file, json.dumps(env_config, indent=2))
 
     def delete_environment(self, name: str) -> None:
         """Delete a saved environment configuration."""
@@ -507,7 +516,7 @@ class Config:
                         "inference_url": self.inference_url,
                         "traces_url": self._stored_traces_url(),
                     }
-                    env_file.write_text(json.dumps(env_config, indent=2))
+                    _write_private(env_file, json.dumps(env_config, indent=2))
             except ValueError:
                 # Skip updating if environment name is invalid
                 pass

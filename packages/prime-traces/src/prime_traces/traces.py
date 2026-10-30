@@ -138,9 +138,9 @@ RunTypes = Union[RunType, Sequence[RunType]]
 UserIds = Union[str, Sequence[str]]
 
 
-def _encoded_id_segment(identifier: str, *, parameter_name: str) -> str:
-    """Encode a resource ID as one URL path segment."""
-    if "/" in identifier:
+def _encoded_id_segment(identifier: str, *, parameter_name: str, slash_ok: bool = False) -> str:
+    """Encode a resource ID as one URL path segment, a '/' included as %2F."""
+    if "/" in identifier and not slash_ok:
         # ASGI decodes %2F before Starlette route matching, so the service's
         # /{resource}/{id} routes see an extra path segment and return 404.
         # Fail locally until that route accepts a path-valued parameter rather
@@ -166,7 +166,9 @@ def _trace_endpoint(trace_id: str) -> str:
 
 def _run_endpoint(run_id: str) -> str:
     """Build a run endpoint with the ID encoded as one path segment."""
-    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id')}"
+    # Captured inference runs are named inference/<model>[:<lora_id>], so the run
+    # routes accept a percent-encoded '/' that the other resource routes do not.
+    return f"/runs/{_encoded_id_segment(run_id, parameter_name='run_id', slash_ok=True)}"
 
 
 def _run_search_endpoint(run_id: str) -> str:

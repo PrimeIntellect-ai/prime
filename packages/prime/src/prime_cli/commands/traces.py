@@ -90,7 +90,8 @@ GET_JSON_HELP = json_output_help(
 # `prime traces list --episode-id` away.
 EPISODE_MEMBERS_SHOWN = 20
 
-RUN_TYPES = ("eval", "train", "unknown")
+# `inference` runs hold captured inference calls, named inference/<model>[:<lora_id>].
+RUN_TYPES = ("eval", "train", "inference", "unknown")
 
 
 def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
@@ -210,9 +211,6 @@ def search_traces(
         raise typer.BadParameter(
             "Choose content, reasoning_content, or tool_calls", param_hint="--field"
         )
-    if "/" in run_id:
-        # The run ID is one URL path segment; the SDK refuses what it cannot address.
-        raise typer.BadParameter("Run IDs containing '/' cannot be searched", param_hint="--run-id")
     if not query.strip() or not 3 <= len(query) <= 256:
         raise typer.BadParameter("Provide 3–256 characters of nonblank text", param_hint="query")
     try:
@@ -527,7 +525,7 @@ def list_traces(
         help="With --episodes: only episodes with a trace from this training step",
     ),
     run_type: List[str] = typer.Option(
-        [], "--run-type", help="With --runs: only eval, train or unknown runs; repeatable"
+        [], "--run-type", help=f"With --runs: only {', '.join(RUN_TYPES)} runs; repeatable"
     ),
     created_after: Optional[str] = typer.Option(
         None,
@@ -590,7 +588,7 @@ def list_traces(
         if unknown:
             error_console.print(
                 f"[red]Error:[/red] unknown --run-type {escape(', '.join(unknown))};"
-                " choose eval, train or unknown"
+                f" choose {', '.join(RUN_TYPES)}"
             )
             raise typer.Exit(1)
     else:
@@ -887,9 +885,6 @@ def _get_episode(episode_id: str, *, raw: bool, dest: Optional[Path], output: st
 
 def _get_run(run_id: str, *, output: str) -> None:
     """`get --runs`: one run's totals, and its steps when it recorded any."""
-    if "/" in run_id:
-        # The run ID is one URL path segment; the SDK refuses what it cannot address.
-        raise typer.BadParameter("Run IDs containing '/' cannot be read", param_hint="RUN_ID")
     try:
         client = _traces_client()
         run = client.get_run(run_id)

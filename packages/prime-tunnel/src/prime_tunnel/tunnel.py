@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import os
+import random
 import subprocess
 import time
 from pathlib import Path
@@ -18,8 +20,32 @@ from prime_tunnel.exceptions import (
 from prime_tunnel.frpc import FrpcEvent, FrpcOutput, failure_message
 from prime_tunnel.models import TunnelInfo, TunnelStatus
 
+logger = logging.getLogger(__name__)
+
 # Statuses the tunnel service never leaves.
 _TERMINAL_STATUSES = ("expired", "terminated")
+
+# Timings of keep_serving(), in seconds.
+_PROBE_INTERVAL = 15.0
+_PROBE_TIMEOUT = 10.0
+_PROBE_GRACE = 5.0
+_RESTART_SETTLE = 2.0
+_RESTART_BACKOFF_MAX = 60.0
+
+
+def _restart_delay(attempt: int) -> float:
+    """Seconds to wait before restart number `attempt` in a row."""
+    if attempt <= 0:
+        return 0.0
+    return min(_RESTART_BACKOFF_MAX, 2.0 ** min(attempt - 1, 32)) * random.uniform(0.5, 1.0)
+
+
+async def _answers(client: httpx.AsyncClient, url: str, **kwargs) -> bool:
+    """Whether a GET of `url` gets a 2xx."""
+    try:
+        return (await client.get(url, **kwargs)).is_success
+    except (httpx.HTTPError, OSError):
+        return False
 
 
 class Tunnel:
@@ -305,6 +331,89 @@ class Tunnel:
                 raise stopped from e
 
             return url
+
+    async def keep_serving(self, health_path: str) -> None:
+        """
+        Restart frpc whenever requests stop reaching the local service through the URL.
+
+        Run this as a task, and cancel it to stop watching. A local service
+        that is failing too causes no restart. The task ends when the tunnel
+        is stopped, even if it is then started again.
+
+        Args:
+            health_path: Path on the local service that answers 2xx
+
+        Raises:
+            TunnelError: If the tunnel is not started
+            TunnelGoneError: If the registration can no longer be used
+        """
+        if self._stopping:
+            return
+        if not self._started:
+            raise TunnelError("Tunnel is not started")
+
+        path = "/" + health_path.lstrip("/")
+        auth = (self.http_user, self.http_password) if self.http_password else None
+        host = f"[{self.local_addr}]" if ":" in self.local_addr else self.local_addr
+        tunnel_id = self.tunnel_id
+        attempts = 0
+
+        def watched() -> bool:
+            return self._started and not self._stopping and self.tunnel_id == tunnel_id
+
+        async with (
+            httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as public,
+            httpx.AsyncClient(timeout=_PROBE_TIMEOUT, trust_env=False) as local,
+        ):
+
+            async def url_ok() -> bool:
+                return await _answers(public, f"{self.url}{path}", auth=auth)
+
+            async def local_ok() -> bool:
+                return await _answers(
+                    local,
+                    f"http://{host}:{self.local_port}{path}",
+                    headers={"Host": self.hostname or host},
+                )
+
+            while watched():
+                if self.is_running:
+                    if await url_ok():
+                        attempts = 0
+                        await asyncio.sleep(_PROBE_INTERVAL)
+                        continue
+                    if not await local_ok():
+                        logger.debug("Local service of tunnel %s is not answering", self.url)
+                        await asyncio.sleep(_PROBE_INTERVAL)
+                        continue
+                    await asyncio.sleep(_PROBE_GRACE)
+                    if await url_ok():
+                        attempts = 0
+                        continue
+                    if not await local_ok():
+                        continue
+
+                delay = _restart_delay(attempts)
+                attempts += 1
+                logger.warning(
+                    "Tunnel %s is down; restarting frpc in %.1fs (attempt %d)",
+                    self.url,
+                    delay,
+                    attempts,
+                )
+                await asyncio.sleep(delay)
+                if not watched():
+                    return
+                try:
+                    await self.restart()
+                except TunnelGoneError:
+                    logger.error("Tunnel %s: registration gone; cannot repair", self.url)
+                    raise
+                except Exception as e:
+                    logger.warning("Restart of tunnel %s failed: %s", self.url, e)
+                else:
+                    logger.warning("Tunnel %s: frpc restarted", self.url)
+                    await asyncio.sleep(_RESTART_SETTLE)
 
     @staticmethod
     def _end_process(process: subprocess.Popen, kill: bool = False) -> None:

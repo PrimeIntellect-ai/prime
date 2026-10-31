@@ -28,18 +28,13 @@ _TERMINAL_STATUSES = ("expired", "terminated")
 # Timings of keep_serving(), in seconds.
 _PROBE_INTERVAL = 15.0
 _PROBE_TIMEOUT = 10.0
-# Between a failed probe and the one that confirms it; frpc may reconnect by itself.
 _PROBE_GRACE = 5.0
-# Between a restart and the probe that checks it.
 _RESTART_SETTLE = 2.0
 _RESTART_BACKOFF_MAX = 60.0
 
-# The edge in front of the tunnel service blocks default Python user agents.
-_PROBE_USER_AGENT = "Mozilla/5.0 (compatible; prime-tunnel)"
-
 
 def _restart_delay(attempt: int) -> float:
-    """Seconds to wait before restart number `attempt` in a row, from 0."""
+    """Seconds to wait before restart number `attempt` in a row."""
     if attempt <= 0:
         return 0.0
     return min(_RESTART_BACKOFF_MAX, 2.0 ** min(attempt - 1, 32)) * random.uniform(0.5, 1.0)
@@ -339,27 +334,18 @@ class Tunnel:
 
     async def keep_serving(self, health_path: str) -> None:
         """
-        Keep the tunnel serving at its URL until it is stopped or its registration is gone.
+        Restart frpc whenever requests stop reaching the local service through the URL.
 
-        Run this as a task, and cancel the task to stop watching. A running
-        frpc and a connected registration do not prove that requests get
-        through, so this GETs `health_path` through the URL every 15 seconds.
-        If that fails while the same GET straight to the local service gets a
-        2xx, the tunnel is at fault: frpc is restarted under the same URL once
-        a second probe confirms it, with growing delays while it stays down.
-        A local service that is failing too causes no restart.
-
-        The task ends when the tunnel is stopped, and stays ended if this
-        object is started again: that is a new registration, so watch it anew.
+        Run this as a task, and cancel it to stop watching. A local service
+        that is failing too causes no restart. The task ends when the tunnel
+        is stopped, even if it is then started again.
 
         Args:
-            health_path: Path on the local service that answers 2xx, quickly
-                and without side effects
+            health_path: Path on the local service that answers 2xx
 
         Raises:
             TunnelError: If the tunnel is not started
-            TunnelGoneError: If the registration can no longer be used. Only
-                a new tunnel, with a new URL, helps then.
+            TunnelGoneError: If the registration can no longer be used
         """
         if not self._started or self._stopping:
             raise TunnelError("Tunnel is not started")
@@ -374,14 +360,8 @@ class Tunnel:
             return self._started and not self._stopping and self.tunnel_id == tunnel_id
 
         async with (
-            httpx.AsyncClient(
-                timeout=_PROBE_TIMEOUT, headers={"User-Agent": _PROBE_USER_AGENT}
-            ) as public,
-            httpx.AsyncClient(
-                # The local service is never behind a proxy.
-                timeout=_PROBE_TIMEOUT,
-                trust_env=False,
-            ) as local,
+            httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as public,
+            httpx.AsyncClient(timeout=_PROBE_TIMEOUT, trust_env=False) as local,
         ):
 
             async def url_ok() -> bool:
@@ -427,7 +407,7 @@ class Tunnel:
                 except TunnelGoneError:
                     logger.error("Tunnel %s: registration gone; cannot repair", self.url)
                     raise
-                except Exception as e:  # noqa: BLE001 - tried again on the next round
+                except Exception as e:
                     logger.warning("Restart of tunnel %s failed: %s", self.url, e)
                 else:
                     logger.warning("Tunnel %s: frpc restarted", self.url)

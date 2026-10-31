@@ -46,28 +46,17 @@ if status.gone:
 
 ### Keeping a tunnel up
 
-A running client and a connected registration do not prove that requests get
-through. `keep_serving()` checks that they do, and restarts the client under
-the same URL when they stop. Run it as a task, and give it a path on your
-service that answers 2xx quickly:
+`keep_serving()` checks that requests reach your service through the tunnel's
+URL, and restarts the client if they stop. Give it a path on your service that
+returns 2xx, and run it as a task:
 
 ```python
 watch = asyncio.create_task(tunnel.keep_serving("/health"))
 ```
 
-It sends a GET through the URL every 15 seconds. It blames the tunnel only if
-the same request sent straight to your service succeeds, so a service that is
-down does not cause restarts. Cancel the task to stop watching. It ends with
-`TunnelGoneError` when the registration is gone; only a new tunnel, with a new
-URL, helps then:
-
-```python
-try:
-    await watch
-except TunnelGoneError:
-    await tunnel.stop()
-    # start a new Tunnel; it gets a new URL
-```
+If your service itself is down, nothing is restarted. If the tunnel was deleted
+or expired, the task raises `TunnelGoneError`, and you need a new tunnel with a
+new URL. Cancel the task to stop watching.
 
 ## CLI Usage
 

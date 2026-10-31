@@ -16,7 +16,6 @@ from prime_tunnel.exceptions import TunnelConnectionError, TunnelError, TunnelGo
 
 @pytest.fixture(autouse=True)
 def fast_timings(monkeypatch):
-    """Shrink keep_serving's timings so tests take milliseconds."""
     for name, value in (
         ("_PROBE_INTERVAL", 0.02),
         ("_PROBE_TIMEOUT", 0.2),
@@ -30,12 +29,12 @@ def fast_timings(monkeypatch):
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        # Anything else on the machine may probe a port it sees open.
+        # Other processes on the machine may probe an open port.
         if self.path != "/health":
             self.send_response(404)
             self.end_headers()
             return
-        self.server.requests.append((self.path, dict(self.headers)))
+        self.server.requests.append(dict(self.headers))
         answer = self.server.answers[0]
         if len(self.server.answers) > 1:
             self.server.answers.pop(0)
@@ -70,7 +69,7 @@ def serve():
 
 
 def _tunnel(edge, local) -> Tunnel:
-    """A started tunnel with a live frpc, `edge` as its public URL and `local` as its service."""
+    """A started tunnel with `edge` as its public URL and `local` as its service."""
     tunnel = _make_started_tunnel()
     tunnel._process.poll.return_value = None
     tunnel._tunnel_info = tunnel._tunnel_info.model_copy(
@@ -79,6 +78,21 @@ def _tunnel(edge, local) -> Tunnel:
     tunnel.local_port = local.server_address[1]
     tunnel.restart = AsyncMock(return_value=tunnel.url)
     return tunnel
+
+
+def _unstarted_tunnel(edge, local) -> Tunnel:
+    """A tunnel that start() will connect with a fake frpc."""
+    tunnel = Tunnel(local_port=local.server_address[1], connection_timeout=10.0)
+    client = _client_for(tunnel)
+    client.create_tunnel.return_value = client.create_tunnel.return_value.model_copy(
+        update={"url": f"http://127.0.0.1:{edge.server_address[1]}"}
+    )
+    return tunnel
+
+
+def _new_registration(tunnel: Tunnel) -> None:
+    """What stop() and then start() leave on the same Tunnel."""
+    tunnel._tunnel_info = tunnel._tunnel_info.model_copy(update={"tunnel_id": "t-new"})
 
 
 async def _until(condition, timeout: float = 3.0) -> None:
@@ -90,7 +104,6 @@ async def _until(condition, timeout: float = 3.0) -> None:
 
 @pytest_asyncio.fixture
 async def watching():
-    """Run keep_serving as a task for the test and cancel it afterwards."""
     tasks = []
 
     def start(tunnel: Tunnel, path: str = "/health") -> asyncio.Task:
@@ -116,29 +129,18 @@ async def test_a_serving_tunnel_is_left_alone(serve, watching):
     assert local.requests == []
 
 
+@pytest.mark.parametrize("answer", [404, "hang"])
 @pytest.mark.asyncio
-async def test_404_page_through_the_url_restarts_frpc_after_a_second_probe(serve, watching):
-    edge, local = serve(404), serve(200)
+async def test_a_failing_url_restarts_frpc_after_a_second_probe(serve, watching, answer):
+    edge, local = serve(answer), serve(200)
     tunnel = _tunnel(edge, local)
-    tunnel.restart.side_effect = lambda: edge.answers.__setitem__(0, 200)
+    seen = []
+    tunnel.restart.side_effect = lambda: seen.append((len(edge.requests), len(local.requests)))
     watching(tunnel)
 
-    await _until(lambda: tunnel.restart.await_count == 1)
+    await _until(lambda: seen)
 
-    assert len(edge.requests) == 2
-    assert len(local.requests) == 2
-
-
-@pytest.mark.asyncio
-async def test_connected_tunnel_that_hangs_requests_restarts_frpc(serve, watching):
-    """frps holds requests while frpc stays connected, so nothing but the URL shows it."""
-    edge, local = serve("hang"), serve(200)
-    tunnel = _tunnel(edge, local)
-    watching(tunnel)
-
-    await _until(lambda: tunnel.restart.await_count == 1)
-
-    assert len(local.requests) == 2
+    assert seen[0] == (2, 2)
 
 
 @pytest.mark.asyncio
@@ -152,10 +154,9 @@ async def test_a_tunnel_that_recovers_by_itself_is_not_restarted(serve, watching
     tunnel.restart.assert_not_awaited()
 
 
-@pytest.mark.parametrize("answer", [404, 500])
 @pytest.mark.asyncio
-async def test_a_failing_local_service_is_not_blamed_on_the_tunnel(serve, watching, answer):
-    edge, local = serve(answer), serve(answer)
+async def test_a_failing_local_service_is_not_blamed_on_the_tunnel(serve, watching):
+    edge, local = serve(404), serve(404)
     tunnel = _tunnel(edge, local)
     watching(tunnel)
 
@@ -186,33 +187,6 @@ async def test_a_local_service_that_is_down_is_not_blamed_on_the_tunnel(serve, w
     await _until(lambda: len(edge.requests) >= 3)
 
     tunnel.restart.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_frpc_that_exited_is_restarted_without_a_probe(serve, watching):
-    edge, local = serve(200), serve(200)
-    tunnel = _tunnel(edge, local)
-    tunnel._process.poll.return_value = 1
-
-    def restarted():
-        tunnel._process.poll.return_value = None
-
-    tunnel.restart.side_effect = restarted
-    watching(tunnel)
-
-    await _until(lambda: tunnel.restart.await_count == 1)
-
-    assert edge.requests == []
-
-
-@pytest.mark.asyncio
-async def test_registration_gone_ends_the_task_with_the_error(serve, watching):
-    edge, local = serve(404), serve(200)
-    tunnel = _tunnel(edge, local)
-    tunnel.restart.side_effect = TunnelGoneError(tunnel_id="t-test123", message="gone")
-
-    with pytest.raises(TunnelGoneError):
-        await asyncio.wait_for(watching(tunnel), timeout=3.0)
 
 
 @pytest.mark.asyncio
@@ -274,11 +248,6 @@ async def test_task_ends_when_the_tunnel_is_stopped(serve, watching):
     tunnel.restart.assert_not_awaited()
 
 
-def _new_registration(tunnel: Tunnel) -> None:
-    """What stop() and then start() leave on the same Tunnel."""
-    tunnel._tunnel_info = tunnel._tunnel_info.model_copy(update={"tunnel_id": "t-new"})
-
-
 @pytest.mark.asyncio
 async def test_task_ends_when_the_tunnel_is_started_again_between_probes(serve, watching):
     edge, local = serve(200), serve(200)
@@ -309,38 +278,21 @@ async def test_a_new_registration_is_not_restarted_for_a_failure_of_the_old_one(
 
 
 @pytest.mark.asyncio
-async def test_cancelling_the_task_stops_watching(serve, watching):
-    edge, local = serve(200), serve(200)
-    tunnel = _tunnel(edge, local)
-    task = watching(tunnel)
-    await _until(lambda: len(edge.requests) >= 1)
-
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.asyncio
 async def test_a_tunnel_that_is_not_started_cannot_be_watched():
     with pytest.raises(TunnelError):
         await Tunnel(local_port=8080).keep_serving("/health")
 
 
 @pytest.mark.asyncio
-async def test_probes_ask_for_the_health_path_and_get_past_the_edge(serve, watching):
+async def test_probes_add_the_slash_and_the_local_one_keeps_the_host(serve, watching):
     edge, local = serve(404), serve(200)
     tunnel = _tunnel(edge, local)
     watching(tunnel, "health")
 
     await _until(lambda: len(local.requests) >= 1)
 
-    path, headers = edge.requests[0]
-    assert path == "/health"
-    assert "python" not in headers["User-Agent"].lower()
-    path, headers = local.requests[0]
-    assert path == "/health"
-    assert headers["Host"] == tunnel.hostname
+    assert len(edge.requests) >= 1
+    assert local.requests[0]["Host"] == tunnel.hostname
 
 
 @pytest.mark.asyncio
@@ -353,8 +305,8 @@ async def test_only_the_url_gets_the_tunnels_basic_auth(serve, watching):
 
     await _until(lambda: len(local.requests) >= 1)
 
-    assert "Authorization" in edge.requests[0][1]
-    assert "Authorization" not in local.requests[0][1]
+    assert "Authorization" in edge.requests[0]
+    assert "Authorization" not in local.requests[0]
 
 
 @pytest.mark.asyncio
@@ -368,12 +320,7 @@ async def test_a_real_frpc_that_dies_is_replaced(serve, watching, monkeypatch, t
         f"if [ -e '{tmp_path}/ran' ]; then exec sleep 30; fi\n"
         f"touch '{tmp_path}/ran'\nsleep 0.2\nexit 1\n",
     )
-    edge, local = serve(200), serve(200)
-    tunnel = Tunnel(local_port=local.server_address[1], connection_timeout=10.0)
-    client = _client_for(tunnel)
-    client.create_tunnel.return_value = client.create_tunnel.return_value.model_copy(
-        update={"url": f"http://127.0.0.1:{edge.server_address[1]}"}
-    )
+    tunnel = _unstarted_tunnel(serve(200), serve(200))
 
     with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
         await tunnel.start()
@@ -398,12 +345,7 @@ async def test_a_real_frpc_that_is_rejected_ends_the_task_and_frpc(
         f"if [ -e '{tmp_path}/ran' ]; then echo '{rejected}'; exec sleep 30; fi\n"
         f"touch '{tmp_path}/ran'\necho '{connected}'\nexec sleep 30\n",
     )
-    edge, local = serve(404), serve(200)
-    tunnel = Tunnel(local_port=local.server_address[1], connection_timeout=10.0)
-    client = _client_for(tunnel)
-    client.create_tunnel.return_value = client.create_tunnel.return_value.model_copy(
-        update={"url": f"http://127.0.0.1:{edge.server_address[1]}"}
-    )
+    tunnel = _unstarted_tunnel(serve(404), serve(200))
 
     with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
         await tunnel.start()

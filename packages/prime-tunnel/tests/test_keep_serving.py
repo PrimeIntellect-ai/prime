@@ -278,6 +278,23 @@ async def test_a_new_registration_is_not_restarted_for_a_failure_of_the_old_one(
 
 
 @pytest.mark.asyncio
+async def test_task_ends_when_stop_runs_before_its_first_step(
+    serve, watching, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    connected = _frpc_line("I", "[t-test123] start proxy success")
+    frpc = _fake_frpc_binary(tmp_path, f"echo '{connected}'\nexec sleep 30\n")
+    tunnel = _unstarted_tunnel(serve(200), serve(200))
+
+    with patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc):
+        await tunnel.start()
+        task = watching(tunnel)
+        await tunnel.stop()
+
+    await asyncio.wait_for(task, timeout=3.0)
+
+
+@pytest.mark.asyncio
 async def test_a_tunnel_that_is_not_started_cannot_be_watched():
     with pytest.raises(TunnelError):
         await Tunnel(local_port=8080).keep_serving("/health")

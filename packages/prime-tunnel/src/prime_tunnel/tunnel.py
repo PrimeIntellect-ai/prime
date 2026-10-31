@@ -347,7 +347,9 @@ class Tunnel:
             TunnelError: If the tunnel is not started
             TunnelGoneError: If the registration can no longer be used
         """
-        if not self._started or self._stopping:
+        if self._stopping:
+            return
+        if not self._started:
             raise TunnelError("Tunnel is not started")
 
         path = "/" + health_path.lstrip("/")

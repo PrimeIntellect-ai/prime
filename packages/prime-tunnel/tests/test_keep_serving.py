@@ -126,7 +126,7 @@ async def test_404_page_through_the_url_restarts_frpc_after_a_second_probe(serve
     await _until(lambda: tunnel.restart.await_count == 1)
 
     assert len(edge.requests) == 2
-    assert len(local.requests) == 1
+    assert len(local.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -138,7 +138,7 @@ async def test_connected_tunnel_that_hangs_requests_restarts_frpc(serve, watchin
 
     await _until(lambda: tunnel.restart.await_count == 1)
 
-    assert len(local.requests) == 1
+    assert len(local.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -156,6 +156,17 @@ async def test_a_tunnel_that_recovers_by_itself_is_not_restarted(serve, watching
 @pytest.mark.asyncio
 async def test_a_failing_local_service_is_not_blamed_on_the_tunnel(serve, watching, answer):
     edge, local = serve(answer), serve(answer)
+    tunnel = _tunnel(edge, local)
+    watching(tunnel)
+
+    await _until(lambda: len(local.requests) >= 3)
+
+    tunnel.restart.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_local_service_that_fails_during_the_grace_period_is_not_blamed(serve, watching):
+    edge, local = serve(404), serve(200, 500)
     tunnel = _tunnel(edge, local)
     watching(tunnel)
 
@@ -258,6 +269,40 @@ async def test_task_ends_when_the_tunnel_is_stopped(serve, watching):
     await _until(lambda: len(edge.requests) >= 1)
 
     tunnel._started = False
+
+    await asyncio.wait_for(task, timeout=3.0)
+    tunnel.restart.assert_not_awaited()
+
+
+def _new_registration(tunnel: Tunnel) -> None:
+    """What stop() and then start() leave on the same Tunnel."""
+    tunnel._tunnel_info = tunnel._tunnel_info.model_copy(update={"tunnel_id": "t-new"})
+
+
+@pytest.mark.asyncio
+async def test_task_ends_when_the_tunnel_is_started_again_between_probes(serve, watching):
+    edge, local = serve(200), serve(200)
+    tunnel = _tunnel(edge, local)
+    task = watching(tunnel)
+    await _until(lambda: len(edge.requests) >= 1)
+
+    _new_registration(tunnel)
+
+    await asyncio.wait_for(task, timeout=3.0)
+    tunnel.restart.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_new_registration_is_not_restarted_for_a_failure_of_the_old_one(
+    serve, watching, monkeypatch
+):
+    monkeypatch.setattr(tunnel_module, "_PROBE_GRACE", 0.2)
+    edge, local = serve(404), serve(200)
+    tunnel = _tunnel(edge, local)
+    task = watching(tunnel)
+    await _until(lambda: len(local.requests) >= 1)
+
+    _new_registration(tunnel)
 
     await asyncio.wait_for(task, timeout=3.0)
     tunnel.restart.assert_not_awaited()

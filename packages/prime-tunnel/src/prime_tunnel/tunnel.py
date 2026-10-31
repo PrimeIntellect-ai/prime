@@ -349,6 +349,9 @@ class Tunnel:
         a second probe confirms it, with growing delays while it stays down.
         A local service that is failing too causes no restart.
 
+        The task ends when the tunnel is stopped, and stays ended if this
+        object is started again: that is a new registration, so watch it anew.
+
         Args:
             health_path: Path on the local service that answers 2xx, quickly
                 and without side effects
@@ -364,7 +367,11 @@ class Tunnel:
         path = "/" + health_path.lstrip("/")
         auth = (self.http_user, self.http_password) if self.http_password else None
         host = f"[{self.local_addr}]" if ":" in self.local_addr else self.local_addr
+        tunnel_id = self.tunnel_id
         attempts = 0
+
+        def watched() -> bool:
+            return self._started and not self._stopping and self.tunnel_id == tunnel_id
 
         async with (
             httpx.AsyncClient(
@@ -387,7 +394,7 @@ class Tunnel:
                     headers={"Host": self.hostname or host},
                 )
 
-            while self._started and not self._stopping:
+            while watched():
                 if self.is_running:
                     if await url_ok():
                         attempts = 0
@@ -401,6 +408,8 @@ class Tunnel:
                     if await url_ok():
                         attempts = 0
                         continue
+                    if not await local_ok():
+                        continue
 
                 delay = _restart_delay(attempts)
                 attempts += 1
@@ -411,6 +420,8 @@ class Tunnel:
                     attempts,
                 )
                 await asyncio.sleep(delay)
+                if not watched():
+                    return
                 try:
                     await self.restart()
                 except TunnelGoneError:

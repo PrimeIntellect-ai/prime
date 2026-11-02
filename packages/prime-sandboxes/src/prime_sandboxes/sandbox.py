@@ -3080,9 +3080,10 @@ class SandboxClient:
         # The job records its PID (for liveness checks while it has no exit file), acknowledges
         # the launch, then releases the launch output streams. Wrap command in subshell so 'exit'
         # terminates the subshell, not the outer shell, and 'echo $?' always runs.
+        # The newline before ')' lets a caller command ending in a heredoc delimiter terminate.
         sh_command = (
             f"echo $$ > {shlex.quote(pid_file)} || exit 1; echo started; exec > /dev/null 2>&1; "
-            f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
+            f"({command_body}\n) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
             f"echo $? > {exit_file_quoted}"
         )
         quoted_sh_command = shlex.quote(sh_command)
@@ -5010,9 +5011,10 @@ class AsyncSandboxClient:
         # The job records its PID (for liveness checks while it has no exit file), acknowledges
         # the launch, then releases the launch output streams. Wrap command in subshell so 'exit'
         # terminates the subshell, not the outer shell, and 'echo $?' always runs.
+        # The newline before ')' lets a caller command ending in a heredoc delimiter terminate.
         sh_command = (
             f"echo $$ > {shlex.quote(pid_file)} || exit 1; echo started; exec > /dev/null 2>&1; "
-            f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
+            f"({command_body}\n) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
             f"echo $? > {exit_file_quoted}"
         )
         quoted_sh_command = shlex.quote(sh_command)

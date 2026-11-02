@@ -14,7 +14,9 @@ from prime_sandboxes import (
 )
 
 
-def checkpoint_response(state: str = "PENDING") -> dict:
+def checkpoint_response(
+    state: str = "PENDING", merge: str | None = None, merge_error: str | None = None
+) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     return {
         "id": "checkpoint-1",
@@ -24,6 +26,8 @@ def checkpoint_response(state: str = "PENDING") -> dict:
         "state": state,
         "depth": 1,
         "docker_image": "python:3.11-slim",
+        "merge": merge,
+        "merge_error": merge_error,
         "created_at": now,
         "updated_at": now,
     }
@@ -317,6 +321,104 @@ async def test_wait_for_checkpoint_cancellation(monkeypatch):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+def mock_checkpoint_merges(client, monkeypatch, merge_states):
+    """Return DURABLE checkpoints whose merge status follows merge_states."""
+    calls = []
+    responses = iter(merge_states)
+
+    def get(checkpoint_id):
+        calls.append(checkpoint_id)
+        merge, merge_error = next(responses)
+        return SandboxCheckpoint.model_validate(
+            checkpoint_response("DURABLE", merge=merge, merge_error=merge_error)
+        )
+
+    async def async_get(checkpoint_id):
+        return get(checkpoint_id)
+
+    monkeypatch.setattr(
+        client._checkpoint_batcher,
+        "get",
+        async_get if isinstance(client, AsyncSandboxClient) else get,
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_polls_until_merge_not_pending(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = mock_checkpoint_merges(
+        checkpoint_client, monkeypatch, [("pending", None), ("merged", None)]
+    )
+
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.state == "DURABLE"
+    assert checkpoint.merge == "merged"
+    assert calls == ["checkpoint-1", "checkpoint-1"]
+    assert checkpoint_clock == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_merge_failed_raises(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = mock_checkpoint_merges(checkpoint_client, monkeypatch, [("failed", "quota exceeded")])
+
+    with pytest.raises(RuntimeError, match="checkpoint-1.*volume merge failed.*quota exceeded"):
+        await wait_for_checkpoint(checkpoint_client)
+    assert calls == ["checkpoint-1"]
+    assert checkpoint_clock == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_merge_pending_timeout(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = mock_checkpoint_merges(checkpoint_client, monkeypatch, [("pending", None)] * 2)
+
+    with pytest.raises(TimeoutError, match="checkpoint-1.*volume merge.*2s"):
+        await wait_for_checkpoint(checkpoint_client, timeout_seconds=2)
+    assert calls == ["checkpoint-1", "checkpoint-1"]
+    assert checkpoint_clock == [1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_older_server_without_merge_fields(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    # Older servers omit merge and merge_error entirely; the wait returns at
+    # DURABLE exactly as before.
+    calls = []
+
+    def get(checkpoint_id):
+        calls.append(checkpoint_id)
+        row = {
+            key: value
+            for key, value in checkpoint_response("DURABLE").items()
+            if key not in ("merge", "merge_error")
+        }
+        return SandboxCheckpoint.model_validate(row)
+
+    async def async_get(checkpoint_id):
+        return get(checkpoint_id)
+
+    monkeypatch.setattr(
+        checkpoint_client._checkpoint_batcher,
+        "get",
+        async_get if isinstance(checkpoint_client, AsyncSandboxClient) else get,
+    )
+
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.state == "DURABLE"
+    assert checkpoint.merge is None
+    assert checkpoint.merge_error is None
+    assert calls == ["checkpoint-1"]
+    assert checkpoint_clock == []
 
 
 async def concurrent_checkpoint_waits(client, checkpoint_ids):

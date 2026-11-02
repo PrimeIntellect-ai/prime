@@ -126,6 +126,43 @@ def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch)
     assert "HTTP 404" in strip_ansi(failing.output)
 
 
+def test_checkpoint_get_by_id_shows_volume_merge_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+
+    def get_checkpoint(self: Any, checkpoint_id: str) -> SandboxCheckpoint:
+        merge, merge_error = {
+            "cp-merged": ("merged", None),
+            "cp-pending": ("pending", None),
+            "cp-failed": ("failed", "quota exceeded"),
+        }[checkpoint_id]
+        return SandboxCheckpoint(
+            id=checkpoint_id,
+            sandbox_id="sandbox-1",
+            state="DURABLE",
+            depth=1,
+            docker_image="python:3.11-slim",
+            occupied_bytes=3 * 1024**2,
+            merge=merge,
+            merge_error=merge_error,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint
+    )
+
+    expected = {
+        "cp-merged": "Merge: merged",
+        "cp-pending": "Merge: pending",
+        "cp-failed": "Merge: failed Merge error: quota exceeded",
+    }
+    for checkpoint_id, line in expected.items():
+        result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])
+        assert result.exit_code == 0, result.output
+        assert line in " ".join(strip_ansi(result.output).split())
+
+
 def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
     captured: dict[str, Any] = {}

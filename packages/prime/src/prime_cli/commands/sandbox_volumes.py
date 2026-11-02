@@ -180,7 +180,8 @@ def _print_retained_importer(
         # (rootfs-only filter), so discovery runs through the volume head.
         console.print(
             "If a checkpoint was created, its id is not known to this run; "
-            "once it reaches DURABLE it becomes the volume's head, shown by "
+            "once it reaches DURABLE (and its volume merge, on servers that "
+            "run one, finishes) the volume's head moves, shown by "
             f"'prime sandbox volumes get {shlex.quote(name)}{scope}'. That head may be "
             "older or from another publisher and does not by itself "
             "confirm this publish. Check any checkpoint id with "
@@ -188,7 +189,8 @@ def _print_retained_importer(
         )
     console.print(
         "The imported data is private to the importer until a publish "
-        "reaches DURABLE."
+        "reaches DURABLE and, on servers that merge volume publishes, "
+        "its merge finishes."
     )
     # The importer is not kept indefinitely: the idle monitor reaps it after
     # _IMPORTER_IDLE_TIMEOUT_MINUTES without transfer activity, and the
@@ -219,9 +221,7 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
     sandbox_client = SandboxClient(APIClient())
     # The retention hint needs the scope the API resolves team_id to; read
     # it from the client's own config, the same source the requests use.
-    effective_team_id = (
-        team_id if team_id is not None else sandbox_client.client.config.team_id
-    )
+    effective_team_id = team_id if team_id is not None else sandbox_client.client.config.team_id
 
     try:
         sandbox_client.volumes.create(name, team_id=team_id)
@@ -289,10 +289,7 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
         except TimeoutError as error:
             # The wait budget expiring is not a publish failure; the upload
             # may still complete after the CLI exits.
-            console.print(
-                f"[red]Error:[/red] {escape(str(error))} The publish may still "
-                "complete."
-            )
+            console.print(f"[red]Error:[/red] {escape(str(error))} The publish may still complete.")
             raise typer.Exit(1)
         except RuntimeError as error:
             console.print(f"[red]Error:[/red] {escape(str(error))} The publish failed.")
@@ -305,8 +302,7 @@ def _import_volume(name: str, team_id: Optional[str], from_path: str) -> None:
     except KeyboardInterrupt:
         if publish_requested:
             console.print(
-                "\n[yellow]Interrupted while publishing:[/yellow] the publish "
-                "state is unknown."
+                "\n[yellow]Interrupted while publishing:[/yellow] the publish state is unknown."
             )
         else:
             console.print(
@@ -506,18 +502,26 @@ def publish(
     sandbox_id: str = typer.Option(
         ..., "--sandbox", help="ID of the sandbox that publishes the volume"
     ),
-    force: bool = typer.Option(
-        False, "--force", help="Publish even if the volume's head moved since attach"
-    ),
     no_wait: bool = typer.Option(
         False, "--no-wait", help="Do not wait for the publish to become durable"
     ),
+    wait_timeout: float = typer.Option(
+        300, "--wait-timeout", help="Seconds to wait for the publish to finish"
+    ),
 ) -> None:
-    """Publish a sandbox's private volume writes as a durable checkpoint."""
+    """Publish a sandbox's private volume writes as a durable checkpoint.
+
+    --no-wait skips waiting; --wait-timeout only sets the budget of the wait.
+    """
+    client = _sandbox_client()
+    checkpoint_id: str | None = None
     try:
-        checkpoint = _sandbox_client().volumes.publish(
-            sandbox_id, name, force=force, wait=not no_wait
-        )
+        checkpoint = client.volumes.publish(sandbox_id, name, wait=False)
+        checkpoint_id = checkpoint.id
+        if no_wait:
+            _print_publish_result(checkpoint, name)
+            return
+        checkpoint = client.wait_for_checkpoint(checkpoint.id, timeout_seconds=wait_timeout)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -526,28 +530,45 @@ def publish(
         raise typer.Exit(1)
     except APIError as e:
         # 400 read-only, 404 not attached, 409 stale head or another
-        # sandbox's publish in flight (also with --force).
+        # sandbox's publish in flight.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except TimeoutError as e:
-        # The SDK wait budget expired; the publish upload may still finish.
+        # Not a failure verdict: the checkpoint could finish or fail between
+        # the last poll and this message, so say what the wait observed, not
+        # what the checkpoint is now.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
-        console.print(
-            "The publish may still complete. Check it with "
-            "'prime sandbox checkpoint get <checkpoint-id>' (the id is in "
-            "the message above)."
-        )
+        console.print("Stopped waiting; the publication may still complete.")
+        if checkpoint_id is not None:
+            console.print(
+                f"Check the status with 'prime sandbox checkpoint get {escape(checkpoint_id)}'."
+            )
         raise typer.Exit(1)
     except RuntimeError as e:
+        # A failed publish or merge; the error text carries the reason.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        if checkpoint_id is not None:
+            console.print(
+                f"Check the status with 'prime sandbox checkpoint get {escape(checkpoint_id)}'."
+            )
+        raise typer.Exit(1)
+    except ValueError as e:
+        # Invalid --wait-timeout, same handling as `sandbox fork`.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
         raise typer.Exit(1)
+    _print_publish_result(checkpoint, name)
 
+
+def _print_publish_result(checkpoint, name: str) -> None:
     console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
     console.print(f"State: {escape(checkpoint.state)}")
+    # No merge-pending case here: after a completed wait the merge (if any)
+    # finished, and --no-wait prints the 202 row, which is PENDING until the
+    # upload completes.
     if checkpoint.state == "DURABLE":
         console.print(
             f"[green]✓[/green] Published volume {escape(name)}; new sandboxes "

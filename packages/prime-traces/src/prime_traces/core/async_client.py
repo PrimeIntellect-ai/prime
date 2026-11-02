@@ -172,7 +172,7 @@ class AsyncTracesAPIClient(BaseTracesAPIClient):
     async def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[bytes]:
-        """Stream a response body in chunks (a raw trace can be 64 MiB)."""
+        """Stream a response body in chunks (a raw trace can be 1 GiB)."""
         self._check_auth()
         for attempt in range(IDEMPOTENT_RETRY_ATTEMPTS):
             last = attempt == IDEMPOTENT_RETRY_ATTEMPTS - 1

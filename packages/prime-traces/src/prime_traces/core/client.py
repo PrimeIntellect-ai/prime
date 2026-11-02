@@ -233,7 +233,7 @@ def raise_for_response(response: httpx.Response) -> None:
     raise APIError(f"HTTP {status}: {message}", status_code=status, code=code)
 
 
-#: Generous read/write budget: one request body can be 256 MiB.
+#: Generous read/write budget: one request body can be 1100 MiB.
 DEFAULT_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
 
@@ -473,7 +473,7 @@ class TracesAPIClient(BaseTracesAPIClient):
     def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None
     ) -> Iterator[bytes]:
-        """Stream a response body in chunks (a raw trace can be 64 MiB).
+        """Stream a response body in chunks (a raw trace can be 1 GiB).
 
         Transient failures are retried only until the first body byte has been
         yielded: a mid-stream retry would silently restart the body under the

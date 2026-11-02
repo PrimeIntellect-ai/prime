@@ -250,44 +250,44 @@ def test_volume_delete_and_in_use_error(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert "attached" in strip_ansi(failing.output)
 
 
-# --- D2: prime sandbox volumes resize ---
+# --- D2: prime sandbox volumes grow ---
 
 
-def test_volume_resize_grows_and_prints_result(
+def test_volume_grow_grows_and_prints_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
 
-    def fake_resize(self: Any, name: str, size_gb: int, *, team_id: Any = None) -> Volume:
+    def fake_grow(self: Any, name: str, size_gb: int, *, team_id: Any = None) -> Volume:
         captured["args"] = (name, size_gb, team_id)
         return Volume(id="cvol-1", name=name, size_gb=512, created_at=datetime.now(timezone.utc))
 
-    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.resize", fake_resize)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.grow", fake_grow)
 
     result = runner.invoke(
-        app, ["sandbox", "volumes", "resize", "data", "--size-gb", "512", "--team-id", "team-1"]
+        app, ["sandbox", "volumes", "grow", "data", "--size-gb", "512", "--team-id", "team-1"]
     )
 
     assert result.exit_code == 0, result.output
     output = strip_ansi(result.output)
     assert captured["args"] == ("data", 512, "team-1")
-    assert "Resized volume data to 512 GiB" in output
+    assert "Grew volume data to 512 GiB" in output
     assert "Capacity: 512 GiB" in output
 
 
-def test_volume_resize_surfaces_grow_only_rejection(
+def test_volume_grow_surfaces_grow_only_rejection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     _configure_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "prime_sandboxes.volumes.Volumes.resize",
+        "prime_sandboxes.volumes.Volumes.grow",
         lambda self, name, size_gb, team_id=None: (_ for _ in ()).throw(
             APIError("HTTP 400: size_gb must be greater than the current size 100")
         ),
     )
 
-    result = runner.invoke(app, ["sandbox", "volumes", "resize", "data", "--size-gb", "100"])
+    result = runner.invoke(app, ["sandbox", "volumes", "grow", "data", "--size-gb", "100"])
 
     assert result.exit_code == 1, result.output
     output = strip_ansi(result.output)
@@ -295,10 +295,10 @@ def test_volume_resize_surfaces_grow_only_rejection(
     assert "must be greater than the current size" in output
 
 
-def test_volume_resize_requires_size_option(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+def test_volume_grow_requires_size_option(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
 
-    result = runner.invoke(app, ["sandbox", "volumes", "resize", "data"])
+    result = runner.invoke(app, ["sandbox", "volumes", "grow", "data"])
 
     assert result.exit_code == 2, result.output
     assert "--size-gb" in strip_ansi(result.output)

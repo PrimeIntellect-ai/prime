@@ -232,11 +232,11 @@ def test_volume_client_delete_personal_scope_omits_team_id():
     assert captured["params"] == {}
 
 
-def test_volume_client_resize_sends_patch_with_size_gb():
+def test_volume_client_grow_sends_patch_with_size_gb():
     captured: dict[str, Any] = {}
     volumes = _volumes(_volume_response(size_gb=512), captured, team_id="team-configured")
 
-    volume = volumes.resize("dataset", 512, team_id="team-explicit")
+    volume = volumes.grow("dataset", 512, team_id="team-explicit")
 
     assert captured == {
         "method": "PATCH",
@@ -248,20 +248,20 @@ def test_volume_client_resize_sends_patch_with_size_gb():
     assert volume.size_gb == 512
 
 
-def test_volume_client_resize_uses_configured_team_by_default():
+def test_volume_client_grow_uses_configured_team_by_default():
     captured: dict[str, Any] = {}
     volumes = _volumes(_volume_response(size_gb=512), captured, team_id="team-configured")
 
-    volumes.resize("dataset", 512)
+    volumes.grow("dataset", 512)
 
     assert captured["params"] == {"team_id": "team-configured"}
 
 
-def test_volume_client_resize_quotes_names_outside_the_valid_character_set():
+def test_volume_client_grow_quotes_names_outside_the_valid_character_set():
     captured: dict[str, Any] = {}
     volumes = _volumes(_volume_response(), captured)
 
-    volumes.resize("a/b", 512)
+    volumes.grow("a/b", 512)
 
     assert captured["path"] == "/sandbox/volumes/a%2Fb"
 
@@ -314,9 +314,9 @@ def test_async_volume_client_crud_wire_contract(monkeypatch: pytest.MonkeyPatch)
         }
 
         response = _volume_response(size_gb=512)
-        resized = await client.volumes.resize("dataset", 512, team_id="team-explicit")
-        assert isinstance(resized, Volume)
-        assert resized.size_gb == 512
+        grown = await client.volumes.grow("dataset", 512, team_id="team-explicit")
+        assert isinstance(grown, Volume)
+        assert grown.size_gb == 512
         assert captured["method"] == "PATCH"
         assert captured["path"] == "/sandbox/volumes/dataset"
         assert captured["json"] == {"size_gb": 512}

@@ -513,7 +513,7 @@ def delete(
 
 
 @app.command()
-def resize(
+def grow(
     name: str = typer.Argument(..., help="Volume name"),
     size_gb: int = typer.Option(
         ..., "--size-gb", help="New capacity in GiB; must be larger than the current size"
@@ -524,7 +524,7 @@ def resize(
 ) -> None:
     """Grow a volume's capacity. Applies to sandboxes created after the change."""
     try:
-        volume = _sandbox_client().volumes.resize(name, size_gb, team_id=team_id)
+        volume = _sandbox_client().volumes.grow(name, size_gb, team_id=team_id)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -538,7 +538,7 @@ def resize(
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
         raise typer.Exit(1)
-    console.print(f"[green]✓[/green] Resized volume {escape(name)} to {size_gb} GiB")
+    console.print(f"[green]✓[/green] Grew volume {escape(name)} to {size_gb} GiB")
     _print_volume(volume)
 
 

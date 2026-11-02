@@ -184,7 +184,7 @@ volume = volumes.create("dataset", team_id="team-id")
 volume = volumes.create("dataset", size_gb=512)  # 100 GiB when omitted
 page = volumes.list(team_id="team-id", page=1, per_page=50)
 volume = volumes.get("dataset", team_id="team-id")
-volume = volumes.resize("dataset", 512)  # grow-only
+volume = volumes.grow("dataset", 512)
 volumes.delete("dataset", team_id="team-id")  # 204, returns None
 ```
 
@@ -193,7 +193,7 @@ scope instead. `volumes` is a namespace on the sandbox client: it reaches
 the platform through the client's own transport and owns no transport or
 lifecycle of its own. `size_gb` is the volume's capacity in whole GiB;
 `Volume.size_gb` is null when the volume uses the default base-image size.
-`resize` grows only: the server rejects a size at or below the current
+`grow` is grow-only: the server rejects a size at or below the current
 effective size, and the new size applies to sandboxes created after the
 change — running attachments keep their size.
 

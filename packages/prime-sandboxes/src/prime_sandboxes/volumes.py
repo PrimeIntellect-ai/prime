@@ -101,7 +101,7 @@ class Volumes:
             params=_name_params(self._parent.client, team_id),
         )
 
-    def resize(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
+    def grow(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
         """Grow a volume's capacity to ``size_gb`` whole GiB.
 
         Grow-only: the server rejects a size at or below the volume's
@@ -205,7 +205,7 @@ class AsyncVolumes:
             params=_name_params(self._parent.client, team_id),
         )
 
-    async def resize(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
+    async def grow(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
         """Grow a volume's capacity to ``size_gb`` whole GiB.
 
         Grow-only: the server rejects a size at or below the volume's

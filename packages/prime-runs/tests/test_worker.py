@@ -143,6 +143,43 @@ def test_one_write_takes_about_one_request_of_what_is_queued():
     worker.close()
 
 
+def test_a_small_record_first_does_not_let_large_ones_through_uncapped():
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_write_bytes=2_500)
+    assert worker.submit([_record(0)])
+    assert sink.entered.wait(5.0)
+    assert worker.submit([_record(1)])  # small, and first in the next window
+    for index in range(2, 7):
+        assert worker.submit([_record(index, size=1_000)])
+
+    sink.released.set()
+    drain(worker)
+
+    assert [[record["id"] for record in batch] for batch in sink.batches] == [
+        [0],
+        [1, 2, 3],
+        [4, 5],
+        [6],
+    ]
+    assert worker._queued_records == 0
+    worker.close()
+
+
+def test_a_record_over_the_write_limit_goes_out_alone():
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_write_bytes=250)
+    assert worker.submit([_record(0)])
+    assert sink.entered.wait(5.0)
+    assert worker.submit([_record(1, size=1_000)])
+    assert worker.submit([_record(2)])
+
+    sink.released.set()
+    drain(worker)
+
+    assert [[record["id"] for record in batch] for batch in sink.batches] == [[0], [1], [2]]
+    worker.close()
+
+
 def test_an_oversized_batch_goes_out_in_order_across_writes_ahead_of_later_records():
     sink = BlockingSink()
     worker = UploadWorker([sink], max_write_bytes=250)

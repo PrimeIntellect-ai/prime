@@ -31,8 +31,8 @@ DEFAULT_MAX_QUEUED_RECORDS = 65_536
 #: Estimated encoded bytes, a proxy for the memory the queued records hold.
 DEFAULT_MAX_QUEUED_BYTES = 4 * 1024**3
 DEFAULT_MAX_WRITE_BYTES = DEFAULT_TARGET_BATCH_BYTES
-#: Share of the newest sample in the running estimate of a record's size.
-RECORD_BYTES_SMOOTHING = 0.25
+#: Share of the newest record in the running estimate of a record's size.
+RECORD_BYTES_SMOOTHING = 0.1
 #: Seconds between warnings about dropped records; a burst can drop hundreds.
 DROP_WARNING_INTERVAL = 10.0
 #: Consecutive transient failures before a sink is retired.
@@ -83,8 +83,8 @@ class UploadWorker:
         #: Records submitted and not yet taken into a write.
         self._queued_records = 0
         self._queued_lock = threading.Lock()
-        #: Running estimate of one record's encoded size, sampled by the uploader
-        #: so that submitting never pays for encoding. ``None`` until the first sample.
+        #: Running estimate of one record's encoded size, measured by the uploader
+        #: so that submitting never pays for encoding. ``None`` until it has one.
         self._record_bytes: Optional[float] = None
         self._last_drop_warning: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
@@ -137,21 +137,25 @@ class UploadWorker:
                 logger.debug("Uploader iteration failed: %s", exc)
 
     def _coalesce(self, first: Sequence[Any]) -> "tuple[list, Any]":
-        """Merge what is already queued behind ``first`` into one batch of about
-        ``max_write_bytes``, so the request rate tracks upload latency rather
-        than rollout throughput, and one slow or failed write stays small.
+        """Merge what is already queued behind ``first`` into one batch of at most
+        ``max_write_bytes`` (or one record, if it is bigger), so the request rate
+        tracks upload latency rather than rollout throughput, and one slow or
+        failed write stays small.
         Stops at a control item (a flush barrier must not be reordered past the
         records before it) and at a batch of the other record kind (the traces
         sink infers the line format from the first record). Records past the
         limit are processed next, ahead of anything queued after them."""
-        batch = list(first)
-        kind = is_episode(batch[0]) if batch else None
-        if batch:
-            self._sample_record_bytes(batch[0])
-        limit = self._write_limit()
+        batch: list = []
+        batch_bytes = 0
+        item = first
+        kind = is_episode(item[0]) if item else None
         while True:
-            if len(batch) >= limit:
-                return batch[:limit], (batch[limit:] or _NOTHING)
+            for position, record in enumerate(item):
+                size = self._measure(record)
+                if batch and batch_bytes + size > self.max_write_bytes:
+                    return batch, list(item[position:])
+                batch.append(record)
+                batch_bytes += size
             try:
                 item = self._queue.get_nowait()
             except queue.Empty:
@@ -160,24 +164,20 @@ class UploadWorker:
                 return batch, item
             if item and (kind is None or is_episode(item[0]) != kind):
                 return batch, item
-            batch.extend(item)
 
-    def _sample_record_bytes(self, record: Any) -> None:
+    def _measure(self, record: Any) -> int:
+        """The record's encoded size, folded into the queue's running estimate. A
+        record that cannot be encoded counts as nothing: the sink decides what it means."""
         try:
             size = len(encode_json(to_mapping(record)))
-        except Exception as exc:  # noqa: BLE001 - the sink decides what a bad record means
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Could not size a record: %s", exc)
-            return
+            return 0
         if self._record_bytes is None:
             self._record_bytes = float(size)
         else:
             self._record_bytes += RECORD_BYTES_SMOOTHING * (size - self._record_bytes)
-
-    def _write_limit(self) -> int:
-        """Records per write. Without a size estimate, as many as may be queued."""
-        if not self._record_bytes:
-            return max(1, self.max_queued_records)
-        return max(1, int(self.max_write_bytes / self._record_bytes))
+        return size
 
     def _dispatch(self, records: Sequence[Any]) -> None:
         for sink in self.sinks:

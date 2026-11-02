@@ -822,6 +822,29 @@ def test_sandbox_create_accepts_region(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["request"].region == "eu-west"
 
 
+def test_sandbox_create_summary_shows_env_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_TEAM_ID", "team-from-env")
+
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-team-env")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(app, ["sandbox", "create", "python:3.11-slim", "--yes"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Team: team-from-env" in output
+    assert "Team: Personal" not in output
+    # The flag is still absent from the request; the SDK resolves it.
+    assert captured["request"].team_id is None
+
+
 def test_sandbox_create_requires_gpu_type(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")

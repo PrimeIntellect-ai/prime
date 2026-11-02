@@ -1231,7 +1231,10 @@ def create(
         # accepted it; otherwise we'd display a value the backend never sees.
         if idle_timeout_minutes is not None and "idle_timeout_minutes" in request_kwargs:
             console.print(f"Idle Timeout: {idle_timeout_minutes} minutes")
-        console.print(f"Team: {team_id or 'Personal'}")
+        # SandboxClient.create auto-populates the request's team from
+        # config (env > file) when the flag is absent; mirror it here.
+        resolved_team_id = team_id or base_client.config.team_id
+        console.print(f"Team: {resolved_team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")
         if volume_mounts:
             mounts_summary = ", ".join(

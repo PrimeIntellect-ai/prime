@@ -132,6 +132,49 @@ def test_every_member_trace_is_rekeyed_too():
     assert theirs == {"id": "other-run", "type": "eval", "name": "other"}
 
 
+class SelfEncodingEpisode:
+    """An episode that encodes itself, with its run recorded on it and each trace, like
+    verifiers ``Episode``."""
+
+    def __init__(self, run_id: str, traces: int = 1, trace_runs: bool = True) -> None:
+        self.run = SimpleNamespace(id=run_id, type="eval")
+        trace_run = self.run if trace_runs else None
+        self.traces = [SimpleNamespace(run=trace_run) for _ in range(traces)]
+
+    def to_record(self):
+        return {"id": "ep-1", "run": {"id": self.run.id, "type": "eval"}, "traces": [{"id": "a"}]}
+
+    def to_json(self) -> bytes:
+        return b'{"id":"ep-1"}'
+
+
+def test_an_episode_that_names_this_run_goes_out_as_its_own_bytes():
+    client = FakeTracesClient()
+    sink = make_sink(client)
+
+    sink.write([SelfEncodingEpisode("run-1"), SelfEncodingEpisode("run-1", traces=0)])
+
+    sent, kwargs = client.calls[0]
+    assert sent == [b'{"id":"ep-1"}', b'{"id":"ep-1"}']
+    assert kwargs["line_format"] is LineFormat.EPISODE
+    # Empty episodes produce no samples.
+    assert sink.episodes_written == 1
+
+
+@pytest.mark.parametrize(
+    "episode",
+    [SelfEncodingEpisode("local-run"), SelfEncodingEpisode("run-1", trace_runs=False)],
+    ids=["another-run", "traces-without-a-run"],
+)
+def test_an_episode_that_does_not_name_this_run_on_every_trace_is_stamped(episode):
+    client = FakeTracesClient()
+    make_sink(client).write([episode])
+
+    sent = client.calls[0][0][0]
+    assert sent["run"] == {"id": "run-1", "type": "eval"}
+    assert sent["traces"][0]["run"] == {"id": "run-1", "type": "eval"}
+
+
 def test_an_account_without_prime_traces_retires_the_sink_without_a_failure(caplog):
     client = FakeTracesClient(
         raises=ForbiddenError("not enabled", status_code=403, code="service_not_enabled")

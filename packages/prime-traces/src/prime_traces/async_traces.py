@@ -206,9 +206,10 @@ class AsyncTracesClient:
     ) -> List[UploadReceipt]:
         """Upload trace or episode records directly from memory.
 
-        Each input may be a JSON-compatible mapping or an object implementing
-        ``to_record()``, including verifiers ``Trace`` / ``Episode`` and
-        prime-rl ``Rollout`` objects. The records may arrive from an async
+        Each input may be a JSON-compatible mapping, an object implementing
+        ``to_record()`` (including verifiers ``Trace`` / ``Episode`` and
+        prime-rl ``Rollout`` objects), or a record already encoded as one JSON
+        line (``bytes``). The records may arrive from an async
         producer: an async generator of rollouts uploads incrementally, in
         bounded batches, without ever being collected into a list.
         """

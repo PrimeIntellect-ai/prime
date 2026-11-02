@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_RECEIPT_HISTORY_SIZE = 100
 
 
+def names_run(record: Any, run_id: str, run_type: str) -> bool:
+    """Whether ``record`` already names this run, itself and every member trace, so its
+    own ``to_json()`` (verifiers ``Episode``/``Trace``) can be uploaded as is. A
+    producer's encoder can work in short steps, while encoding ``to_record()`` here holds
+    the GIL for the whole record."""
+    if not callable(getattr(record, "to_json", None)):
+        return False
+    return all(
+        getattr(run, "id", None) == run_id and getattr(run, "type", None) == run_type
+        for run in [getattr(record, "run", None)]
+        + [getattr(trace, "run", None) for trace in getattr(record, "traces", None) or []]
+    )
+
+
 class TracesSink(Sink):
     name = "traces"
 
@@ -98,11 +112,17 @@ class TracesSink(Sink):
         has_traces: list = []
 
         def prepared() -> Any:
+            run_type = self._context.get("run_type", RUN_KIND)
             for record in records:
-                mapping = self._prepare(record)
+                if self._run_id is not None and names_run(record, self._run_id, run_type):
+                    prepared_record = record.to_json()
+                    traces = getattr(record, "traces", None)
+                else:
+                    prepared_record = self._prepare(record)
+                    traces = line_format is LineFormat.EPISODE and prepared_record.get("traces")
                 if line_format is LineFormat.EPISODE:
-                    has_traces.append(bool(mapping.get("traces")))
-                yield mapping
+                    has_traces.append(bool(traces))
+                yield prepared_record
 
         def committed(batch: Any, receipt: Any) -> None:
             if line_format is LineFormat.EPISODE:

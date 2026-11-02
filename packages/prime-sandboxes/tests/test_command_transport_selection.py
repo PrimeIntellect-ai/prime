@@ -164,7 +164,7 @@ async def test_async_open_process_streams_vm_command_session(monkeypatch):
         assert stderr == [b"warn\n"]
         assert [name for name, _ in calls] == ["Start", "SendInput", "SendSignal"]
         assert calls[0][1].stdin is True
-        assert start_kwargs["timeout_ms"] == 24 * 60 * 60 * 1000
+        assert start_kwargs["timeout_ms"] == 9_999_999_999
         assert client_init_kwargs["codec"] is GOOGLE_PROTOBUF_BINARY_CODEC
         assert client_init_kwargs["send_compression"] is None
         assert calls[0][1].command.user == "ubuntu"

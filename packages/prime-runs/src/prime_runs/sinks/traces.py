@@ -5,8 +5,6 @@ than duplicates) and episode-aware. The join key is ``run.id`` inside the trace
 document; ``context`` is upload-scoped provenance only.
 """
 
-import functools
-import inspect
 import logging
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -22,19 +20,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_RECEIPT_HISTORY_SIZE = 100
 
 
-@functools.cache
-def encodes_with_run(record_type: type) -> bool:
-    """Whether records of this type encode themselves as one JSON line with a given run
-    stamped on, through ``to_json(run=...)`` like verifiers ``Episode``. A producer's
-    encoder can work in short steps; encoding ``to_record()`` here holds the GIL for the
-    whole record."""
-    to_json = getattr(record_type, "to_json", None)
-    if not callable(to_json):
+def names_run(record: Any, run_id: str, run_type: str) -> bool:
+    """Whether ``record`` already names this run, itself and every member trace, so its
+    own ``to_json()`` (verifiers ``Episode``/``Trace``) can be uploaded as is. A
+    producer's encoder can work in short steps, while encoding ``to_record()`` here holds
+    the GIL for the whole record."""
+    if not callable(getattr(record, "to_json", None)):
         return False
-    try:
-        return "run" in inspect.signature(to_json).parameters
-    except (TypeError, ValueError):
-        return False
+    return all(
+        getattr(run, "id", None) == run_id and getattr(run, "type", None) == run_type
+        for run in [getattr(record, "run", None)]
+        + [getattr(trace, "run", None) for trace in getattr(record, "traces", None) or []]
+    )
 
 
 class TracesSink(Sink):
@@ -115,10 +112,10 @@ class TracesSink(Sink):
         has_traces: list = []
 
         def prepared() -> Any:
+            run_type = self._context.get("run_type", RUN_KIND)
             for record in records:
-                if self._run_id is not None and encodes_with_run(type(record)):
-                    run = {"id": self._run_id, "type": self._context.get("run_type", RUN_KIND)}
-                    prepared_record = record.to_json(run=run)
+                if self._run_id is not None and names_run(record, self._run_id, run_type):
+                    prepared_record = record.to_json()
                     traces = getattr(record, "traces", None)
                 else:
                     prepared_record = self._prepare(record)

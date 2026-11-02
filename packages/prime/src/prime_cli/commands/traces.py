@@ -794,7 +794,7 @@ def get_trace(
                 else:
                     console.print(f"[green]Wrote {written} bytes to {escape(str(dest))}[/green]")
                 return
-            # Raw documents can be tens of MiB. Preserve their exact bytes and
+            # Raw documents can reach 1 GiB. Preserve their exact bytes and
             # do not append a newline so redirected output is a faithful copy.
             stdout = click.get_binary_stream("stdout")
             stdout.write(client.get_raw(trace_id))

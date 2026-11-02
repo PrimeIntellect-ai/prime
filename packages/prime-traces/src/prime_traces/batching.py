@@ -38,20 +38,18 @@ from .exceptions import TraceTooLargeError
 MIB = 1024 * 1024
 
 #: Server-side cap on uncompressed bytes per request (-> upload_too_large).
-MAX_BATCH_BYTES = 256 * MIB
+MAX_BATCH_BYTES = 1100 * MIB
 #: Server-side cap on one JSONL line (-> trace_too_large).
-MAX_LINE_BYTES = 64 * MIB
+MAX_LINE_BYTES = 1024 * MIB
 #: Server-side cap on staged rows per request (-> too_many_traces_in_upload).
 #: Exact for bare-trace uploads, where one line is one row. Episode lines
 #: stage one episode row plus each nested trace, which opaque line bytes
 #: cannot count — there the byte caps are the practical bound.
 MAX_BATCH_LINES = 1_000_000
-#: Default chunk-close threshold. Held under Cloud Run's 32 MiB request cap so
-#: a batch fits the deployed transport even with compression disabled; the
-#: 256 MiB service contract above is not reachable through that cap today. A
-#: batch may exceed this only when a single line does — such a batch (or any
-#: caller-raised target) still risks transport-level rejection before the
-#: service sees it.
+#: Default chunk-close threshold. Far below the request cap so that a failed
+#: request costs little to resend and a batch stays cheap to hold in memory. A
+#: batch may exceed this only when a single line does, and such a batch is held
+#: whole in memory for hashing and compression.
 DEFAULT_TARGET_BATCH_BYTES = 30 * MIB
 
 

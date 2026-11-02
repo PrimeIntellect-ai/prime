@@ -93,18 +93,22 @@ class TracesSink(Sink):
         self._ensure_client()
         # The line format is inferred from the first record; batches are homogeneous.
         line_format = LineFormat.EPISODE if is_episode(records[0]) else LineFormat.TRACE
-        payload = [self._prepare(record) for record in records]
-        offset = 0
+        # Prepared one at a time as the client encodes them, so a backlog is never
+        # held as wire mappings all at once.
+        has_traces: list = []
+
+        def prepared() -> Any:
+            for record in records:
+                mapping = self._prepare(record)
+                if line_format is LineFormat.EPISODE:
+                    has_traces.append(bool(mapping.get("traces")))
+                yield mapping
 
         def committed(batch: Any, receipt: Any) -> None:
-            nonlocal offset
             if line_format is LineFormat.EPISODE:
                 # Match hosted eval confirmation: empty episodes produce no samples.
-                self.episodes_written += sum(
-                    bool(record.get("traces"))
-                    for record in payload[offset : offset + batch.num_lines]
-                )
-            offset += batch.num_lines
+                start = batch.first_line_number - 1
+                self.episodes_written += sum(has_traces[start : start + batch.num_lines])
             self.receipts_received += 1
             if self._receipt_history_size:
                 self.receipts.append(receipt)
@@ -113,7 +117,7 @@ class TracesSink(Sink):
         try:
             list(
                 self._client.upload_records(
-                    payload,
+                    prepared(),
                     line_format=line_format,
                     context=dict(self._context) or None,
                     compress=self._compress,

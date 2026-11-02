@@ -17,10 +17,11 @@ class FakeTracesClient:
         self.closed = False
 
     def upload_records(self, records, **kwargs):
-        self.calls.append((list(records), kwargs))
+        records = list(records)
+        self.calls.append((records, kwargs))
         if self.raises is not None:
             raise self.raises
-        kwargs["on_batch"](SimpleNamespace(num_lines=len(records)), "receipt")
+        kwargs["on_batch"](SimpleNamespace(num_lines=len(records), first_line_number=1), "receipt")
         return ["receipt"]
 
     def close(self) -> None:

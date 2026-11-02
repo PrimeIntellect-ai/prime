@@ -20,6 +20,8 @@ field registry).
 
 import tempfile
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from functools import partial
 from pathlib import Path
 from typing import (
     Any,
@@ -64,6 +66,10 @@ from .models import (
 )
 
 DEFAULT_MAX_ATTEMPTS = 5
+#: Upload requests in flight per call, the most the service contract allows per
+#: producer. Requests overlap network time, and gzip and hashing release the GIL,
+#: so encoding the records is what bounds the upload rate.
+DEFAULT_MAX_IN_FLIGHT = 8
 
 
 class SupportsToRecord(Protocol):
@@ -197,6 +203,7 @@ class TracesClient:
         compress: bool = True,
         target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
         on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
     ) -> List[UploadReceipt]:
         """Upload trace or episode records directly from memory.
@@ -215,6 +222,7 @@ class TracesClient:
             compress=compress,
             target_batch_bytes=target_batch_bytes,
             max_attempts=max_attempts,
+            max_in_flight=max_in_flight,
             on_batch=on_batch,
         )
 
@@ -228,6 +236,7 @@ class TracesClient:
         compress: bool = True,
         target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
         on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
     ) -> List[UploadReceipt]:
         """Upload a completed JSONL file of traces (or episodes).
@@ -244,9 +253,10 @@ class TracesClient:
         ambiguous failure safe, because a request that did land replays its
         receipt instead of storing twice.
 
-        Batches are sent sequentially in v0. The contract allows 2–8 requests
-        in flight per producer; add bounded concurrency here once the service
-        is up and throughput is measured.
+        Up to ``max_in_flight`` batches are in flight at once. ``on_batch``
+        runs on the calling thread as each batch commits, and the receipts
+        come back in batch order. A failed batch stops new requests; the
+        error is raised once the requests in flight have finished.
         """
         return self.upload_lines(
             read_jsonl_lines(path),
@@ -256,6 +266,7 @@ class TracesClient:
             compress=compress,
             target_batch_bytes=target_batch_bytes,
             max_attempts=max_attempts,
+            max_in_flight=max_in_flight,
             on_batch=on_batch,
         )
 
@@ -269,24 +280,49 @@ class TracesClient:
         compress: bool = True,
         target_batch_bytes: int = DEFAULT_TARGET_BATCH_BYTES,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
         on_batch: Optional[Callable[[Batch, UploadReceipt], None]] = None,
     ) -> List[UploadReceipt]:
         """Upload an iterable of raw JSONL lines. See ``upload_file``."""
-        receipts: List[UploadReceipt] = []
-        for batch in iter_batches(lines, target_bytes=target_batch_bytes):
-            result = self._send_with_retry(
-                batch,
-                line_format=line_format,
-                context=context,
-                schema_version=schema_version,
-                compress=compress,
-                max_attempts=max_attempts,
-            )
-            receipt = UploadReceipt.model_validate(result)
-            receipts.append(receipt)
-            if on_batch is not None:
-                on_batch(batch, receipt)
-        return receipts
+        if max_in_flight < 1:
+            raise ValueError("max_in_flight must be at least 1")
+        send = partial(
+            self._send_with_retry,
+            line_format=line_format,
+            context=context,
+            schema_version=schema_version,
+            compress=compress,
+            max_attempts=max_attempts,
+        )
+        receipts: Dict[int, UploadReceipt] = {}
+        in_flight: Dict["Future[dict]", Batch] = {}
+        errors: List[BaseException] = []
+
+        def settle(done: Iterable["Future[dict]"]) -> None:
+            for future in done:
+                batch = in_flight.pop(future)
+                try:
+                    receipt = UploadReceipt.model_validate(future.result())
+                except BaseException as exc:  # noqa: BLE001 - raised after the rest settle
+                    errors.append(exc)
+                    continue
+                receipts[batch.first_line_number] = receipt
+                if on_batch is not None:
+                    on_batch(batch, receipt)
+
+        with ThreadPoolExecutor(max_in_flight, thread_name_prefix="prime-traces-upload") as pool:
+            try:
+                for batch in iter_batches(lines, target_bytes=target_batch_bytes):
+                    if len(in_flight) == max_in_flight:
+                        settle(wait(in_flight, return_when=FIRST_COMPLETED).done)
+                    if errors:
+                        break
+                    in_flight[pool.submit(send, batch)] = batch
+            finally:
+                settle(wait(in_flight).done)
+        if errors:
+            raise errors[0]
+        return [receipts[line] for line in sorted(receipts)]
 
     def _send_with_retry(
         self,

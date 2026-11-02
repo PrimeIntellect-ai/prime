@@ -87,15 +87,16 @@ run.finish()
 ## How it behaves
 
 - **Streams.** Records go out on a background thread as they are logged;
-  whatever queues up during one request goes out as the next.
+  whatever queues up during one upload goes out as the next, with up to eight
+  requests in flight. Logging never blocks the caller.
 - **Contains its errors.** With the default `on_error="warn"` nothing the
   platform raises escapes into your loop; `on_error="raise"` surfaces the first
   failure from `flush()` or `finish()`, for tests and CI. Platform errors are
   the `prime_traces` exception family.
 - **Degrades.** A transient failure costs its batch, three in a row retire the
   sink (a training run pauses it for five minutes instead), and a full queue
-  drops records rather than stalling the run. Losses are counted in
-  `run.dropped_records` and `run.failed_records`.
+  (10,000 records waiting) drops a new batch rather than stalling the run.
+  Losses are counted in `run.dropped_records` and `run.failed_records`.
 - **Drains on exit.** `finish()` gives queued uploads up to `finish_timeout`
   (300 s) before closing the run out; an abort path can pass
   `finish(timeout=...)`.

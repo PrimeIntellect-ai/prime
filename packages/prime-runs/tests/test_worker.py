@@ -1,7 +1,9 @@
 """The background uploader: backpressure, containment, fork safety."""
 
+import logging
 import queue
 import threading
+import time
 
 import pytest
 from conftest import FakeSink
@@ -82,15 +84,17 @@ def test_records_that_skip_a_sink_which_switched_itself_off_are_not_counted():
 
 def test_a_full_queue_drops_rather_than_blocking_the_producer():
     sink = BlockingSink()
-    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.05)
+    worker = UploadWorker([sink], max_queued_records=1)
 
     # First item is picked up and wedges the uploader inside sink.write().
     assert worker.submit([{"id": 0}])
     assert sink.entered.wait(5.0), "the uploader never reached the sink"
     # Second fills the one-slot queue; third has nowhere to go.
     worker.submit([{"id": 1}])
+    started = time.monotonic()
     accepted = worker.submit([{"id": 2}, {"id": 3}])
 
+    assert time.monotonic() - started < 0.5
     assert accepted is False
     assert worker.dropped == 2
 
@@ -98,9 +102,114 @@ def test_a_full_queue_drops_rather_than_blocking_the_producer():
     worker.close()
 
 
-def test_flush_uses_the_drain_budget_to_get_behind_a_full_queue():
+def _record(index: int, size: int = 100) -> dict:
+    return {"id": index, "pad": "x" * size}
+
+
+def test_the_byte_budget_drops_once_the_estimated_queue_is_over_it():
     sink = BlockingSink()
-    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.01)
+    # Each record encodes to a little over 100 bytes: three fit the budget, four do not.
+    worker = UploadWorker([sink], max_queued_bytes=400)
+    assert worker.submit([_record(0)])  # sampled, then wedges the uploader
+    assert sink.entered.wait(5.0)
+
+    accepted = [worker.submit([_record(index)]) for index in range(1, 6)]
+
+    assert accepted == [True, True, True, False, False]
+    assert worker.dropped == 2
+
+    sink.released.set()
+    worker.close()
+
+
+def test_one_write_takes_about_one_request_of_what_is_queued():
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_write_bytes=250)  # two records a write
+    assert worker.submit([_record(0)])
+    assert sink.entered.wait(5.0)
+    for index in range(1, 6):
+        assert worker.submit([_record(index)])
+
+    sink.released.set()
+    drain(worker)
+
+    assert [[record["id"] for record in batch] for batch in sink.batches] == [
+        [0],
+        [1, 2],
+        [3, 4],
+        [5],
+    ]
+    assert worker._queued_records == 0
+    worker.close()
+
+
+def test_an_oversized_batch_goes_out_in_order_across_writes_ahead_of_later_records():
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_write_bytes=250)
+    assert worker.submit([_record(0)])
+    assert sink.entered.wait(5.0)
+    assert worker.submit([_record(index) for index in range(1, 6)])
+    assert worker.submit([_record(6)])
+
+    sink.released.set()
+    drain(worker)
+
+    assert [[record["id"] for record in batch] for batch in sink.batches] == [
+        [0],
+        [1, 2],
+        [3, 4],
+        [5, 6],
+    ]
+    assert worker._queued_records == 0
+    worker.close()
+
+
+def test_a_batch_over_the_budgets_is_still_taken_by_an_empty_queue():
+    sink = FakeSink()
+    worker = UploadWorker([sink], max_queued_records=1, max_queued_bytes=1)
+
+    assert worker.submit([_record(0), _record(1), _record(2)])
+    drain(worker)
+
+    assert worker.dropped == 0
+    assert sum(len(batch) for batch in sink.batches) == 3
+    worker.close()
+
+
+def test_a_record_that_cannot_be_sized_still_reaches_the_sink():
+    sink = FakeSink()
+    worker = UploadWorker([sink])
+    unsizable = object()
+
+    assert worker.submit([unsizable])
+    drain(worker)
+
+    assert sink.batches == [[unsizable]]
+    assert worker._record_bytes is None
+    worker.close()
+
+
+def test_a_burst_of_drops_warns_once(caplog):
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_queued_records=1)
+    assert worker.submit([{"id": 0}])
+    assert sink.entered.wait(5.0)
+    assert worker.submit([{"id": 1}])
+
+    with caplog.at_level(logging.WARNING, logger="prime_runs.worker"):
+        for index in range(2, 12):
+            assert worker.submit([{"id": index}]) is False
+
+    assert worker.dropped == 10
+    assert len([r for r in caplog.records if "over budget" in r.getMessage()]) == 1
+
+    sink.released.set()
+    worker.close()
+
+
+def test_flush_waits_for_the_records_queued_ahead_of_it():
+    sink = BlockingSink()
+    worker = UploadWorker([sink], max_queued_records=1)
     assert worker.submit([{"id": 0}])
     assert sink.entered.wait(1.0)
     assert worker.submit([{"id": 1}])
@@ -117,9 +226,9 @@ def test_flush_uses_the_drain_budget_to_get_behind_a_full_queue():
     assert [batch[0]["id"] for batch in sink.batches] == [0, 1]
 
 
-def test_close_uses_its_budget_to_queue_the_stop_behind_pending_records():
+def test_close_drains_the_records_queued_ahead_of_the_stop():
     sink = BlockingSink()
-    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.01)
+    worker = UploadWorker([sink], max_queued_records=1)
     assert worker.submit([{"id": 0}])
     assert sink.entered.wait(1.0)
     assert worker.submit([{"id": 1}])
@@ -160,14 +269,16 @@ def test_submitting_after_close_is_refused():
 
 def test_a_forked_child_starts_over_instead_of_re_uploading_the_parents_queue():
     sink = FakeSink()
-    worker = UploadWorker([sink], max_queue_size=4)
+    worker = UploadWorker([sink])
     worker._queue.put([{"id": "parents"}])
+    worker._queued_records = 1
     old_queue = worker._queue
 
     worker.reset_after_fork()
 
     assert worker._queue is not old_queue
     assert worker._queue.empty()
+    assert worker._queued_records == 0
     assert worker._thread is None
     assert isinstance(worker._queue, queue.Queue)
     assert isinstance(worker._lock, type(threading.Lock())) or worker._lock is not None

@@ -93,8 +93,9 @@ run.finish()
   failure from `flush()` or `finish()`, for tests and CI. Platform errors are
   the `prime_traces` exception family.
 - **Degrades.** A transient failure costs its batch, three in a row retire the
-  sink (a training run pauses it for five minutes instead), and a full queue
-  drops records rather than stalling the run. Losses are counted in
+  sink (a training run pauses it for five minutes instead). Logging never waits
+  for the upload: a queue over its budget (about 4 GiB of encoded records) drops
+  new records rather than stalling the run. Losses are counted in
   `run.dropped_records` and `run.failed_records`.
 - **Drains on exit.** `finish()` gives queued uploads up to `finish_timeout`
   (300 s) before closing the run out; an abort path can pass

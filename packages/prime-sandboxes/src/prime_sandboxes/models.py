@@ -371,6 +371,9 @@ class Volume(BaseModel):
     name: str
     user_id: Optional[str] = None
     team_id: Optional[str] = None
+    # Capacity in whole GiB (100 GiB unless set at create or grown via
+    # resize). Absent on responses from servers older than the field.
+    size_gb: Optional[int] = None
     # Newest durable publish, or null for a volume that was never published.
     # Older responses may omit the field entirely.
     head_checkpoint_id: Optional[str] = None

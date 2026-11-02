@@ -28,7 +28,9 @@ _TERMINAL_STATUSES = ("expired", "terminated")
 # Timings of keep_serving(), in seconds.
 _PROBE_INTERVAL = 15.0
 _PROBE_TIMEOUT = 10.0
-_PROBE_GRACE = 5.0
+# Longer than frp takes to drop a stalled session (30s keepalive + 10s write timeout), so
+# frpc reconnects by itself first and a short blip doesn't cost requests in flight.
+_PROBE_GRACE = 60.0
 _RESTART_SETTLE = 2.0
 _RESTART_BACKOFF_MAX = 60.0
 

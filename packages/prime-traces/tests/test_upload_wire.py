@@ -83,10 +83,24 @@ class TestRequestShape:
         }
         assert receipt.status == "committed"
 
+    def test_upload_records_sends_encoded_lines_as_they_are(self, make_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["content"], captured["type"] = request.content, request.headers["content-type"]
+            return httpx.Response(201, json=COMMITTED)
+
+        make_client(handler).upload_records(
+            [b'{"id":"a"}', b'{"id":"b"}\n', {"id": "c"}], compress=False
+        )
+
+        parts = parse_multipart(captured["content"], captured["type"])
+        assert parts["traces"][1] == b'{"id":"a"}\n{"id":"b"}\n{"id":"c"}\n'
+
     @pytest.mark.parametrize(
         ("record", "message"),
         [
-            (object(), "must be a mapping or implement to_record"),
+            (object(), "must be a mapping, bytes, or implement to_record"),
             (
                 type("BadRecord", (), {"to_record": lambda self: ["not", "a", "mapping"]})(),
                 "to_record\\(\\) must return a mapping",

@@ -132,6 +132,53 @@ def test_every_member_trace_is_rekeyed_too():
     assert theirs == {"id": "other-run", "type": "eval", "name": "other"}
 
 
+class SelfEncodingEpisode:
+    """An episode that encodes itself, run included, like verifiers ``Episode``."""
+
+    def __init__(self, traces: list) -> None:
+        self.traces = traces
+        self.runs: list = []
+
+    def to_record(self):
+        raise AssertionError("an episode that encodes itself is not dumped to a mapping")
+
+    def to_json(self, run=None) -> bytes:
+        self.runs.append(run)
+        return b'{"id":"ep-1"}'
+
+
+def test_an_episode_that_encodes_itself_goes_out_as_its_own_bytes_with_the_run():
+    client = FakeTracesClient()
+    sink = make_sink(client)
+    episodes = [SelfEncodingEpisode([make_trace()]), SelfEncodingEpisode([])]
+
+    sink.write(episodes)
+
+    sent, kwargs = client.calls[0]
+    assert sent == [b'{"id":"ep-1"}', b'{"id":"ep-1"}']
+    assert kwargs["line_format"] is LineFormat.EPISODE
+    assert [episode.runs for episode in episodes] == [[{"id": "run-1", "type": "eval"}]] * 2
+    # Empty episodes produce no samples.
+    assert sink.episodes_written == 1
+
+
+def test_an_episode_whose_to_json_takes_no_run_is_stamped_from_its_record():
+    class OlderEpisode:
+        traces: list = []
+
+        def to_record(self):
+            return {"id": "ep-1", "traces": [{"id": "a"}]}
+
+        def to_json(self) -> bytes:
+            raise AssertionError("cannot stamp the run")
+
+    client = FakeTracesClient()
+    make_sink(client).write([OlderEpisode()])
+
+    sent = client.calls[0][0][0]
+    assert sent["traces"][0]["run"] == {"id": "run-1", "type": "eval"}
+
+
 def test_an_account_without_prime_traces_retires_the_sink_without_a_failure(caplog):
     client = FakeTracesClient(
         raises=ForbiddenError("not enabled", status_code=403, code="service_not_enabled")

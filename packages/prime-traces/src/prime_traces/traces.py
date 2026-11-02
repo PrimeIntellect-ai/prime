@@ -82,7 +82,9 @@ class SupportsToRecord(Protocol):
     def to_record(self) -> Mapping[str, Any]: ...
 
 
-TraceRecord = Union[Mapping[str, Any], SupportsToRecord]
+TraceRecord = Union[Mapping[str, Any], SupportsToRecord, bytes]
+"""A JSON mapping, an object that produces one, or a record its producer already
+encoded as one JSON line."""
 
 RECORD_OPTIONS = orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS | orjson.OPT_APPEND_NEWLINE
 
@@ -92,14 +94,18 @@ def _encode_record(record: TraceRecord, record_number: int) -> bytes:
 
     Shared with the async client so both surfaces produce byte-identical
     lines — and therefore the same content-addressed upload IDs — for the
-    same records.
+    same records. An encoded record is used as is.
     """
+    if isinstance(record, bytes):
+        return record if record.endswith(b"\n") else record + b"\n"
     if isinstance(record, Mapping):
         value = record
     else:
         to_record = getattr(record, "to_record", None)
         if not callable(to_record):
-            raise TypeError(f"Record {record_number} must be a mapping or implement to_record()")
+            raise TypeError(
+                f"Record {record_number} must be a mapping, bytes, or implement to_record()"
+            )
         value = to_record()
         if not isinstance(value, Mapping):
             raise TypeError(f"Record {record_number} to_record() must return a mapping")
@@ -208,9 +214,10 @@ class TracesClient:
     ) -> List[UploadReceipt]:
         """Upload trace or episode records directly from memory.
 
-        Each input may be a JSON-compatible mapping or an object implementing
-        ``to_record()``, including verifiers ``Trace`` / ``Episode`` and
-        prime-rl ``Rollout`` objects. Records are serialized lazily and passed
+        Each input may be a JSON-compatible mapping, an object implementing
+        ``to_record()`` (including verifiers ``Trace`` / ``Episode`` and
+        prime-rl ``Rollout`` objects), or a record already encoded as one JSON
+        line (``bytes``). Records are serialized lazily and passed
         through the same bounded batching path as JSONL files, so the complete
         input is never buffered or written to disk.
         """

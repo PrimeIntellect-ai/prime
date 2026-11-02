@@ -31,6 +31,7 @@ _PROBE_TIMEOUT = 10.0
 # Longer than frp takes to drop a stalled session (30s keepalive + 10s write timeout), so
 # frpc reconnects by itself first and a short blip doesn't cost requests in flight.
 _PROBE_GRACE = 60.0
+_EXIT_CHECK_INTERVAL = 1.0
 _RESTART_SETTLE = 2.0
 _RESTART_BACKOFF_MAX = 60.0
 
@@ -388,7 +389,9 @@ class Tunnel:
                         logger.debug("Local service of tunnel %s is not answering", self.url)
                         await asyncio.sleep(_PROBE_INTERVAL)
                         continue
-                    await asyncio.sleep(_PROBE_GRACE)
+                    await self._wait_while_running(_PROBE_GRACE)
+                    if not self.is_running:
+                        continue
                     if await url_ok():
                         attempts = 0
                         continue
@@ -416,6 +419,12 @@ class Tunnel:
                 else:
                     logger.warning("Tunnel %s: frpc restarted", self.url)
                     await asyncio.sleep(_RESTART_SETTLE)
+
+    async def _wait_while_running(self, seconds: float) -> None:
+        """Sleep for `seconds`, ending early if frpc exits."""
+        deadline = time.monotonic() + seconds
+        while self.is_running and (left := deadline - time.monotonic()) > 0:
+            await asyncio.sleep(min(left, _EXIT_CHECK_INTERVAL))
 
     @staticmethod
     def _end_process(process: subprocess.Popen, kill: bool = False) -> None:

@@ -20,6 +20,7 @@ def fast_timings(monkeypatch):
         ("_PROBE_INTERVAL", 0.02),
         ("_PROBE_TIMEOUT", 0.2),
         ("_PROBE_GRACE", 0.02),
+        ("_EXIT_CHECK_INTERVAL", 0.005),
         ("_RESTART_SETTLE", 0.01),
         ("_RESTART_BACKOFF_MAX", 0.04),
     ):
@@ -152,6 +153,22 @@ async def test_a_tunnel_that_recovers_by_itself_is_not_restarted(serve, watching
     await _until(lambda: len(edge.requests) >= 4)
 
     tunnel.restart.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_frpc_exiting_during_the_grace_period_is_restarted_without_waiting_it_out(
+    serve, watching, monkeypatch
+):
+    monkeypatch.setattr(tunnel_module, "_PROBE_GRACE", 60.0)
+    edge, local = serve(404), serve(200)
+    tunnel = _tunnel(edge, local)
+    watching(tunnel)
+    await _until(lambda: len(local.requests) >= 1)
+    tunnel.restart.assert_not_awaited()
+
+    tunnel._process.poll.return_value = 1
+
+    await _until(lambda: tunnel.restart.await_count >= 1)
 
 
 @pytest.mark.asyncio

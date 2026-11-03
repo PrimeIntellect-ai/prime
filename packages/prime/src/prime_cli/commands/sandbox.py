@@ -1763,13 +1763,13 @@ def _resolve_network_policy_lists(
     if deny_list is not None and not isinstance(deny_list, list):
         raise ValueError(f"{network_policy}: deny must be a list of destinations")
 
-    rules: Optional[Dict[str, Any]] = None
+    rules: Optional[Dict[str, HeaderRule]] = None
     file_rules = policy_file.get("rules")
     inject_rules = _parse_header_injections(inject_header or [])
     if file_rules is not None and not isinstance(file_rules, dict):
         raise ValueError(f"{network_policy}: rules must map hosts to headers")
     if file_rules or inject_rules:
-        rules = dict(file_rules or {})
+        rules = {host: HeaderRule.model_validate(rule) for host, rule in (file_rules or {}).items()}
         for host, rule in inject_rules.items():
             if host in rules:
                 raise ValueError(f"--inject-header for {host!r} also set in --network-policy")

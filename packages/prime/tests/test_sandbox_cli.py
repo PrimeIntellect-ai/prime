@@ -1510,9 +1510,9 @@ def test_sandbox_network_policy_file_replaces_policy(
         "allow": ["api.example.com"],
         "deny": None,
         "rules": {
-            "api.example.com": {
-                "headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
-            }
+            "api.example.com": HeaderRule(
+                headers={"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+            )
         },
     }
 
@@ -1620,6 +1620,54 @@ def test_sandbox_create_accepts_inject_header(
 
     output = _flat(strip_ansi(result.output))
     assert result.exit_code == 0, output
+    assert captured["request"].network_rules == {
+        "api.example.com": HeaderRule(
+            headers={"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+        )
+    }
+    assert "Header Rules: api.example.com: 1 header(s)" in output
+
+
+def test_sandbox_create_accepts_network_policy_file_rules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(
+        json.dumps(
+            {
+                "allow": ["api.example.com"],
+                "rules": {
+                    "api.example.com": {
+                        "headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+                    }
+                },
+            }
+        )
+    )
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-rules-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--network-policy",
+            str(policy_file),
+            "--yes",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 0, output
+    assert captured["request"].network_allowlist == ["api.example.com"]
     assert captured["request"].network_rules == {
         "api.example.com": HeaderRule(
             headers={"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}

@@ -293,6 +293,25 @@ all reachable guests before releasing this SDK: older servers can ignore the
 protobuf field and execute as their default user. Existing guests must be upgraded
 or recreated before using this option.
 
+### Reattach a Live Process
+
+A live process keeps running when its handle goes away: the client that started it
+can exit, and the sandbox can be paused and resumed. Another client attaches to it
+by its `session_uuid`:
+
+```python
+process = await client.open_process(sandbox.id, "python3 -u worker.py")
+session = process.session_uuid  # store it somewhere the next client can read
+await process.detach()  # release the stream; unlike aclose(), it sends no signal
+
+# Later, from any client:
+process = await client.attach_process(sandbox.id, session)
+await process.write_stdin(b"next\n")
+```
+
+Output that the process emitted while no client was attached is not replayed. A
+process that exited within sandboxd's retention window reports its exit code.
+
 ### File Operations
 
 ```python

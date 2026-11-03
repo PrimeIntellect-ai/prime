@@ -4683,13 +4683,6 @@ class AsyncSandboxClient:
             if timeout is None
             else min(timeout * 1000, _LIVE_PROCESS_NO_TIMEOUT_MS)
         )
-
-        await self._auth_cache.get_or_refresh(sandbox_id)
-
-        auth = await self._auth_cache.get_or_refresh(sandbox_id)
-        gateway_url = auth["gateway_url"].rstrip("/")
-        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         # session_uuid is the Start idempotency key: re-issuing the same request
         # attaches to (or replays) the session instead of spawning a second
         # process.
@@ -4702,6 +4695,43 @@ class AsyncSandboxClient:
             session_uuid=session_uuid,
             user=user,
         )
+        return await self._live_process(sandbox_id, session_uuid, timeout_ms, start=request)
+
+    async def attach_process(
+        self, sandbox_id: str, session_uuid: str, timeout: Optional[int] = None
+    ) -> AsyncSandboxProcess:
+        """Attach to a live process that ``open_process`` started, by the handle's
+        ``session_uuid``: from another client, e.g. after the one that started it went
+        away, or after the sandbox was paused and resumed.
+
+        The process keeps running while no client is attached, but output it emitted
+        meanwhile is not replayed. A process that exited within sandboxd's retention
+        window reports its exit code. Pass the ``timeout`` the process was opened with,
+        since sandboxd applies the stream's deadline to the process.
+        """
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be a positive number of seconds")
+        timeout_ms = (
+            _LIVE_PROCESS_NO_TIMEOUT_MS
+            if timeout is None
+            else min(timeout * 1000, _LIVE_PROCESS_NO_TIMEOUT_MS)
+        )
+        return await self._live_process(sandbox_id, session_uuid, timeout_ms)
+
+    async def _live_process(
+        self,
+        sandbox_id: str,
+        session_uuid: str,
+        timeout_ms: int,
+        start: Optional[Message] = None,
+    ) -> AsyncSandboxProcess:
+        """Stream the live process ``session_uuid``: start it with ``start``, or
+        attach to it with Connect when ``start`` is None."""
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
+        connect = build_command_session_connect_request(session_uuid=session_uuid)
         # Each live process gets its own transport: the session stream occupies one
         # HTTP/2 stream for the process's whole lifetime, and the gateway caps
         # concurrent streams per connection. On the shared default transport, enough
@@ -4717,8 +4747,12 @@ class AsyncSandboxClient:
             http_client=http_client,
         )
         stream = rpc_client.execute_server_stream(
-            request=request,
-            method=COMMAND_SESSION_START_RPC_METHOD,
+            request=connect if start is None else start,
+            method=(
+                COMMAND_SESSION_CONNECT_RPC_METHOD
+                if start is None
+                else COMMAND_SESSION_START_RPC_METHOD
+            ),
             headers=headers,
             timeout_ms=timeout_ms,
         )
@@ -4754,12 +4788,12 @@ class AsyncSandboxClient:
             # spawned, so retry Start (create-or-attach); afterwards Connect
             # re-attaches, replaying the EndEvent if the process has exited.
             # `started` is fixed for this invocation, so pick once.
-            if started:
+            if started or start is None:
                 method = COMMAND_SESSION_CONNECT_RPC_METHOD
-                reattach_request = build_command_session_connect_request(session_uuid=session_uuid)
+                reattach_request = connect
             else:
                 method = COMMAND_SESSION_START_RPC_METHOD
-                reattach_request = request
+                reattach_request = start
             reauthed = False
             while True:
                 auth = await self._auth_cache.get_or_refresh(sandbox_id)
@@ -4797,6 +4831,7 @@ class AsyncSandboxClient:
             send_signal,
             transport=transport,
             reconnect=reconnect,
+            session_uuid=session_uuid,
         )
 
     async def _execute_process_control_rpc(

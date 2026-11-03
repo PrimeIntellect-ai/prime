@@ -29,9 +29,10 @@ _STREAM_RECONNECT_RESET_SECONDS = 120
 
 _WriteStdin = Callable[[bytes], Awaitable[None]]
 _SendSignal = Callable[[Literal["terminate", "kill"]], Awaitable[None]]
-# The argument is whether a StartEvent has been observed yet; the callee picks
-# between retrying Start (create-or-attach) and Connect-ing to the session.
-_Reconnect = Callable[[bool], AsyncIterator[Message]]
+# The arguments are whether a StartEvent has been observed yet, which picks
+# between retrying Start (create-or-attach) and Connect-ing to the session, and
+# how many data events were received, where a replaying server resumes output.
+_Reconnect = Callable[[bool, int], AsyncIterator[Message]]
 
 
 class _AsyncProcessStream(AsyncIterator[bytes]):
@@ -94,6 +95,7 @@ class AsyncSandboxProcess:
         self._send_process_signal = send_signal
         self._reconnect = reconnect
         self._remote_exited = False
+        self._data_events = 0
         self._signals_sent: set[Literal["terminate", "kill"]] = set()
         self._closed = False
         self._close_lock = asyncio.Lock()
@@ -270,10 +272,11 @@ class AsyncSandboxProcess:
         await self._aclose_stream()
         await asyncio.sleep(delay)
         # Re-attachment — a retried Start before the pid was seen, Connect after —
-        # never replays output emitted while detached. Both arms re-announce the
-        # StartEvent and replay the retained EndEvent of a session that exited
+        # resumes output at the data events already received on a sandboxd that
+        # replays output (older ones send only live output). Both arms re-announce
+        # the StartEvent and replay the retained EndEvent of a session that exited
         # within sandboxd's retention window, so a missed exit is still observed.
-        self._stream = reconnect(self._started.done())
+        self._stream = reconnect(self._started.done(), self._data_events)
 
     async def _pump(self) -> None:
         ended = False
@@ -293,8 +296,10 @@ class AsyncSandboxProcess:
                             if not self._started.done():
                                 self._started.set_result(value)
                         elif kind == "stdout":
+                            self._data_events += 1
                             self.stdout.feed(value)
                         elif kind == "stderr":
+                            self._data_events += 1
                             self.stderr.feed(value)
                         elif kind == "end":
                             ended = True

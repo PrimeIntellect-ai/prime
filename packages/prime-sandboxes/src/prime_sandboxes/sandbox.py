@@ -93,7 +93,12 @@ from .models import (
     SSHSession,
     validate_egress_lists,
 )
-from .process import AsyncSandboxProcess
+from .process import (
+    _STREAM_MAX_RECONNECTS,
+    _STREAM_RECONNECT_BACKOFF_SECONDS,
+    _STREAM_RECONNECT_MAX_DELAY_SECONDS,
+    AsyncSandboxProcess,
+)
 from .rpc_command_session import (
     COMMAND_SESSION_CONNECT_RPC_METHOD,
     COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
@@ -103,7 +108,8 @@ from .rpc_command_session import (
     build_command_session_send_input_request,
     build_command_session_send_signal_request,
     build_command_session_start_request,
-    collect_command_session_start_event,
+    parse_command_session_start_event,
+    start_event_data_offset,
 )
 from .volumes import AsyncVolumes, Volumes
 
@@ -1706,6 +1712,105 @@ _transient_exec_retry = _gateway_retry_policy(
 )
 
 
+class _ResumableCommand:
+    """One execute_command across stream re-attaches.
+
+    Start carries a session_uuid (create-or-attach) and data_offset=0, and every
+    re-attach asks for output from the data events already received, so a link
+    fault is retried without re-running the command or dropping output. A
+    server that does not echo data_offset cannot replay output, so a fault on it
+    stays final.
+    """
+
+    def __init__(
+        self,
+        command: str,
+        working_dir: Optional[str],
+        env: Optional[Dict[str, str]],
+        user: Optional[str],
+    ) -> None:
+        self.session_uuid = _canonical_uuid_key()
+        self._start = build_command_session_start_request(
+            command=command,
+            working_dir=working_dir,
+            env=env,
+            user=user,
+            session_uuid=self.session_uuid,
+            data_offset=0,
+        )
+        self.stdout = bytearray()
+        self.stderr = bytearray()
+        self.exit_code: Optional[int] = None
+        self._data_events = 0
+        self._started = False
+        self._replayable: Optional[bool] = None
+        self._attempts = 0
+        self._faults = 0
+        self._last_fault: Optional[BaseException] = None
+        self._offset = 0
+
+    def next_call(self) -> tuple[MethodInfo[Any, Any], Message]:
+        """The RPC for the next attempt: Start until a StartEvent, then Connect."""
+        self._attempts += 1
+        self._offset = self._data_events
+        if self._started:
+            return COMMAND_SESSION_CONNECT_RPC_METHOD, build_command_session_connect_request(
+                session_uuid=self.session_uuid, data_offset=self._offset
+            )
+        return COMMAND_SESSION_START_RPC_METHOD, self._start
+
+    def feed(self, response: Message) -> None:
+        event = parse_command_session_start_event(response)
+        if event is None:
+            return
+        self._faults = 0
+        kind, value = event
+        if kind == "start":
+            echo = start_event_data_offset(response)
+            if echo is None:
+                # A retried Start may have attached mid-run without replaying
+                # output, so the result could silently miss stdout.
+                if self._attempts > 1 and self._last_fault is not None:
+                    raise self._last_fault
+                self._replayable = False
+            elif echo != self._offset:
+                raise APIError(f"Command stream resumed at data event {echo}, not {self._offset}")
+            else:
+                self._replayable = True
+            self._started = True
+        elif kind == "end":
+            assert isinstance(value, int)
+            self.exit_code = value
+        else:
+            assert isinstance(value, bytes)
+            (self.stdout if kind == "stdout" else self.stderr).extend(value)
+            self._data_events += 1
+
+    def retry_delay(self, fault: APIError) -> Optional[float]:
+        """Backoff before re-attaching after `fault`, or None when it is final."""
+        self._last_fault = fault
+        cause = fault.__cause__
+        if (
+            self._replayable is False
+            or (cause is not None and not is_retryable(fault, idempotent=True))
+            or self._faults >= _STREAM_MAX_RECONNECTS
+        ):
+            return None
+        self._faults += 1
+        return min(
+            _STREAM_RECONNECT_BACKOFF_SECONDS * 2 ** (self._faults - 1),
+            _STREAM_RECONNECT_MAX_DELAY_SECONDS,
+        )
+
+    def response(self) -> CommandResponse:
+        assert self.exit_code is not None
+        return CommandResponse(
+            stdout=self.stdout.decode("utf-8", errors="replace"),
+            stderr=self.stderr.decode("utf-8", errors="replace"),
+            exit_code=self.exit_code,
+        )
+
+
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -2845,9 +2950,8 @@ class SandboxClient:
         user: Optional[str] = None,
     ) -> CommandResponse:
         effective_timeout = timeout if timeout is not None else 300
-        request = build_command_session_start_request(
-            command=command, working_dir=working_dir, env=env, user=user
-        )
+        deadline = time.monotonic() + effective_timeout
+        run = _ResumableCommand(command, working_dir, env, user)
 
         reauthed = False
         while True:
@@ -2855,10 +2959,10 @@ class SandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            stdout_parts = bytearray()
-            stderr_parts = bytearray()
-            exit_code: Optional[int] = None
-            stream_started = False
+            remaining_ms = math.ceil((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout)
+            method, request = run.next_call()
 
             command_lease = contextlib.ExitStack()
             rpc_client = ConnectClientSync(
@@ -2870,35 +2974,19 @@ class SandboxClient:
             try:
                 stream = rpc_client.execute_server_stream(
                     request=request,
-                    method=COMMAND_SESSION_START_RPC_METHOD,
+                    method=method,
                     headers=headers,
-                    timeout_ms=effective_timeout * 1000,
+                    timeout_ms=remaining_ms,
                 )
                 for event in stream:
-                    stream_started = True
-                    event_exit_code = collect_command_session_start_event(
-                        event,
-                        stdout_parts,
-                        stderr_parts,
-                    )
-                    if event_exit_code is not None:
-                        exit_code = event_exit_code
+                    run.feed(event)
 
-                if exit_code is None:
-                    raise APIError("Command stream ended without exit code")
-
-                return CommandResponse(
-                    stdout=stdout_parts.decode("utf-8", errors="replace"),
-                    stderr=stderr_parts.decode("utf-8", errors="replace"),
-                    exit_code=exit_code,
-                )
+                if run.exit_code is not None:
+                    return run.response()
+                fault = APIError("Command stream ended without exit code")
             except ConnectError as e:
-                # Only re-auth before any stream event.
-                if (
-                    e.code == Code.UNAUTHENTICATED
-                    and not stream_started
-                    and self._should_retry_401(sandbox_id, reauthed)
-                ):
+                # Re-auth once; the create-or-attach Start or Connect re-attach is idempotent.
+                if e.code == Code.UNAUTHENTICATED and self._should_retry_401(sandbox_id, reauthed):
                     reauthed = True
                     continue
 
@@ -2916,7 +3004,8 @@ class SandboxClient:
                         command=command,
                     )
 
-                raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
+                fault = APIError(f"Connect RPC failed ({e.code.value}): {e.message}")
+                fault.__cause__ = e
             except APIError:
                 raise
             except Exception as e:
@@ -2924,6 +3013,11 @@ class SandboxClient:
             finally:
                 rpc_client.close()
                 command_lease.close()
+
+            delay = run.retry_delay(fault)
+            if delay is None:
+                raise fault
+            time.sleep(delay)
 
     def start_background_job(
         self,
@@ -4609,6 +4703,7 @@ class AsyncSandboxClient:
             stdin=True,
             session_uuid=session_uuid,
             user=user,
+            data_offset=0,
         )
         # Each live process gets its own transport: the session stream occupies one
         # HTTP/2 stream for the process's whole lifetime, and the gateway caps
@@ -4657,14 +4752,17 @@ class AsyncSandboxClient:
                 http_client=http_client,
             )
 
-        async def reconnect(started: bool) -> AsyncIterator[Message]:
+        async def reconnect(started: bool, data_offset: int) -> AsyncIterator[Message]:
             # Before a StartEvent it is unknown whether the process was ever
             # spawned, so retry Start (create-or-attach); afterwards Connect
-            # re-attaches, replaying the EndEvent if the process has exited.
-            # `started` is fixed for this invocation, so pick once.
+            # re-attaches from the data events already received, replaying the
+            # EndEvent if the process has exited. `started` is fixed for this
+            # invocation, so pick once.
             if started:
                 method = COMMAND_SESSION_CONNECT_RPC_METHOD
-                reattach_request = build_command_session_connect_request(session_uuid=session_uuid)
+                reattach_request = build_command_session_connect_request(
+                    session_uuid=session_uuid, data_offset=data_offset
+                )
             else:
                 method = COMMAND_SESSION_START_RPC_METHOD
                 reattach_request = request
@@ -4782,9 +4880,8 @@ class AsyncSandboxClient:
         user: Optional[str] = None,
     ) -> CommandResponse:
         effective_timeout = timeout if timeout is not None else 300
-        request = build_command_session_start_request(
-            command=command, working_dir=working_dir, env=env, user=user
-        )
+        deadline = time.monotonic() + effective_timeout
+        run = _ResumableCommand(command, working_dir, env, user)
 
         reauthed = False
         while True:
@@ -4792,10 +4889,10 @@ class AsyncSandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            stdout_parts = bytearray()
-            stderr_parts = bytearray()
-            exit_code: Optional[int] = None
-            stream_started = False
+            remaining_ms = math.ceil((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                raise CommandTimeoutError(sandbox_id, command, effective_timeout)
+            method, request = run.next_call()
 
             command_lease = contextlib.ExitStack()
             rpc_client = ConnectClient(
@@ -4807,34 +4904,20 @@ class AsyncSandboxClient:
             try:
                 stream = rpc_client.execute_server_stream(
                     request=request,
-                    method=COMMAND_SESSION_START_RPC_METHOD,
+                    method=method,
                     headers=headers,
-                    timeout_ms=effective_timeout * 1000,
+                    timeout_ms=remaining_ms,
                 )
                 async for event in stream:
-                    stream_started = True
-                    event_exit_code = collect_command_session_start_event(
-                        event,
-                        stdout_parts,
-                        stderr_parts,
-                    )
-                    if event_exit_code is not None:
-                        exit_code = event_exit_code
+                    run.feed(event)
 
-                if exit_code is None:
-                    raise APIError("Command stream ended without exit code")
-
-                return CommandResponse(
-                    stdout=stdout_parts.decode("utf-8", errors="replace"),
-                    stderr=stderr_parts.decode("utf-8", errors="replace"),
-                    exit_code=exit_code,
-                )
+                if run.exit_code is not None:
+                    return run.response()
+                fault = APIError("Command stream ended without exit code")
             except ConnectError as e:
-                # Only re-auth before any stream event.
-                if (
-                    e.code == Code.UNAUTHENTICATED
-                    and not stream_started
-                    and await self._should_retry_401(sandbox_id, reauthed)
+                # Re-auth once; the create-or-attach Start or Connect re-attach is idempotent.
+                if e.code == Code.UNAUTHENTICATED and await self._should_retry_401(
+                    sandbox_id, reauthed
                 ):
                     reauthed = True
                     continue
@@ -4853,7 +4936,8 @@ class AsyncSandboxClient:
                         command=command,
                     )
 
-                raise APIError(f"Connect RPC failed ({e.code.value}): {e.message}") from e
+                fault = APIError(f"Connect RPC failed ({e.code.value}): {e.message}")
+                fault.__cause__ = e
             except APIError:
                 raise
             except Exception as e:
@@ -4861,6 +4945,11 @@ class AsyncSandboxClient:
             finally:
                 await rpc_client.close()
                 command_lease.close()
+
+            delay = run.retry_delay(fault)
+            if delay is None:
+                raise fault
+            await asyncio.sleep(delay)
 
     async def start_background_job(
         self,

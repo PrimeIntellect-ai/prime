@@ -27,9 +27,7 @@ def _publish_path(sandbox_id: str, name: str) -> str:
     return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/publish"
 
 
-def _name_params(
-    client: "APIClient | AsyncAPIClient", team_id: Optional[str]
-) -> dict[str, object]:
+def _name_params(client: "APIClient | AsyncAPIClient", team_id: Optional[str]) -> dict[str, object]:
     resolved_team_id = _resolved_team_id(client, team_id)
     if resolved_team_id:
         return {"team_id": resolved_team_id}

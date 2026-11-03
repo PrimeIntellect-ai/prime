@@ -21,7 +21,12 @@ class _CommandSpecFactory(Protocol):
 
 class _CommandSessionStartRequestFactory(Protocol):
     def __call__(
-        self, *, command: _CommandSpecLike, stdin: bool, session_uuid: str | None = None
+        self,
+        *,
+        command: _CommandSpecLike,
+        stdin: bool,
+        session_uuid: str | None = None,
+        data_offset: int | None = None,
     ) -> Message: ...
 
 
@@ -42,7 +47,7 @@ class _CommandSessionSendSignalRequestFactory(Protocol):
 
 
 class _CommandSessionConnectRequestFactory(Protocol):
-    def __call__(self, *, session: Message) -> Message: ...
+    def __call__(self, *, session: Message, data_offset: int | None = None) -> Message: ...
 
 
 class _CommandSessionInfoLike(Protocol):
@@ -77,6 +82,9 @@ class _CommandSessionEventLike(Protocol):
 
 class _CommandSessionStartEventLike(Protocol):
     pid: int
+    data_offset: int
+
+    def HasField(self, field_name: str) -> bool: ...
 
 
 class _CommandSessionStartResponseLike(Protocol):
@@ -198,6 +206,7 @@ def build_command_session_start_request(
     stdin: bool = False,
     session_uuid: str | None = None,
     user: str | None = None,
+    data_offset: int | None = None,
 ) -> Message:
     command_spec = _COMMAND_SPEC_FACTORY(
         cmd="/bin/bash",
@@ -216,6 +225,7 @@ def build_command_session_start_request(
         command=command_spec,
         stdin=stdin,
         session_uuid=session_uuid,
+        data_offset=data_offset,
     )
 
 
@@ -223,9 +233,12 @@ def build_command_session_list_request() -> Message:
     return _COMMAND_SESSION_LIST_REQUEST_TYPE()
 
 
-def build_command_session_connect_request(*, session_uuid: str) -> Message:
+def build_command_session_connect_request(
+    *, session_uuid: str, data_offset: int | None = None
+) -> Message:
     return _COMMAND_SESSION_CONNECT_REQUEST_FACTORY(
-        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid)
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid),
+        data_offset=data_offset,
     )
 
 
@@ -280,6 +293,12 @@ def parse_command_session_start_event(
     if event_kind == "end":
         return "end", int(event.end.exit_code)
     return None
+
+
+def start_event_data_offset(response: Message) -> Optional[int]:
+    """The StartEvent's data_offset echo; None when absent (a server without output replay)."""
+    start = cast(_CommandSessionStartResponseLike, response).event.start
+    return int(start.data_offset) if start.HasField("data_offset") else None
 
 
 def collect_command_session_start_event(

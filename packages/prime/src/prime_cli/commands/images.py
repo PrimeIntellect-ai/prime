@@ -260,7 +260,10 @@ def push_image(
         None,
         "--registry-password",
         envvar="PRIME_REGISTRY_PASSWORD",
-        help="Private registry password or token (prompted if omitted)",
+        help=(
+            "Private registry token; prefer PRIME_REGISTRY_PASSWORD or the prompt, "
+            "since flags show up in shell history"
+        ),
     ),
 ):
     """

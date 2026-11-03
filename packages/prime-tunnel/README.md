@@ -44,6 +44,20 @@ if status.gone:
     await tunnel.stop()
 ```
 
+### Keeping a tunnel up
+
+`keep_serving()` checks that requests reach your service through the tunnel's
+URL, and restarts the client if they stop. Give it a path on your service that
+returns 2xx, and run it as a task:
+
+```python
+watch = asyncio.create_task(tunnel.keep_serving("/health"))
+```
+
+If your service itself is down, nothing is restarted. If the tunnel was deleted
+or expired, the task raises `TunnelGoneError`, and you need a new tunnel with a
+new URL. Cancel the task to stop watching.
+
 ## CLI Usage
 
 ```bash

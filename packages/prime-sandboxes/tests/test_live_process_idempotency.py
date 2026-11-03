@@ -20,13 +20,13 @@ from prime_sandboxes.core import APIError
 from prime_sandboxes.sandbox import AsyncSandboxClient
 
 
-async def _open_process(monkeypatch, fake_client_factory, command="cat"):
+async def _open_process(monkeypatch, fake_client_factory, command="cat", **kwargs):
     monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
     monkeypatch.setattr("prime_sandboxes.sandbox._PROCESS_CONTROL_RETRY_INITIAL_DELAY", 0)
     monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", fake_client_factory)
     client = AsyncSandboxClient(api_key="test-key")
     cast(Any, client)._auth_cache = _AsyncFakeCache()
-    return client, await client.open_process("sbx-vm", command)
+    return client, await client.open_process("sbx-vm", command, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -65,6 +65,46 @@ async def test_reconnect_selects_session_uuid_and_replays_exit(monkeypatch):
     try:
         assert await process.wait() == 5
         assert connect_selectors == [("session_uuid", session_uuids[0])]
+        await process.aclose()
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_timeout_ms"),
+    [({}, 9_999_999_999), ({"timeout": 60}, 60_000)],
+)
+@pytest.mark.asyncio
+async def test_process_timeout_applies_to_start_and_reconnect(
+    monkeypatch, kwargs, expected_timeout_ms
+):
+    """sandboxd kills the process at Connect-Timeout-Ms, so no timeout means the protocol max."""
+    timeouts = []
+
+    class _FakeConnectClient:
+        def __init__(self, _address: str, **_kwargs):
+            pass
+
+        def execute_server_stream(self, **stream_kwargs):
+            method = stream_kwargs["method"].name
+            timeouts.append((method, stream_kwargs["timeout_ms"]))
+
+            async def events():
+                if method == "Start":
+                    yield _start_event(42)
+                    raise ConnectError(Code.UNAVAILABLE, "stream dropped")
+                yield _start_event(42, pb.ConnectResponse)
+                yield _end_event(0, pb.ConnectResponse)
+
+            return events()
+
+        async def close(self):
+            pass
+
+    client, process = await _open_process(monkeypatch, _FakeConnectClient, **kwargs)
+    try:
+        assert await process.wait() == 0
+        assert timeouts == [("Start", expected_timeout_ms), ("Connect", expected_timeout_ms)]
         await process.aclose()
     finally:
         await client.aclose()

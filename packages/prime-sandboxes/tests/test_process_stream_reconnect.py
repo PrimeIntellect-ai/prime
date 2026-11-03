@@ -225,3 +225,38 @@ async def test_permanent_fault_is_not_reconnected(fault):
         await proc.wait()
     assert calls == []
     await proc.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spacing, survives", [(0, False), (200, True)], ids=["burst", "spread"])
+async def test_reconnect_budget_resets_after_a_healthy_stretch(spacing, survives, monkeypatch):
+    # A day-long stream may drop many times; only drops within one outage share a budget.
+    monkeypatch.setattr("prime_sandboxes.process._STREAM_RECONNECT_BACKOFF_SECONDS", 0)
+    clock = [1000.0]
+    monkeypatch.setattr("prime_sandboxes.process.time.monotonic", lambda: clock[0])
+    drops = 12  # more than _STREAM_MAX_RECONNECTS
+
+    async def segment(n):
+        clock[0] += spacing
+        yield _start_event(42)
+        if n == drops:
+            yield _end_event(0)
+        raise ConnectError(Code.UNAVAILABLE, "Error reading content")
+
+    calls = [0]
+
+    def reconnect(started):
+        calls[0] += 1
+        return segment(calls[0])
+
+    proc = await AsyncSandboxProcess._create(
+        _FakeStreamClient(), segment(0), _noop_stdin, _noop_signal, reconnect=reconnect
+    )
+    if survives:
+        assert await proc.wait() == 0
+        assert calls[0] == drops
+    else:
+        with pytest.raises(APIError, match="Error reading content"):
+            await proc.wait()
+        assert calls[0] == 8
+    await proc.aclose()

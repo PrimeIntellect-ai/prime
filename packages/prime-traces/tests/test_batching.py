@@ -6,6 +6,7 @@ import pytest
 
 from prime_traces import (
     MAX_BATCH_BYTES,
+    MAX_LINE_BYTES,
     TraceTooLargeError,
     aiter_batches,
     iter_batches,
@@ -95,6 +96,16 @@ class TestLineValidation:
             list(iter_batches([line('{"i":1}'), big], max_line_bytes=32))
         assert exc_info.value.line_number == 2
         assert exc_info.value.limit == 32
+
+    def test_default_caps_match_the_service(self):
+        assert MAX_LINE_BYTES == 1024 * 1024 * 1024
+        assert MAX_BATCH_BYTES == 1100 * 1024 * 1024
+
+    def test_line_over_the_previous_64_mib_cap_is_accepted_by_default(self):
+        content = b"x" * (64 * 1024 * 1024 + 1)
+        [batch] = iter_batches([content + b"\n"])
+        assert batch.size == len(content) + 1
+        assert batch.num_lines == 1
 
     def test_line_cap_measured_without_terminator(self):
         # Content is exactly at the cap; the trailing newline must not tip it.

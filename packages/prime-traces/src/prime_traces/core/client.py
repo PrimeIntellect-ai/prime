@@ -48,6 +48,11 @@ from .config import Config
 #: budget — see ``TracesClient._send_with_retry``.
 IDEMPOTENT_RETRY_ATTEMPTS = 3
 
+#: Gzip level for upload bodies. Level 1 compresses a multi-MB episode about 9x
+#: faster than the default 9 for ~13% more bytes; the upload thread is otherwise
+#: CPU-bound on compression and falls behind a fast producer.
+GZIP_LEVEL = 1
+
 #: Retryable statuses that leave it unknown whether the request reached the
 #: service. 502/504 come from a gateway, which may already have forwarded the
 #: request upstream and then lost or timed out the response.
@@ -228,7 +233,7 @@ def raise_for_response(response: httpx.Response) -> None:
     raise APIError(f"HTTP {status}: {message}", status_code=status, code=code)
 
 
-#: Generous read/write budget: one request body can be 256 MiB.
+#: Generous read/write budget: one request body can be 1100 MiB.
 DEFAULT_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
 
@@ -379,7 +384,9 @@ class TracesAPIClient(BaseTracesAPIClient):
         self._check_auth()
 
         # mtime=0 keeps the compressed bytes reproducible across retries.
-        compressed = gzip_module.compress(body, mtime=0) if compress else None
+        compressed = None
+        if compress:
+            compressed = gzip_module.compress(body, compresslevel=GZIP_LEVEL, mtime=0)
         files = self._multipart_files(
             body, schema_version=schema_version, context=context, compressed=compressed
         )
@@ -466,7 +473,7 @@ class TracesAPIClient(BaseTracesAPIClient):
     def stream_bytes(
         self, endpoint: str, params: Optional[Dict[str, Any]] = None
     ) -> Iterator[bytes]:
-        """Stream a response body in chunks (a raw trace can be 64 MiB).
+        """Stream a response body in chunks (a raw trace can be 1 GiB).
 
         Transient failures are retried only until the first body byte has been
         yielded: a mid-stream retry would silently restart the body under the

@@ -48,6 +48,7 @@ from tenacity import (
     retry,
     retry_if_exception,
     stop_after_attempt,
+    stop_after_delay,
     wait_exponential,
     wait_random_exponential,
 )
@@ -122,10 +123,11 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.PoolTimeout,  # No connection available in pool
 )
 
-# connectrpc-python cancels a server stream before its first event when no
-# timeout is supplied. A live process cannot outlast the sandbox's 24-hour
-# maximum lifetime, so use that lifetime as the transport bound.
-_LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
+# sandboxd kills a live process when its Connect-Timeout-Ms expires. A process
+# with no timeout is bounded only by the sandbox lifetime, but connectrpc-python
+# cancels a server stream before its first event when no timeout is supplied,
+# so send the largest value the Connect protocol allows (10 digits, ~115 days).
+_LIVE_PROCESS_NO_TIMEOUT_MS = 9_999_999_999
 _PROCESS_INPUT_TIMEOUT_MS = 30_000
 _PROCESS_SIGNAL_TIMEOUT_MS = 10_000
 _LIVE_PROCESS_TCP_KEEPALIVE_SECONDS = 15.0
@@ -1801,6 +1803,28 @@ _read_file_retry = retry(
 )
 
 
+def _is_transient_exec_error(exc: BaseException) -> bool:
+    """A command RPC link fault (gateway 502/503, dropped body), not a command outcome."""
+    cause = exc.__cause__
+    return (
+        isinstance(exc, APIError)
+        and isinstance(cause, ConnectError)
+        and is_transient_control_fault(cause)
+    )
+
+
+# Retry for idempotent exec calls only: background-job status reads and the
+# mkdir-guarded launch. A day-long rollout polls thousands of times, so one gateway
+# or node-ingress blip must not end it. Timeouts and sandbox-gone errors are not
+# APIErrors caused by a transient ConnectError and are never retried here.
+_transient_exec_retry = retry(
+    retry=retry_if_exception(_is_transient_exec_error),
+    stop=stop_after_delay(120),
+    wait=wait_random_exponential(multiplier=1, min=1, max=15),
+    reraise=True,
+)
+
+
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -3098,7 +3122,7 @@ class SandboxClient:
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
-                launch = self.execute_command(
+                launch = _transient_exec_retry(self.execute_command)(
                     sandbox_id,
                     bg_cmd,
                     working_dir=launch_cwd,
@@ -3147,6 +3171,7 @@ class SandboxClient:
         assert snapshot.exit_code is not None
         return self._background_job_output_coordinator.get(job, snapshot.exit_code, timeout)
 
+    @_transient_exec_retry
     def _get_background_job_status_unleased(
         self,
         sandbox_id: str,
@@ -4680,8 +4705,13 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         user: Optional[str] = None,
+        timeout: Optional[int] = None,
     ) -> AsyncSandboxProcess:
         """Start a live process in a VM sandbox.
+
+        ``timeout`` is the process's maximum runtime in seconds; sandboxd kills
+        the process when it expires. ``None`` (default) leaves the process
+        bounded only by the sandbox's lifetime.
 
         The returned handle streams stdout and stderr, accepts stdin writes,
         waits for the exit code, and can signal the process. If the stream drops before
@@ -4692,6 +4722,14 @@ class AsyncSandboxClient:
         retained EndEvent — an exit missed while detached is still observed.
         Output emitted while detached is not replayed.
         """
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be a positive number of seconds")
+        timeout_ms = (
+            _LIVE_PROCESS_NO_TIMEOUT_MS
+            if timeout is None
+            else min(timeout * 1000, _LIVE_PROCESS_NO_TIMEOUT_MS)
+        )
+
         await self._auth_cache.get_or_refresh(sandbox_id)
 
         auth = await self._auth_cache.get_or_refresh(sandbox_id)
@@ -4728,7 +4766,7 @@ class AsyncSandboxClient:
             request=request,
             method=COMMAND_SESSION_START_RPC_METHOD,
             headers=headers,
-            timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+            timeout_ms=timeout_ms,
         )
 
         async def write_stdin(data: bytes) -> None:
@@ -4783,7 +4821,7 @@ class AsyncSandboxClient:
                         request=reattach_request,
                         method=method,
                         headers={"Authorization": f"Bearer {auth['token']}"},
-                        timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+                        timeout_ms=timeout_ms,
                     )
                     async for response in stream:
                         yield response
@@ -5029,7 +5067,7 @@ class AsyncSandboxClient:
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
-                launch = await self.execute_command(
+                launch = await _transient_exec_retry(self.execute_command)(
                     sandbox_id,
                     bg_cmd,
                     working_dir=launch_cwd,
@@ -5078,6 +5116,7 @@ class AsyncSandboxClient:
         assert snapshot.exit_code is not None
         return await self._background_job_output_coordinator.get(job, snapshot.exit_code, timeout)
 
+    @_transient_exec_retry
     async def _get_background_job_status_unleased(
         self,
         sandbox_id: str,

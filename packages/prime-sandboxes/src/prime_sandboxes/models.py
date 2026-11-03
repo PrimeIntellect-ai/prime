@@ -57,8 +57,12 @@ _RESERVED_RULE_HEADER_PREFIXES = ("proxy-",)
 class HeaderRule(BaseModel):
     """Headers to set on HTTPS requests to one rule host.
 
-    Each value is a template that may contain "${prime.secrets.<name>}"
-    references; a set header replaces any same-name header the sandbox sent.
+    The rule host is an exact name or a ``*.`` wildcard that matches exactly
+    one label: ``*.example.com`` matches ``api.example.com``, not
+    ``example.com`` or ``a.b.example.com``. Each value is a template that may
+    contain "${prime.secrets.<name>}" references; a set header replaces any
+    same-name header the sandbox sent. After substitution, one request's rule
+    headers may total at most 32 KiB; a larger result fails the request.
     """
 
     headers: Dict[str, str]
@@ -217,9 +221,10 @@ def validate_header_rules(
     """Client-side mirror of the API's header substitution rules contract.
 
     Rule hosts are an exact DNS name or a single leading ``*.`` wildcard
-    without ports or paths, canonicalized to lowercase with case-equivalent
-    hosts rejected; header names are valid HTTP tokens that are not reserved
-    (Host, :authority, framing, hop-by-hop, Proxy-*); values carry no CR/LF
+    (matching exactly one label) without ports or paths, canonicalized to
+    lowercase with case-equivalent hosts rejected; header names are valid
+    HTTP tokens that are not reserved (Host, :authority, framing, hop-by-hop,
+    Proxy-*), and names differing only by case are rejected; values carry no CR/LF
     and only ``${prime.secrets.<name>}`` references; one rule host's headers
     total at most ``MAX_HEADER_RULE_BYTES`` bytes and reference at most
     ``MAX_HEADER_RULE_SECRETS`` distinct secrets.

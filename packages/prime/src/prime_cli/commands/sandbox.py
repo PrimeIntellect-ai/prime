@@ -1049,8 +1049,8 @@ def create(
         help=(
             "Repeatable. Set an HTTPS request header for egress to a host, e.g. "
             "--inject-header api.example.com 'Authorization: Bearer "
-            "${prime.secrets.OPENAI_KEY}'. Secret references resolve on the "
-            "sandbox's node, never inside the sandbox."
+            "${prime.secrets.OPENAI_KEY}'. A '*.' host matches exactly one label. "
+            "Secret references resolve on the sandbox's node, never inside the sandbox."
         ),
     ),
     network_policy: Optional[str] = typer.Option(
@@ -1674,8 +1674,8 @@ def network(
         help=(
             "Repeatable. Set an HTTPS request header for egress to a host, e.g. "
             "--inject-header api.example.com 'Authorization: Bearer "
-            "${prime.secrets.OPENAI_KEY}'. Secret references resolve on the "
-            "sandbox's node, never inside the sandbox."
+            "${prime.secrets.OPENAI_KEY}'. A '*.' host matches exactly one label. "
+            "Secret references resolve on the sandbox's node, never inside the sandbox."
         ),
     ),
     network_policy: Optional[str] = typer.Option(

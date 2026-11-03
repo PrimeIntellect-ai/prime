@@ -1706,6 +1706,28 @@ _transient_exec_retry = _gateway_retry_policy(
 )
 
 
+def _is_transient_exec_error(exc: BaseException) -> bool:
+    """A command RPC link fault (gateway 502/503, dropped body), not a command outcome."""
+    cause = exc.__cause__
+    return (
+        isinstance(exc, APIError)
+        and isinstance(cause, ConnectError)
+        and is_transient_control_fault(cause)
+    )
+
+
+# Retry for idempotent exec calls only: background-job status reads and the
+# mkdir-guarded launch. A day-long rollout polls thousands of times, so one gateway
+# or node-ingress blip must not end it. Timeouts and sandbox-gone errors are not
+# APIErrors caused by a transient ConnectError and are never retried here.
+_transient_exec_retry = retry(
+    retry=retry_if_exception(_is_transient_exec_error),
+    stop=stop_after_delay(120),
+    wait=wait_random_exponential(multiplier=1, min=1, max=15),
+    reraise=True,
+)
+
+
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 

@@ -34,6 +34,8 @@ DOMAIN_RULE_PORTS = (80, 443)
 SECRET_REFERENCE_PREFIX = "${prime.secrets."
 MAX_HEADER_RULE_HOSTS = 32
 MAX_HEADER_RULE_BYTES = 8192
+# Matches the node's cold-cache budget of ten secret fetches per second.
+MAX_HEADER_RULE_SECRETS = 10
 
 _SECRET_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,254}$")
 _RESERVED_RULE_HEADERS = frozenset(
@@ -219,7 +221,8 @@ def validate_header_rules(
     hosts rejected; header names are valid HTTP tokens that are not reserved
     (Host, :authority, framing, hop-by-hop, Proxy-*); values carry no CR/LF
     and only ``${prime.secrets.<name>}`` references; one rule host's headers
-    total at most ``MAX_HEADER_RULE_BYTES`` bytes.
+    total at most ``MAX_HEADER_RULE_BYTES`` bytes and reference at most
+    ``MAX_HEADER_RULE_SECRETS`` distinct secrets.
     """
     if not rules:
         return rules
@@ -283,6 +286,7 @@ def _validate_header_rule_host(host: str) -> None:
 def _validate_header_rule_headers(host: str, headers: Dict[str, str]) -> None:
     total_bytes = 0
     seen_names: set[str] = set()
+    secret_names: set[str] = set()
     for name, value in headers.items():
         if not _is_valid_header_name(name):
             raise ValueError(f"header rule for {host!r}: {name!r} is not a valid header name")
@@ -308,7 +312,7 @@ def _validate_header_rule_headers(host: str, headers: Dict[str, str]) -> None:
                 f"header rule for {host!r}: header {name!r} value must not contain CR or LF"
             )
         try:
-            _parse_secret_references(value)
+            secret_names.update(_parse_secret_references(value))
         except ValueError as exc:
             raise ValueError(f"header rule for {host!r}, header {name!r}: {exc}") from exc
 
@@ -316,6 +320,11 @@ def _validate_header_rule_headers(host: str, headers: Dict[str, str]) -> None:
     if total_bytes > MAX_HEADER_RULE_BYTES:
         raise ValueError(
             f"header rule for {host!r} exceeds {MAX_HEADER_RULE_BYTES} bytes of headers"
+        )
+    if len(secret_names) > MAX_HEADER_RULE_SECRETS:
+        raise ValueError(
+            f"header rule for {host!r} references {len(secret_names)} distinct secrets; "
+            f"at most {MAX_HEADER_RULE_SECRETS} are allowed"
         )
 
 

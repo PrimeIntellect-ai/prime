@@ -372,6 +372,23 @@ class TestHeaderRuleValidation:
                 },
             )
 
+    def test_distinct_secret_cap_per_rule(self):
+        from prime_sandboxes.models import MAX_HEADER_RULE_SECRETS
+
+        def refs(count: int) -> str:
+            return "".join(f"${{prime.secrets.S{i}}}" for i in range(count))
+
+        # Repeats count once, and names are counted across all headers of the rule.
+        at_limit = _rules(
+            A=refs(MAX_HEADER_RULE_SECRETS - 1) + "${prime.secrets.S0}",
+            B="${prime.secrets.S9}",
+        )
+        CreateSandboxRequest(name="t", docker_image="img", network_rules=at_limit)
+
+        over_limit = _rules(A=refs(MAX_HEADER_RULE_SECRETS), B="${prime.secrets.EXTRA}")
+        with pytest.raises(ValidationError, match="distinct secrets"):
+            CreateSandboxRequest(name="t", docker_image="img", network_rules=over_limit)
+
     def test_case_equivalent_header_names_rejected(self):
         with pytest.raises(ValidationError, match="differ only by case"):
             CreateSandboxRequest(

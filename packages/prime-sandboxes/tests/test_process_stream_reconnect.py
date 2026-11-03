@@ -56,8 +56,8 @@ async def test_stream_reconnects_and_resumes_after_drop(fault, monkeypatch):
 
     reconnect_calls = []
 
-    def reconnect(started):
-        reconnect_calls.append(started)
+    def reconnect(started, data_offset):
+        reconnect_calls.append((started, data_offset))
         return resumed()
 
     proc = await AsyncSandboxProcess._create(
@@ -66,7 +66,7 @@ async def test_stream_reconnects_and_resumes_after_drop(fault, monkeypatch):
     stdout = await _drain(proc.stdout)
     rc = await proc.wait()
 
-    assert reconnect_calls == [True]
+    assert reconnect_calls == [(True, 1)]  # resume after the one data event received
     assert rc == 0  # exit observed on the resumed stream
     assert stdout == b"before\nafter\n"  # output from both segments
     await proc.aclose()
@@ -87,7 +87,7 @@ async def test_stream_reconnects_after_clean_eof(monkeypatch):
 
     reconnect_calls = []
 
-    def reconnect(started):
+    def reconnect(started, data_offset):
         reconnect_calls.append(started)
         return resumed()
 
@@ -115,7 +115,7 @@ async def test_stream_recovers_before_pid_is_received(monkeypatch):
 
     reconnect_calls = []
 
-    def reconnect(started):
+    def reconnect(started, data_offset):
         # started=False tells the caller to retry Start (create-or-attach).
         reconnect_calls.append(started)
 
@@ -158,7 +158,7 @@ async def test_reconnect_after_exit_replays_end_event(monkeypatch):
         dropped_mid_stream(),
         _noop_stdin,
         _noop_signal,
-        reconnect=lambda started: replayed_after_exit(),
+        reconnect=lambda started, data_offset: replayed_after_exit(),
     )
 
     assert await _drain(proc.stdout) == b"before\n"
@@ -214,7 +214,7 @@ async def test_permanent_fault_is_not_reconnected(fault):
 
     calls = []
 
-    def reconnect(started):
+    def reconnect(started, data_offset):
         calls.append(started)
         raise AssertionError("should not reconnect on a permanent fault")
 
@@ -245,7 +245,7 @@ async def test_reconnect_budget_resets_after_a_healthy_stretch(spacing, survives
 
     calls = [0]
 
-    def reconnect(started):
+    def reconnect(started, data_offset):
         calls[0] += 1
         return segment(calls[0])
 

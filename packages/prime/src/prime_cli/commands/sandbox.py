@@ -32,6 +32,7 @@ from prime_sandboxes import (
     UnauthorizedError,
     VolumeMount,
 )
+from pydantic import ValidationError
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
@@ -366,7 +367,7 @@ def list_sandboxes_cmd(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -468,7 +469,7 @@ def get(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -1323,10 +1324,24 @@ def create(
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
+    except ValidationError as e:
+        console.print(f"[red]Error:[/red] {escape(_validation_error_message(e))}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
+
+
+def _validation_error_message(exc: ValidationError) -> str:
+    """Summarize a request validation error without its input values, which
+    can carry --secret values and header templates."""
+    messages = []
+    for error in exc.errors():
+        message = error["msg"].removeprefix("Value error, ")
+        location = ".".join(str(part) for part in error["loc"])
+        messages.append(f"{location}: {message}" if location else message)
+    return "; ".join(messages)
 
 
 def _preview_bulk_delete_count(
@@ -1625,7 +1640,7 @@ def delete(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -1769,7 +1784,12 @@ def _resolve_network_policy_lists(
     if file_rules is not None and not isinstance(file_rules, dict):
         raise ValueError(f"{network_policy}: rules must map hosts to headers")
     if file_rules or inject_rules:
-        rules = {host: HeaderRule.model_validate(rule) for host, rule in (file_rules or {}).items()}
+        try:
+            rules = {
+                host: HeaderRule.model_validate(rule) for host, rule in (file_rules or {}).items()
+            }
+        except ValidationError as exc:
+            raise ValueError(f"{network_policy}: {_validation_error_message(exc)}") from None
         for host, rule in inject_rules.items():
             if host in rules:
                 raise ValueError(f"--inject-header for {host!r} also set in --network-policy")
@@ -1918,7 +1938,7 @@ def logs(sandbox_id: str) -> None:
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -2049,7 +2069,7 @@ def run(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -2107,7 +2127,7 @@ def upload_file(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -2168,7 +2188,7 @@ def download_file(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 

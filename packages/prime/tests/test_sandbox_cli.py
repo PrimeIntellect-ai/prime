@@ -1517,6 +1517,26 @@ def test_sandbox_network_policy_file_replaces_policy(
     }
 
 
+def test_sandbox_network_policy_file_invalid_rule_hides_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(
+        json.dumps({"allow": ["*"], "rules": {"api.example.com": {"headers": "Bearer sk-literal"}}})
+    )
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--network-policy", str(policy_file)],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "sk-literal" not in output
+    assert "headers: Input should be a valid dictionary" in output
+
+
 def test_sandbox_network_policy_file_rejects_unknown_keys(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
@@ -1674,6 +1694,35 @@ def test_sandbox_create_accepts_network_policy_file_rules(
         )
     }
     assert "Header Rules: api.example.com: 1 header(s)" in output
+
+
+def test_sandbox_create_invalid_rule_never_prints_secret_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--secret",
+            "DB_PASSWORD=hunter2-plaintext",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: a",
+            "--inject-header",
+            "api.example.com",
+            "authorization: b",
+            "--yes",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "hunter2-plaintext" not in output
+    assert "differ only by case" in output
 
 
 def test_sandbox_create_rejects_malformed_inject_header(

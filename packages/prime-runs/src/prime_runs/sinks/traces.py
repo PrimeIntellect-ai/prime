@@ -13,22 +13,23 @@ from prime_traces import ErrorCode, LineFormat, TracesClient
 from .. import _fork
 from ..exceptions import ForbiddenError
 from ..models import RUN_KIND
-from .base import Sink, is_episode, stamp_run, to_mapping
+from .base import Sink, has_run_type, is_episode, stamp_run, to_mapping
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RECEIPT_HISTORY_SIZE = 100
 
 
-def names_run(record: Any, run_id: str, run_type: str) -> bool:
+def names_run(record: Any, run_id: str) -> bool:
     """Whether ``record`` already names this run, itself and every member trace, so its
-    own ``to_json()`` (verifiers ``Episode``/``Trace``) can be uploaded as is. A
-    producer's encoder can work in short steps, while encoding ``to_record()`` here holds
-    the GIL for the whole record."""
+    own ``to_json()`` (verifiers ``Episode``/``Trace``) can be uploaded as is: stamping
+    would change nothing, as it keeps a recorded ``run.type``. A producer's encoder can
+    work in short steps, while encoding ``to_record()`` here holds the GIL for the whole
+    record."""
     if not callable(getattr(record, "to_json", None)):
         return False
     return all(
-        getattr(run, "id", None) == run_id and getattr(run, "type", None) == run_type
+        getattr(run, "id", None) == run_id and has_run_type(getattr(run, "type", None))
         for run in [getattr(record, "run", None)]
         + [getattr(trace, "run", None) for trace in getattr(record, "traces", None) or []]
     )
@@ -112,9 +113,8 @@ class TracesSink(Sink):
         has_traces: list = []
 
         def prepared() -> Any:
-            run_type = self._context.get("run_type", RUN_KIND)
             for record in records:
-                if self._run_id is not None and names_run(record, self._run_id, run_type):
+                if self._run_id is not None and names_run(record, self._run_id):
                     prepared_record = record.to_json()
                     traces = getattr(record, "traces", None)
                 else:

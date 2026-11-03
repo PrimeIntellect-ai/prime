@@ -13,8 +13,8 @@ Mode = Literal["online", "disabled"]
 OnError = Literal["warn", "raise"]
 
 RunKind = Literal["eval", "train"]
-"""Stamped as ``run.type`` on records and sent as upload provenance; the traces
-service's vocabulary, matching verifiers' ``EvalRunInfo`` / ``TrainRunInfo``."""
+"""Sent as the upload's ``run_type`` provenance, the traces service's vocabulary, and
+stamped as ``run.type`` on records that recorded no run type of their own."""
 
 RUN_KIND: RunKind = "eval"
 

@@ -22,6 +22,7 @@ from prime_sandboxes import (
     ImageVisibility,
     PersonalImageOwner,
     PlatformImageOwner,
+    RegistryAuth,
     TeamImageOwner,
     UnauthorizedError,
     UpdateImagesRequest,
@@ -244,6 +245,23 @@ def push_image(
     arch: str = typer.Option(
         "amd64", "--arch", help="VM architecture: amd64, arm64, or arm (alias)"
     ),
+    registry_server: Optional[str] = typer.Option(
+        None,
+        "--registry-server",
+        help="Private registry host to pull from with credentials (e.g. ghcr.io, docker.io)",
+    ),
+    registry_username: Optional[str] = typer.Option(
+        None,
+        "--registry-username",
+        envvar="PRIME_REGISTRY_USERNAME",
+        help="Private registry username",
+    ),
+    registry_password: Optional[str] = typer.Option(
+        None,
+        "--registry-password",
+        envvar="PRIME_REGISTRY_PASSWORD",
+        help="Private registry password or token (prompted if omitted)",
+    ),
 ):
     """
     Build VM image artifacts on Prime Intellect.
@@ -256,6 +274,10 @@ def push_image(
     Allowed registries: Docker Hub, ghcr.io, quay.io, public.ecr.aws,
     registry.k8s.io, and mcr.microsoft.com. Google-hosted registries are rejected.
 
+    --registry-server/--registry-username pull a private --source-image or
+    private Dockerfile base images. Credentials are used for this build only and
+    are not stored. Private Docker Hub sources stay owned by you or your team.
+
     \b
     Examples:
         prime images push myapp:v1.0.0
@@ -263,6 +285,8 @@ def push_image(
         prime images push myapp:v1 --public
         prime images push --source-image ubuntu:22.04
         prime images push myapp:v1 --source-image ghcr.io/org/app:v1
+        PRIME_REGISTRY_PASSWORD=$TOKEN prime images push myapp:v1 \\
+            --source-image ghcr.io/org/private:v1 --registry-server ghcr.io --registry-username me
     """
     try:
         if arch == "arm":
@@ -273,6 +297,25 @@ def push_image(
         if public and private:
             console.print("[red]Error: --public and --private cannot be used together[/red]")
             raise typer.Exit(1)
+
+        registry_auth = None
+        if registry_server or registry_username:
+            if not (registry_server and registry_username):
+                console.print(
+                    "[red]Error: --registry-server and --registry-username must be "
+                    "used together[/red]"
+                )
+                raise typer.Exit(1)
+            if platform_image:
+                console.print(
+                    "[red]Error: Platform images cannot use private registry credentials[/red]"
+                )
+                raise typer.Exit(1)
+            registry_auth = RegistryAuth(
+                server=registry_server,
+                username=registry_username,
+                password=registry_password or typer.prompt("Registry password", hide_input=True),
+            )
 
         is_source_build = source_image is not None
         if platform_image and private:
@@ -293,12 +336,14 @@ def push_image(
             )
             raise typer.Exit(1)
         docker_hub_sources = [source for source in source_refs if is_docker_hub_reference(source)]
-        if is_source_build and docker_hub_sources and image_reference is not None:
+        # Credentialed Docker Hub sources are private images and stay owned.
+        automatic_docker_hub_build = bool(docker_hub_sources) and registry_auth is None
+        if is_source_build and automatic_docker_hub_build and image_reference is not None:
             console.print(
                 "[red]Error: Docker Hub source builds do not accept a custom destination[/red]"
             )
             raise typer.Exit(1)
-        if is_source_build and docker_hub_sources and private:
+        if is_source_build and automatic_docker_hub_build and private:
             console.print("[red]Error: Docker Hub source builds must be public[/red]")
             raise typer.Exit(1)
         if is_source_build and docker_hub_sources and len(docker_hub_sources) != len(source_refs):
@@ -332,7 +377,6 @@ def push_image(
             raise typer.Exit(1)
 
         if is_source_build:
-            automatic_docker_hub_build = bool(docker_hub_sources)
             platform_source_build = platform_image or automatic_docker_hub_build
             source_display = ", ".join(source_refs)
             if image_name and image_tag:
@@ -377,6 +421,7 @@ def push_image(
                     visibility=visibility,
                     owner_scope="platform" if platform_source_build else None,
                     platform="linux/arm64" if arch == "arm64" else "linux/amd64",
+                    registry_auth=registry_auth,
                 )
             except UnauthorizedError:
                 console.print(
@@ -557,11 +602,7 @@ def push_image(
             # Start the build
             console.print("[cyan]Starting build...[/cyan]")
             try:
-                client.request(
-                    "POST",
-                    f"/images/build/{build_id}/start",
-                    json={"context_uploaded": True},
-                )
+                ImageClient(client).start_build(build_id, registry_auth=registry_auth)
             except APIError as e:
                 console.print(f"[red]Error: Failed to start build: {e}[/red]")
                 raise typer.Exit(1)

@@ -600,11 +600,20 @@ class ImageListResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RegistryAuth(BaseModel):
+    """Private-registry pull credentials for one build. Forwarded, never stored."""
+
+    server: str
+    username: str
+    password: str = Field(repr=False)
+
+
 class BuildImageRequest(BaseModel):
     """Request a linux/amd64 or linux/arm64 VM image build.
 
-    Docker Hub sources become public, org-less platform images automatically.
-    They cannot use a custom destination, team, or private visibility.
+    Docker Hub sources become public, org-less platform images automatically
+    unless registry_auth is set. They cannot use a custom destination, team,
+    or private visibility.
     """
 
     image_name: Optional[str] = None
@@ -615,6 +624,7 @@ class BuildImageRequest(BaseModel):
     team_id: Optional[str] = Field(default=None, alias="teamId")
     visibility: Optional[ImageVisibility] = None
     owner_scope: Optional[Literal["platform"]] = Field(default=None, alias="ownerScope")
+    registry_auth: Optional[RegistryAuth] = Field(default=None, alias="registryAuth")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -625,6 +635,11 @@ class BuildImageRequest(BaseModel):
             source for source in sources if source and is_docker_hub_reference(source)
         ]
         if not docker_hub_sources:
+            return self
+        if self.registry_auth is not None:
+            # Credentialed Docker Hub pulls are private images and stay owned.
+            if len(docker_hub_sources) != len([source for source in sources if source]):
+                raise ValueError("Docker Hub and non-Docker Hub sources cannot share one request")
             return self
 
         if self.image_name is not None or self.image_tag is not None:

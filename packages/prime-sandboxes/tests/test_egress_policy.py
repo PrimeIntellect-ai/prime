@@ -372,6 +372,14 @@ class TestHeaderRuleValidation:
                 },
             )
 
+    def test_case_equivalent_header_names_rejected(self):
+        with pytest.raises(ValidationError, match="differ only by case"):
+            CreateSandboxRequest(
+                name="t",
+                docker_image="img",
+                network_rules=_rules(Authorization="a", authorization="b"),
+            )
+
     @pytest.mark.parametrize(
         "host",
         [

@@ -282,10 +282,18 @@ def _validate_header_rule_host(host: str) -> None:
 
 def _validate_header_rule_headers(host: str, headers: Dict[str, str]) -> None:
     total_bytes = 0
+    seen_names: set[str] = set()
     for name, value in headers.items():
         if not _is_valid_header_name(name):
             raise ValueError(f"header rule for {host!r}: {name!r} is not a valid header name")
         lower_name = name.lower()
+        # The node canonicalizes names; case variants would pick a value nondeterministically.
+        if lower_name in seen_names:
+            raise ValueError(
+                f"header rule for {host!r}: header {name!r} and an earlier entry "
+                "differ only by case"
+            )
+        seen_names.add(lower_name)
         if lower_name in _RESERVED_RULE_HEADERS:
             raise ValueError(
                 f"header rule for {host!r}: {name!r} is a reserved header and cannot be set"

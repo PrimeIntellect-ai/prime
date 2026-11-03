@@ -103,9 +103,7 @@ def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch)
             updated_at=datetime.now(timezone.utc),
         )
 
-    monkeypatch.setattr(
-        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint
-    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint)
 
     for checkpoint_id, (state, error) in states.items():
         result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])
@@ -1483,9 +1481,7 @@ def test_sandbox_network_policy_file_replaces_policy(
     policy = {
         "allow": ["api.example.com"],
         "rules": {
-            "api.example.com": {
-                "headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
-            }
+            "api.example.com": {"headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}}
         },
     }
     policy_file = tmp_path / "policy.json"

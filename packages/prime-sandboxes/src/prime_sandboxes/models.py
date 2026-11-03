@@ -212,7 +212,7 @@ def _parse_secret_references(value: str) -> List[str]:
 
 
 def validate_header_rules(
-    rules: Optional[Dict[str, HeaderRule]]
+    rules: Optional[Dict[str, HeaderRule]],
 ) -> Optional[Dict[str, HeaderRule]]:
     """Client-side mirror of the API's header substitution rules contract.
 
@@ -237,9 +237,7 @@ def validate_header_rules(
             rule = HeaderRule.model_validate(rule)
         canonical_host = host.lower()
         if canonical_host in canonical:
-            raise ValueError(
-                f"header rule hosts {host!r} and an earlier entry differ only by case"
-            )
+            raise ValueError(f"header rule hosts {host!r} and an earlier entry differ only by case")
         _validate_header_rule_host(host)
         _validate_header_rule_headers(host, rule.headers)
         canonical[canonical_host] = rule
@@ -269,9 +267,7 @@ def _validate_header_rule_host(host: str) -> None:
         )
     for label in domain.split("."):
         if not 1 <= len(label) <= 63:
-            raise ValueError(
-                f"header rule host {host!r} contains an empty or oversized label"
-            )
+            raise ValueError(f"header rule host {host!r} contains an empty or oversized label")
         if label.startswith("-") or label.endswith("-"):
             raise ValueError(
                 f"header rule host {host!r}: labels must not start or end with a hyphen"
@@ -333,9 +329,7 @@ def _is_valid_header_name(name: str) -> bool:
     if not 1 <= len(name) <= 255:
         return False
     for character in name:
-        if character.isascii() and (
-            character.isalnum() or character in "!#$%&'*+-.^_`|~"
-        ):
+        if character.isascii() and (character.isalnum() or character in "!#$%&'*+-.^_`|~"):
             continue
         return False
     return True

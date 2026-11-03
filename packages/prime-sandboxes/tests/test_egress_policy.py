@@ -355,8 +355,7 @@ class TestHeaderRuleValidation:
         from prime_sandboxes.models import MAX_HEADER_RULE_HOSTS
 
         rules = {
-            f"h{i}.example.com": {"headers": {"X": "v"}}
-            for i in range(MAX_HEADER_RULE_HOSTS + 1)
+            f"h{i}.example.com": {"headers": {"X": "v"}} for i in range(MAX_HEADER_RULE_HOSTS + 1)
         }
         with pytest.raises(ValidationError, match="at most"):
             CreateSandboxRequest(name="t", docker_image="img", network_rules=rules)
@@ -420,9 +419,7 @@ class TestHeaderRuleValidation:
                 network_rules={host: {"headers": {"X": "v"}}},
             )
 
-    @pytest.mark.parametrize(
-        "host", ["123.example.com", "example.com.456", "1.2.3.4.5"]
-    )
+    @pytest.mark.parametrize("host", ["123.example.com", "example.com.456", "1.2.3.4.5"])
     def test_numeric_dns_labels_accepted(self, host):
         request = CreateSandboxRequest(
             name="t",
@@ -433,14 +430,22 @@ class TestHeaderRuleValidation:
 
     @pytest.mark.parametrize(
         "name",
-        ["Host", "host", "Content-Length", "transfer-encoding", "Connection",
-         "Upgrade", "Keep-Alive", "TE", "Trailer", "Proxy-Authorization"],
+        [
+            "Host",
+            "host",
+            "Content-Length",
+            "transfer-encoding",
+            "Connection",
+            "Upgrade",
+            "Keep-Alive",
+            "TE",
+            "Trailer",
+            "Proxy-Authorization",
+        ],
     )
     def test_reserved_headers_rejected(self, name):
         with pytest.raises(ValidationError, match="reserved"):
-            CreateSandboxRequest(
-                name="t", docker_image="img", network_rules=_rules(**{name: "v"})
-            )
+            CreateSandboxRequest(name="t", docker_image="img", network_rules=_rules(**{name: "v"}))
 
     def test_crlf_value_rejected(self):
         with pytest.raises(ValidationError, match="CR or LF"):
@@ -460,9 +465,7 @@ class TestHeaderRuleValidation:
     )
     def test_invalid_references_rejected(self, value, message):
         with pytest.raises(ValidationError, match=message):
-            CreateSandboxRequest(
-                name="t", docker_image="img", network_rules=_rules(**{"X": value})
-            )
+            CreateSandboxRequest(name="t", docker_image="img", network_rules=_rules(**{"X": value}))
 
     def test_valid_reference_accepted(self):
         request = CreateSandboxRequest(
@@ -485,9 +488,7 @@ class TestSecretFill:
 
     def test_fill_composes_into_rules(self):
         rules = _rules(Authorization=f"Bearer {Secret.fill('OPENAI_KEY')}")
-        request = CreateSandboxRequest(
-            name="t", docker_image="img", network_rules=rules
-        )
+        request = CreateSandboxRequest(name="t", docker_image="img", network_rules=rules)
         assert request.network_rules["api.example.com"].headers["Authorization"] == (
             "Bearer ${prime.secrets.OPENAI_KEY}"
         )
@@ -508,9 +509,7 @@ class TestSetNetworkRules:
         assert payload["allowlist"] is None
         assert payload["denylist"] == []
         assert payload["rules"] == {
-            "api.example.com": {
-                "headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
-            }
+            "api.example.com": {"headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}}
         }
         assert status.applied
 
@@ -526,9 +525,7 @@ class TestSetNetworkRules:
         client = _sync_client()
 
         with pytest.raises(ValueError, match="reserved"):
-            client.set_network(
-                "sbx-1", allow=["*"], rules={"a.com": {"headers": {"Host": "x"}}}
-            )
+            client.set_network("sbx-1", allow=["*"], rules={"a.com": {"headers": {"Host": "x"}}})
 
         client.client.request.assert_not_called()
 

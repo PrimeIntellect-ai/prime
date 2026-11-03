@@ -117,13 +117,19 @@ class AsyncSandboxProcess:
         transport: HTTPTransport | None = None,
         reconnect: _Reconnect | None = None,
         session_uuid: str | None = None,
+        attached: bool = False,
     ) -> "AsyncSandboxProcess":
+        """``attached`` streams a process that outlives this handle (``attach_process``):
+        a failed or cancelled attach detaches from it instead of stopping it."""
         process = cls(
             stream_client, stream, write_stdin, send_signal, transport, reconnect, session_uuid
         )
         try:
             await asyncio.shield(process._started)
         except asyncio.CancelledError:
+            if attached:
+                await process.detach()
+                raise
             # The Start RPC may already have created the remote process even if
             # its first event has not reached us. Briefly retain the stream so a
             # reported PID can be signalled instead of leaking on cancellation.
@@ -132,7 +138,7 @@ class AsyncSandboxProcess:
             await process.aclose()
             raise
         except BaseException:
-            await process.aclose()
+            await (process.detach() if attached else process.aclose())
             raise
         return process
 

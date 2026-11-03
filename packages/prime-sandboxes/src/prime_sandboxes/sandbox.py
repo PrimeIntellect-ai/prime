@@ -4832,6 +4832,7 @@ class AsyncSandboxClient:
             transport=transport,
             reconnect=reconnect,
             session_uuid=session_uuid,
+            attached=start is None,
         )
 
     async def _execute_process_control_rpc(

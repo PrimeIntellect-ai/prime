@@ -172,3 +172,31 @@ async def test_detach_does_not_reattach_its_cancelled_stream(monkeypatch):
         assert [method for method, _ in _FakeConnectClient.calls] == ["Start"]
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_attach_leaves_the_process_running(monkeypatch):
+    """An attach cancelled before Connect re-announces the pid detaches; it sends no
+    signal to the process it was recovering."""
+
+    class _SlowConnectClient(_FakeConnectClient):
+        def execute_server_stream(self, **kwargs):
+            type(self).calls.append((kwargs["method"].name, kwargs["request"]))
+
+            async def events():
+                # The pid arrives just after the attach is cancelled.
+                await asyncio.sleep(0.3)
+                yield _start_event(42, pb.ConnectResponse)
+                await asyncio.Event().wait()
+
+            return events()
+
+    client = _client(monkeypatch)
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", _SlowConnectClient)
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(client.attach_process("sbx-vm", "session-1"), timeout=0.2)
+        await asyncio.sleep(0.5)
+        assert [method for method, _ in _FakeConnectClient.calls] == ["Connect"]
+    finally:
+        await client.aclose()

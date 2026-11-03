@@ -127,3 +127,65 @@ class TestAsyncLaunchRetry:
         cast(Any, client).execute_command = execute
         with pytest.raises(APIError, match="No space left on device"):
             await client.start_background_job("sb", "ls")
+
+
+def _unavailable():
+    from connectrpc.code import Code
+    from connectrpc.errors import ConnectError
+
+    error = APIError("Connect RPC failed (unavailable): Failed to route request to sandbox")
+    error.__cause__ = ConnectError(Code.UNAVAILABLE, "Failed to route request to sandbox")
+    return error
+
+
+_RUNNING = CommandResponse(stdout="", stderr="", exit_code=0)
+
+
+class TestTransientExecRetry:
+    def test_sync_launch_and_status_retry_transient_faults(self, monkeypatch):
+        monkeypatch.setattr("prime_sandboxes.sandbox.time.sleep", lambda _: None)
+        client = SandboxClient(APIClient(api_key="test-key"))
+        calls = {"n": 0}
+
+        def execute(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] % 2:
+                raise _unavailable()
+            return _OK
+
+        cast(Any, client).execute_command = execute
+        job = client.start_background_job("sb", "ls")
+        assert calls["n"] == 2
+        assert not client.get_background_job_status("sb", job).completed
+        assert calls["n"] == 4
+
+    def test_sync_non_transient_api_error_is_not_retried(self):
+        client = SandboxClient(APIClient(api_key="test-key"))
+        calls = {"n": 0}
+
+        def execute(*_a, **_k):
+            calls["n"] += 1
+            raise APIError("Command stream ended without exit code")
+
+        cast(Any, client).execute_command = execute
+        with pytest.raises(APIError, match="without exit code"):
+            client.start_background_job("sb", "ls")
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_async_launch_and_status_retry_transient_faults(self, monkeypatch):
+        monkeypatch.setattr("prime_sandboxes.sandbox.asyncio.sleep", _no_sleep)
+        client = AsyncSandboxClient(APIClient(api_key="test-key"))
+        calls = {"n": 0}
+
+        async def execute(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] % 2:
+                raise _unavailable()
+            return _RUNNING
+
+        cast(Any, client).execute_command = execute
+        job = await client.start_background_job("sb", "ls")
+        assert calls["n"] == 2
+        assert not (await client.get_background_job_status("sb", job)).completed
+        assert calls["n"] == 4

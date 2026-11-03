@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Literal
 
@@ -18,8 +19,13 @@ logger = logging.getLogger(__name__)
 
 _EOF = object()
 _EXIT_WAIT_SECONDS = 5
-_STREAM_MAX_RECONNECTS = 5
+_STREAM_MAX_RECONNECTS = 8
 _STREAM_RECONNECT_BACKOFF_SECONDS = 0.5
+_STREAM_RECONNECT_MAX_DELAY_SECONDS = 30
+# The reconnect budget is per outage, not per process lifetime: a stream that stays
+# up this long after re-attaching gets a fresh budget. Must exceed the max delay so
+# back-to-back drops within one outage keep counting against the same budget.
+_STREAM_RECONNECT_RESET_SECONDS = 120
 
 _WriteStdin = Callable[[bytes], Awaitable[None]]
 _SendSignal = Callable[[Literal["terminate", "kill"]], Awaitable[None]]
@@ -250,7 +256,10 @@ class AsyncSandboxProcess:
         reconnect = self._reconnect
         assert reconnect is not None
 
-        delay = _STREAM_RECONNECT_BACKOFF_SECONDS * 2 ** (reconnects - 1)
+        delay = min(
+            _STREAM_RECONNECT_BACKOFF_SECONDS * 2 ** (reconnects - 1),
+            _STREAM_RECONNECT_MAX_DELAY_SECONDS,
+        )
         logger.warning(
             "live process stream dropped (%s); re-attaching %d/%d in %.1fs",
             error or "ended without an exit event",
@@ -269,6 +278,7 @@ class AsyncSandboxProcess:
     async def _pump(self) -> None:
         ended = False
         reconnects = 0
+        last_reconnect = 0.0
         try:
             while not ended:
                 error: BaseException | None = None
@@ -303,12 +313,15 @@ class AsyncSandboxProcess:
                     if error is not None:
                         raise error
                     break
+                if time.monotonic() - last_reconnect >= _STREAM_RECONNECT_RESET_SECONDS:
+                    reconnects = 0
                 if not self._can_reconnect(reconnects, error):
                     if error is not None:
                         raise error
                     raise APIError("Process stream ended without an exit event")
 
                 reconnects += 1
+                last_reconnect = time.monotonic()
                 await self._reconnect_stream(reconnects, error)
         except asyncio.CancelledError:
             raise

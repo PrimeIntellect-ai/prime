@@ -48,6 +48,7 @@ from tenacity import (
     retry,
     retry_if_exception,
     stop_after_attempt,
+    stop_after_delay,
     wait_exponential,
     wait_random_exponential,
 )
@@ -1787,6 +1788,28 @@ _read_file_retry = retry(
 )
 
 
+def _is_transient_exec_error(exc: BaseException) -> bool:
+    """A command RPC link fault (gateway 502/503, dropped body), not a command outcome."""
+    cause = exc.__cause__
+    return (
+        isinstance(exc, APIError)
+        and isinstance(cause, ConnectError)
+        and is_transient_control_fault(cause)
+    )
+
+
+# Retry for idempotent exec calls only: background-job status reads and the
+# mkdir-guarded launch. A day-long rollout polls thousands of times, so one gateway
+# or node-ingress blip must not end it. Timeouts and sandbox-gone errors are not
+# APIErrors caused by a transient ConnectError and are never retried here.
+_transient_exec_retry = retry(
+    retry=retry_if_exception(_is_transient_exec_error),
+    stop=stop_after_delay(120),
+    wait=wait_random_exponential(multiplier=1, min=1, max=15),
+    reraise=True,
+)
+
+
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -3080,7 +3103,7 @@ class SandboxClient:
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
-                launch = self.execute_command(
+                launch = _transient_exec_retry(self.execute_command)(
                     sandbox_id,
                     bg_cmd,
                     working_dir=launch_cwd,
@@ -3129,6 +3152,7 @@ class SandboxClient:
         assert snapshot.exit_code is not None
         return self._background_job_output_coordinator.get(job, snapshot.exit_code, timeout)
 
+    @_transient_exec_retry
     def _get_background_job_status_unleased(
         self,
         sandbox_id: str,
@@ -5020,7 +5044,7 @@ class AsyncSandboxClient:
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
-                launch = await self.execute_command(
+                launch = await _transient_exec_retry(self.execute_command)(
                     sandbox_id,
                     bg_cmd,
                     working_dir=launch_cwd,
@@ -5069,6 +5093,7 @@ class AsyncSandboxClient:
         assert snapshot.exit_code is not None
         return await self._background_job_output_coordinator.get(job, snapshot.exit_code, timeout)
 
+    @_transient_exec_retry
     async def _get_background_job_status_unleased(
         self,
         sandbox_id: str,

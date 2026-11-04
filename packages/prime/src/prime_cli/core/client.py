@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional, Union
 import httpx
 
 from .config import Config
+from .dpop import load_auth
 
 
 def default_user_agent() -> str:
@@ -94,6 +95,7 @@ class APIClient:
 
         # Use provided API key or fall back to config
         self.api_key = api_key or self.config.api_key
+        self.auth = None if self.api_key else load_auth(self.config)
 
         # Store require_auth for lazy validation on request
         self.require_auth = require_auth
@@ -109,12 +111,13 @@ class APIClient:
 
         self.client = httpx.Client(
             headers=headers,
+            auth=self.auth,
             follow_redirects=True,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
 
     def _check_auth_required(self) -> None:
-        if self.require_auth and not self.api_key:
+        if self.require_auth and not (self.api_key or self.auth):
             raise APIError(
                 "No API key configured. Use command 'prime login' to configure your API key.",
             )
@@ -251,6 +254,7 @@ class AsyncAPIClient:
 
         # Use provided API key or fall back to config
         self.api_key = api_key or self.config.api_key
+        self.auth = None if self.api_key else load_auth(self.config)
 
         # Store require_auth for lazy validation on request
         self.require_auth = require_auth
@@ -266,12 +270,13 @@ class AsyncAPIClient:
 
         self.client = httpx.AsyncClient(
             headers=headers,
+            auth=self.auth,
             follow_redirects=True,
             timeout=httpx.Timeout(30.0, connect=10.0),
         )
 
     def _check_auth_required(self) -> None:
-        if self.require_auth and not self.api_key:
+        if self.require_auth and not (self.api_key or self.auth):
             raise APIError(
                 "No API key configured. Use command 'prime login' to configure your API key.",
             )

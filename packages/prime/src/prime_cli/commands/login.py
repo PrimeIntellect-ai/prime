@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from prime_cli.core import Config
+from prime_cli.core import Config, dpop
 
 from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console, require_persistent_context
@@ -136,9 +136,107 @@ def decrypt_challenge_response(
         return None
 
 
+def _finish_login(client: APIClient, config: Config) -> None:
+    """Record the logged-in user's id, then confirm."""
+    try:
+        whoami_resp = client.get("/user/whoami")
+        data = whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
+        if isinstance(data, dict):
+            user_id = data.get("id")
+            if user_id:
+                config.set_user_id(user_id, user_name=data.get("name"))
+                config.update_current_environment_file()
+    except (APIError, Exception):
+        console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")
+
+    console.print("[green]Successfully logged in![/green]")
+
+
+def dpop_login(config: Config, headless: bool) -> None:
+    """RFC 8628 device-code login yielding a DPoP-bound (RFC 9449) session."""
+    provider = dpop.key_provider()
+    try:
+        key = provider.create(config.current_environment)
+    except Exception as e:
+        console.print(f"[red]Could not store a device key in the OS keychain:[/red] {e}")
+        console.print("Use 'prime login' without --dpop to log in with an API key.")
+        raise typer.Exit(1)
+
+    base_url = config.base_url
+    start_response = httpx.post(
+        f"{base_url}{dpop.DEVICE_START_PATH}", json={"client_id": dpop.CLIENT_ID}
+    )
+    if start_response.status_code != 200:
+        provider.delete(config.current_environment)
+        console.print(f"[red]Failed to start login:[/red] {start_response.text}")
+        raise typer.Exit(1)
+    start = start_response.json()
+    verification_url = start.get("verification_uri_complete") or start["verification_uri"]
+
+    console.print("\n[bold blue]🔐 Login Required[/bold blue]")
+    console.print(
+        f"\nOpen [link={verification_url}]{verification_url}[/link] and confirm the code:\n\n"
+        f"[bold green]{start['user_code']}[/bold green]\n"
+    )
+    console.print("[dim]Waiting for authentication...[/dim]")
+    if not headless:
+        try:
+            webbrowser.open(verification_url, new=2)
+        except Exception:
+            pass
+
+    interval = int(start.get("interval", 5))
+    deadline = time.time() + int(start.get("expires_in", 900))
+    with httpx.Client(auth=dpop.DPoPAuth(key), timeout=30.0) as http:
+        while True:
+            if time.time() > deadline:
+                error = "expired_token"
+                break
+            time.sleep(interval)
+            response = http.post(
+                f"{base_url}{dpop.DEVICE_TOKEN_PATH}",
+                json={
+                    "grant_type": dpop.DEVICE_CODE_GRANT,
+                    "device_code": start["device_code"],
+                    "client_id": dpop.CLIENT_ID,
+                },
+            )
+            body = response.json()
+            if response.status_code == 200:
+                dpop.save_session(config, body)
+                error = None
+                break
+            error = body.get("error") or body.get("detail")
+            if error == "slow_down":
+                interval += 5
+            elif error != "authorization_pending":
+                break
+    if error:
+        provider.delete(config.current_environment)
+        console.print(f"[red]Login failed:[/red] {error}")
+        raise typer.Exit(1)
+
+    # A stored API key would take precedence over the new session.
+    config.set_api_key("")
+    config.update_current_environment_file()
+    client = APIClient()
+    _finish_login(client, config)
+    if config.api_key:
+        console.print(
+            "[yellow]Note:[/yellow] PRIME_API_KEY is set and takes precedence over this session."
+        )
+    fetch_and_select_team(client, config)
+
+
 @app.callback(invoke_without_command=True)
 def login(
     headless: bool = typer.Option(False, "--headless", help="Don't attempt to open browser"),
+    use_dpop: bool = typer.Option(
+        False,
+        "--dpop",
+        help="Log in with a short-lived session bound to a key on this device "
+        "instead of minting an API key",
+    ),
     max_concurrent_sandboxes: Optional[int] = typer.Option(
         None,
         "--max-concurrent-sandboxes",
@@ -206,6 +304,13 @@ def login(
             "Please run 'prime config set-base-url' first.",
         )
         raise typer.Exit(1)
+
+    if use_dpop:
+        if key_limits:
+            console.print("[red]API key limits cannot be combined with --dpop.[/red]")
+            raise typer.Exit(1)
+        dpop_login(config, headless)
+        return
 
     private_key = None
     try:
@@ -279,22 +384,8 @@ def login(
                         # Also update the current environment's saved file
                         config.update_current_environment_file()
 
-                        # Attempt to fetch the current user id
                         client = APIClient(api_key=api_key)
-                        try:
-                            whoami_resp = client.get("/user/whoami")
-                            data = (
-                                whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
-                            )
-                            if isinstance(data, dict):
-                                user_id = data.get("id")
-                                if user_id:
-                                    config.set_user_id(user_id, user_name=data.get("name"))
-                                    config.update_current_environment_file()
-                        except (APIError, Exception):
-                            console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")
-
-                        console.print("[green]Successfully logged in![/green]")
+                        _finish_login(client, config)
                         if key_limits:
                             summary = ", ".join(f"{k}={v}" for k, v in key_limits.items())
                             console.print(f"[dim]API key limits: {summary}[/dim]")

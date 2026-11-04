@@ -3,7 +3,7 @@ import os
 
 import typer
 
-from prime_cli.core import Config
+from prime_cli.core import Config, dpop
 
 from ..utils import PlainTyper, get_console, require_persistent_context
 
@@ -53,12 +53,13 @@ def _clear_env_file(config: Config) -> None:
 def logout(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Clear the stored API key, team selection, and user id."""
+    """Clear the stored API key or device session, team selection, and user id."""
     require_persistent_context()
     config = Config()
 
     raw = config.config
-    if not raw.get("api_key") and not raw.get("user_id") and not raw.get("team_id"):
+    has_session = dpop.load_session(config) is not None
+    if not (raw.get("api_key") or raw.get("user_id") or raw.get("team_id") or has_session):
         console.print("[yellow]Not logged in.[/yellow]")
         set_overrides = [name for name in _ENV_OVERRIDES if os.getenv(name)]
         if set_overrides:
@@ -70,11 +71,12 @@ def logout(
 
     env_name = config.current_environment
     if not yes and not typer.confirm(
-        f"Log out of '{env_name}' (clears API key, team, and user id)?",
+        f"Log out of '{env_name}' (clears credentials, team, and user id)?",
         default=True,
     ):
         raise typer.Exit(0)
 
+    dpop.delete_session(config)
     config.set_api_key("")
     config.set_team(None)
     config.set_user_id(None)

@@ -1177,3 +1177,100 @@ def test_push_source_build_nested_results(monkeypatch, failed_count):
         assert "source unavailable" in result.output
     if failed_count == 2:
         assert "Your VM image build is running" not in result.output
+
+
+def test_push_private_docker_hub_source_sends_registry_auth_and_stays_owned(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured["json"] = json
+            return {
+                "build_id": "build-123",
+                "buildIds": ["build-123"],
+                "upload_url": None,
+                "fullImagePath": "team/private:v1",
+                "visibility": "PRIVATE",
+            }
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "images",
+            "push",
+            "--source-image",
+            "acme/private:v1",
+            "--private",
+            "--registry-server",
+            "docker.io",
+            "--registry-username",
+            "me",
+        ],
+        env={**TEST_ENV, "PRIME_TEAM_ID": "team-123", "PRIME_REGISTRY_PASSWORD": "tok"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "owner_scope" not in captured["json"]
+    assert captured["json"]["team_id"] == "team-123"
+    assert captured["json"]["registry_auth"] == {
+        "server": "docker.io",
+        "username": "me",
+        "password": "tok",
+    }
+    assert "tok" not in result.output
+
+
+def test_push_dockerfile_build_sends_registry_auth_on_start(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    (tmp_path / "Dockerfile").write_text("FROM ghcr.io/acme/base:v1\n")
+    captured = {}
+
+    class DummyAPIClient:
+        def request(self, method, path, json=None, params=None):
+            captured[path] = json
+            if path == "/images/build":
+                return {
+                    "build_id": "build-123",
+                    "upload_url": "https://example.test/upload",
+                    "expires_in": 3600,
+                    "fullImagePath": "app:v1",
+                }
+            return {}
+
+    class DummyUploadResponse:
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("prime_cli.commands.images.APIClient", DummyAPIClient)
+    monkeypatch.setattr(
+        "prime_cli.commands.images.httpx.put", lambda *a, **k: DummyUploadResponse()
+    )
+
+    result = runner.invoke(
+        app,
+        ["images", "push", "app:v1", "--registry-server", "ghcr.io", "--registry-username", "me"],
+        input="tok\n",
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "registry_auth" not in captured["/images/build"]
+    assert captured["/images/build/build-123/start"] == {
+        "context_uploaded": True,
+        "registryAuth": {"server": "ghcr.io", "username": "me", "password": "tok"},
+    }
+
+
+def test_push_registry_auth_requires_server_and_username(monkeypatch):
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+    result = runner.invoke(
+        app,
+        ["images", "push", "--source-image", "ghcr.io/a/b:v1", "--registry-username", "me"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1
+    assert "must be used together" in result.output

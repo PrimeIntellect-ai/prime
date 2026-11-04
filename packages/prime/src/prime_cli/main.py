@@ -30,9 +30,12 @@ from .commands.upgrade import app as upgrade_app
 from .commands.volumes import app as volumes_app
 from .commands.wallet import WALLET_JSON_HELP, wallet_command
 from .commands.whoami import app as whoami_app
-from .core import Config
+from .core import Config, dpop
 from .utils import PlainTyper, get_console
 from .utils.version_check import check_for_update
+
+# Their clients (sandbox gateway, traces, pinference, tunnels) accept only API keys.
+API_KEY_ONLY_COMMANDS = ("sandbox", "images", "tunnel", "traces", "inference")
 
 app = PlainTyper(
     name="prime",
@@ -130,6 +133,17 @@ def callback(
                 os.environ["PRIME_CONTEXT"] = previous_context
 
         ctx.call_on_close(restore_context)
+
+    if ctx.invoked_subcommand in API_KEY_ONLY_COMMANDS:
+        config = Config()
+        if not config.api_key and dpop.load_session(config) is not None:
+            typer.echo(
+                f"Error: 'prime {ctx.invoked_subcommand}' requires an API key; device "
+                "sessions from 'prime login --dpop' are not accepted there. "
+                "Run 'prime login' or set PRIME_API_KEY.",
+                err=True,
+            )
+            raise typer.Exit(1)
 
     # Check for updates (only when a subcommand is being executed)
     if ctx.invoked_subcommand is not None:

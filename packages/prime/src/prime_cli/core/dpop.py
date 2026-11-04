@@ -16,10 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 from .config import Config, _write_private
 
-DEVICE_START_PATH = "/api/v1/auth/device/start"
-DEVICE_TOKEN_PATH = "/api/v1/auth/device/token"
-TOKEN_REFRESH_PATH = "/api/v1/auth/token/refresh"
-CLIENT_ID = "prime-cli"
+TOKEN_PATH = "/api/v1/auth_challenge/token"
 DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 KEYCHAIN_SERVICE = "prime-cli-dpop"
 REFRESH_MARGIN_SECONDS = 60
@@ -112,7 +109,6 @@ def make_proof(
     method: str,
     url: str,
     access_token: Optional[str] = None,
-    nonce: Optional[str] = None,
 ) -> str:
     htu = httpx.URL(url).copy_with(query=None, fragment=None)
     header = {"typ": "dpop+jwt", "alg": "ES256", "jwk": key.public_jwk()}
@@ -124,8 +120,6 @@ def make_proof(
     }
     if access_token:
         claims["ath"] = b64url(hashlib.sha256(access_token.encode()).digest())
-    if nonce:
-        claims["nonce"] = nonce
     signing_input = ".".join(
         b64url(json.dumps(part, separators=(",", ":")).encode()) for part in (header, claims)
     )
@@ -144,14 +138,12 @@ def load_session(config: Config) -> Optional[dict[str, Any]]:
     return json.loads(path.read_text())
 
 
-def save_session(
-    config: Config, token_response: dict[str, Any], previous_refresh_token: Optional[str] = None
-) -> dict[str, Any]:
+def save_session(config: Config, token_response: dict[str, Any]) -> dict[str, Any]:
     if str(token_response.get("token_type", "")).lower() != "dpop":
         raise ValueError("Server did not issue a DPoP-bound token")
     session = {
         "access_token": token_response["access_token"],
-        "refresh_token": token_response.get("refresh_token") or previous_refresh_token,
+        "refresh_token": token_response["refresh_token"],
         "expires_at": time.time() + int(token_response.get("expires_in", 900)),
     }
     _write_private(_session_path(config), json.dumps(session, indent=2))
@@ -170,59 +162,35 @@ def delete_session(config: Config) -> bool:
 
 class DPoPAuth(httpx.Auth):
     """Attach a fresh DPoP proof to every request, refreshing the bound access
-    token shortly before it expires. Without a session (the login token
-    endpoint) it sends proofs only."""
+    token shortly before it expires."""
 
     requires_response_body = True
 
-    def __init__(
-        self,
-        key: DeviceKey,
-        config: Optional[Config] = None,
-        session: Optional[dict[str, Any]] = None,
-    ) -> None:
+    def __init__(self, key: DeviceKey, config: Config, session: dict[str, Any]) -> None:
         self.key = key
         self.config = config
         self.session = session
-        self.nonce: Optional[str] = None
 
     def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
-        if self.session and self.session["expires_at"] - time.time() < REFRESH_MARGIN_SECONDS:
-            yield from self._refresh(request.url)
-        yield from self._send(request)
-
-    def _send(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, Any]:
-        token = self.session["access_token"] if self.session else None
-        if token:
-            request.headers["Authorization"] = f"DPoP {token}"
-        request.headers["DPoP"] = make_proof(
-            self.key, request.method, str(request.url), token, self.nonce
-        )
-        response = yield request
-        nonce = response.headers.get("DPoP-Nonce")
-        if nonce and nonce != self.nonce:
-            self.nonce = nonce
-            if response.status_code in (400, 401):
-                request.headers["DPoP"] = make_proof(
-                    self.key, request.method, str(request.url), token, nonce
-                )
-                response = yield request
-        return response
-
-    def _refresh(self, url: httpx.URL) -> Generator[httpx.Request, httpx.Response, None]:
-        assert self.session is not None and self.config is not None
-        session, self.session = self.session, None
-        request = httpx.Request(
-            "POST",
-            url.copy_with(path=TOKEN_REFRESH_PATH, query=None),
-            json={"grant_type": "refresh_token", "refresh_token": session["refresh_token"]},
-        )
-        response = yield from self._send(request)
-        self.session = session
-        if response.status_code == 200:
-            # On failure the stale token is sent anyway and the API's 401 surfaces.
-            with contextlib.suppress(KeyError, ValueError):
-                self.session = save_session(self.config, response.json(), session["refresh_token"])
+        if self.session["expires_at"] - time.time() < REFRESH_MARGIN_SECONDS:
+            refresh = httpx.Request(
+                "POST",
+                request.url.copy_with(path=TOKEN_PATH, query=None),
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.session["refresh_token"],
+                },
+            )
+            refresh.headers["DPoP"] = make_proof(self.key, "POST", str(refresh.url))
+            response = yield refresh
+            if response.status_code == 200:
+                # On failure the stale token is sent anyway and the API's 401 surfaces.
+                with contextlib.suppress(KeyError, ValueError):
+                    self.session = save_session(self.config, response.json())
+        token = self.session["access_token"]
+        request.headers["Authorization"] = f"DPoP {token}"
+        request.headers["DPoP"] = make_proof(self.key, request.method, str(request.url), token)
+        yield request
 
 
 def load_auth(config: Config) -> Optional[DPoPAuth]:

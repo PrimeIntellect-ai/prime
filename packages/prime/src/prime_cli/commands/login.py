@@ -136,8 +136,36 @@ def decrypt_challenge_response(
         return None
 
 
-def _finish_login(client: APIClient, config: Config) -> None:
-    """Record the logged-in user's id, then confirm."""
+def _redeem_dpop_challenge(config: Config, key: dpop.DeviceKey, challenge: dict) -> bool:
+    """Exchange an approved challenge for a DPoP session; False while still pending."""
+    url = f"{config.base_url}{dpop.TOKEN_PATH}"
+    response = httpx.post(
+        url,
+        json={
+            "grant_type": dpop.DEVICE_CODE_GRANT,
+            "challenge": challenge["challenge"],
+            "status_auth_token": challenge["status_auth_token"],
+        },
+        headers={"DPoP": dpop.make_proof(key, "POST", url)},
+    )
+    detail = response.json().get("detail") if response.status_code != 200 else None
+    if detail == "authorization_pending":
+        return False
+    if detail is not None:
+        console.print(f"[red]Login failed:[/red] {detail}")
+        raise typer.Exit(1)
+    dpop.save_session(config, response.json())
+    return True
+
+
+def _complete_login(config: Config, api_key: str, key_limits: dict) -> None:
+    """Store the API key ("" for a DPoP session, so no stale key takes precedence)."""
+    config.set_api_key(api_key)
+    # Also update the current environment's saved file
+    config.update_current_environment_file()
+
+    # Attempt to fetch the current user id
+    client = APIClient(api_key=api_key)
     try:
         whoami_resp = client.get("/user/whoami")
         data = whoami_resp.get("data") if isinstance(whoami_resp, dict) else None
@@ -150,81 +178,11 @@ def _finish_login(client: APIClient, config: Config) -> None:
         console.print("[yellow]Logged in, but failed to fetch user id[/yellow]")
 
     console.print("[green]Successfully logged in![/green]")
-
-
-def dpop_login(config: Config, headless: bool) -> None:
-    """RFC 8628 device-code login yielding a DPoP-bound (RFC 9449) session."""
-    provider = dpop.key_provider()
-    try:
-        key = provider.create(config.current_environment)
-    except Exception as e:
-        console.print(f"[red]Could not store a device key in the OS keychain:[/red] {e}")
-        console.print("Use 'prime login' without --dpop to log in with an API key.")
-        raise typer.Exit(1)
-
-    base_url = config.base_url
-    start_response = httpx.post(
-        f"{base_url}{dpop.DEVICE_START_PATH}", json={"client_id": dpop.CLIENT_ID}
-    )
-    if start_response.status_code != 200:
-        provider.delete(config.current_environment)
-        console.print(f"[red]Failed to start login:[/red] {start_response.text}")
-        raise typer.Exit(1)
-    start = start_response.json()
-    verification_url = start.get("verification_uri_complete") or start["verification_uri"]
-
-    console.print("\n[bold blue]🔐 Login Required[/bold blue]")
-    console.print(
-        f"\nOpen [link={verification_url}]{verification_url}[/link] and confirm the code:\n\n"
-        f"[bold green]{start['user_code']}[/bold green]\n"
-    )
-    console.print("[dim]Waiting for authentication...[/dim]")
-    if not headless:
-        try:
-            webbrowser.open(verification_url, new=2)
-        except Exception:
-            pass
-
-    interval = int(start.get("interval", 5))
-    deadline = time.time() + int(start.get("expires_in", 900))
-    with httpx.Client(auth=dpop.DPoPAuth(key), timeout=30.0) as http:
-        while True:
-            if time.time() > deadline:
-                error = "expired_token"
-                break
-            time.sleep(interval)
-            response = http.post(
-                f"{base_url}{dpop.DEVICE_TOKEN_PATH}",
-                json={
-                    "grant_type": dpop.DEVICE_CODE_GRANT,
-                    "device_code": start["device_code"],
-                    "client_id": dpop.CLIENT_ID,
-                },
-            )
-            body = response.json()
-            if response.status_code == 200:
-                dpop.save_session(config, body)
-                error = None
-                break
-            error = body.get("error") or body.get("detail")
-            if error == "slow_down":
-                interval += 5
-            elif error != "authorization_pending":
-                break
-    if error:
-        provider.delete(config.current_environment)
-        console.print(f"[red]Login failed:[/red] {error}")
-        raise typer.Exit(1)
-
-    # A stored API key would take precedence over the new session.
-    config.set_api_key("")
-    config.update_current_environment_file()
-    client = APIClient()
-    _finish_login(client, config)
-    if config.api_key:
-        console.print(
-            "[yellow]Note:[/yellow] PRIME_API_KEY is set and takes precedence over this session."
-        )
+    if not api_key and config.api_key:
+        console.print("[yellow]Note:[/yellow] PRIME_API_KEY is set and overrides this session.")
+    if key_limits:
+        summary = ", ".join(f"{k}={v}" for k, v in key_limits.items())
+        console.print(f"[dim]API key limits: {summary}[/dim]")
     fetch_and_select_team(client, config)
 
 
@@ -305,22 +263,27 @@ def login(
         )
         raise typer.Exit(1)
 
-    if use_dpop:
-        if key_limits:
-            console.print("[red]API key limits cannot be combined with --dpop.[/red]")
-            raise typer.Exit(1)
-        dpop_login(config, headless)
-        return
-
     private_key = None
+    device_key = None
     try:
-        # Generate secure keypair
-        private_key, public_pem = generate_ephemeral_keypair()
+        if use_dpop:
+            dpop.delete_session(config)
+            try:
+                device_key = dpop.key_provider().create(config.current_environment)
+            except Exception as e:
+                console.print(f"[red]Could not store a device key in the OS keychain:[/red] {e}")
+                console.print("Use 'prime login' without --dpop to log in with an API key.")
+                raise typer.Exit(1)
+            challenge_request: dict = {"dpop": True}
+        else:
+            # Generate secure keypair
+            private_key, public_pem = generate_ephemeral_keypair()
+            challenge_request = {"encryptionPublicKey": public_pem}
 
         response = httpx.post(
             f"{settings['base_url']}/api/v1/auth_challenge/generate",
             json={
-                "encryptionPublicKey": public_pem,
+                **challenge_request,
                 **({"limits": key_limits} if key_limits else {}),
             },
         )
@@ -362,6 +325,13 @@ def login(
         challenge_auth_header = f"Bearer {challenge_response['status_auth_token']}"
         while True:
             try:
+                if device_key is not None:
+                    if _redeem_dpop_challenge(config, device_key, challenge_response):
+                        _complete_login(config, "", key_limits)
+                        break
+                    time.sleep(5)
+                    continue
+
                 status_response = httpx.get(
                     f"{settings['base_url']}/api/v1/auth_challenge/status",
                     params={"challenge": challenge_response["challenge"]},
@@ -373,23 +343,13 @@ def login(
                     break
 
                 status_data = status_response.json()
-                if status_data.get("result"):
+                if status_data.get("result") and private_key:
                     # Decrypt the result
                     encrypted_result = base64.b64decode(status_data["result"])
                     decrypted_result = decrypt_challenge_response(private_key, encrypted_result)
                     if decrypted_result:
                         # Update config with decrypted token
-                        api_key = decrypted_result.decode()
-                        config.set_api_key(api_key)
-                        # Also update the current environment's saved file
-                        config.update_current_environment_file()
-
-                        client = APIClient(api_key=api_key)
-                        _finish_login(client, config)
-                        if key_limits:
-                            summary = ", ".join(f"{k}={v}" for k, v in key_limits.items())
-                            console.print(f"[dim]API key limits: {summary}[/dim]")
-                        fetch_and_select_team(client, config)
+                        _complete_login(config, decrypted_result.decode(), key_limits)
                     else:
                         console.print("[red]Failed to decrypt authentication token[/red]")
                     break
@@ -409,3 +369,5 @@ def login(
         # Ensure private key is securely wiped
         if private_key:
             del private_key
+        if device_key is not None and dpop.load_session(config) is None:
+            dpop.key_provider().delete(config.current_environment)

@@ -40,13 +40,20 @@ def _ath(token: str) -> str:
 
 
 def test_proof_claims_and_signature() -> None:
-    key = _key()
+    # A coordinate with a leading zero byte (~1 key in 64) must still encode as 32 bytes.
+    while True:
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        numbers = private_key.public_key().public_numbers()
+        if min(numbers.x, numbers.y) < 1 << 248:
+            break
+    key = dpop.SoftwareKey(private_key)
     proof = dpop.make_proof(key, "post", "https://api.example.com/api/v1/pods?x=1#f", "tok")
 
     header, claims = _verify(proof)
 
     assert header == {"typ": "dpop+jwt", "alg": "ES256", "jwk": key.public_jwk()}
     assert set(header["jwk"]) == {"kty", "crv", "x", "y"}
+    assert len(_b64decode(header["jwk"]["x"])) == len(_b64decode(header["jwk"]["y"])) == 32
     assert claims["htm"] == "POST"
     assert claims["htu"] == "https://api.example.com/api/v1/pods"
     assert abs(claims["iat"] - time.time()) < 5
@@ -55,9 +62,8 @@ def test_proof_claims_and_signature() -> None:
 
 
 def test_proof_without_token_omits_ath() -> None:
-    _, claims = _verify(dpop.make_proof(_key(), "POST", "https://a.b/token", nonce="n1"))
+    _, claims = _verify(dpop.make_proof(_key(), "POST", "https://a.b/token"))
     assert "ath" not in claims
-    assert claims["nonce"] == "n1"
 
 
 def test_expiring_token_is_refreshed_with_proof_from_same_key(
@@ -75,11 +81,19 @@ def test_expiring_token_is_refreshed_with_proof_from_same_key(
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        if request.url.path == dpop.TOKEN_REFRESH_PATH:
-            assert json.loads(request.content)["refresh_token"] == "r1"
+        if request.url.path == dpop.TOKEN_PATH:
+            assert json.loads(request.content) == {
+                "grant_type": "refresh_token",
+                "refresh_token": "r1",
+            }
             return httpx.Response(
                 200,
-                json={"token_type": "DPoP", "access_token": "new", "expires_in": 900},
+                json={
+                    "token_type": "DPoP",
+                    "access_token": "new",
+                    "expires_in": 900,
+                    "refresh_token": "r1",
+                },
             )
         return httpx.Response(200, json={"ok": True})
 
@@ -91,7 +105,7 @@ def test_expiring_token_is_refreshed_with_proof_from_same_key(
     assert "Authorization" not in refresh.headers
     refresh_header, refresh_claims = _verify(refresh.headers["DPoP"])
     assert refresh_header["jwk"] == key.public_jwk()
-    assert refresh_claims["htu"] == f"https://api.example.com{dpop.TOKEN_REFRESH_PATH}"
+    assert refresh_claims["htu"] == f"https://api.example.com{dpop.TOKEN_PATH}"
     assert "ath" not in refresh_claims
 
     assert api.headers["Authorization"] == "DPoP new"

@@ -6,6 +6,7 @@ import typer
 from . import __version__
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
+from .commands.data_factory import app as data_factory_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
@@ -56,6 +57,8 @@ app.add_typer(
     rich_help_panel="Model Factory",
 )
 app.add_typer(traces_app, name="traces", rich_help_panel="Model Factory")
+# Hidden while Data Factory is behind its flag on the platform.
+app.add_typer(data_factory_app, name="data-factory", rich_help_panel="Model Factory", hidden=True)
 
 # Compute commands
 app.add_typer(factory_app, name="factory", rich_help_panel="Compute")

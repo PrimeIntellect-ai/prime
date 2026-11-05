@@ -1,9 +1,13 @@
 """Sandbox volume operations, namespaced under the sandbox clients."""
 
+import asyncio
+import math
+import time
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote
 
-from .models import SandboxCheckpoint, Volume, VolumeListResponse
+from .exceptions import VolumeSyncFailedError
+from .models import SandboxCheckpoint, Volume, VolumeListResponse, VolumeSync
 
 if TYPE_CHECKING:
     from .core import APIClient, AsyncAPIClient
@@ -25,6 +29,36 @@ def _volume_path(name: str) -> str:
 
 def _publish_path(sandbox_id: str, name: str) -> str:
     return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/publish"
+
+
+def _sync_path(sandbox_id: str, name: str) -> str:
+    return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/sync"
+
+
+# The server fails a sync past its own 10-minute deadline (design S11), so
+# the default wait budget covers the whole server-side lifecycle.
+SYNC_WAIT_TIMEOUT_SECONDS = 600.0
+SYNC_POLL_INITIAL_DELAY = 1.0
+SYNC_POLL_MAX_DELAY = 10.0
+SYNC_POLL_BACKOFF_FACTOR = 1.5
+
+
+def _sync_poll_delay(poll_index: int) -> float:
+    return min(SYNC_POLL_INITIAL_DELAY * SYNC_POLL_BACKOFF_FACTOR**poll_index, SYNC_POLL_MAX_DELAY)
+
+
+def _validate_sync_timeout(timeout_seconds: float) -> None:
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be finite and greater than zero")
+
+
+def _sync_timeout_message(
+    sandbox_id: str, name: str, timeout_seconds: float, sync: VolumeSync
+) -> str:
+    return (
+        f"Volume '{name}' in sandbox {sandbox_id} did not finish syncing "
+        f"within {timeout_seconds:g}s (state={sync.state})"
+    )
 
 
 def _name_params(
@@ -139,6 +173,48 @@ class Volumes:
             return checkpoint
         return self._parent.wait_for_checkpoint(checkpoint.id)
 
+    def sync(
+        self,
+        sandbox_id: str,
+        name: str,
+        discard: bool = False,
+        wait: bool = True,
+        timeout_seconds: float = SYNC_WAIT_TIMEOUT_SECONDS,
+    ) -> VolumeSync:
+        """Sync one of a running sandbox's volume attachments to the volume's
+        committed head, re-attaching the volume at that head.
+
+        Read-only and discard syncs re-attach without publishing; a read-write
+        sync publishes this sandbox's unpublished writes first and waits for
+        their merge. With wait=True (the default), the returned sync is the
+        final state once DONE; a FAILED sync raises VolumeSyncFailedError and
+        an unfinished sync TimeoutError.
+        """
+        _validate_sync_timeout(timeout_seconds)
+        response = self._parent.client.request(
+            "POST",
+            _sync_path(sandbox_id, name),
+            json={"discard": discard},
+        )
+        sync = VolumeSync.model_validate(response)
+        if not wait:
+            return sync
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while sync.state not in ("DONE", "FAILED"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    _sync_timeout_message(sandbox_id, name, timeout_seconds, sync)
+                )
+            time.sleep(min(_sync_poll_delay(poll_index), remaining))
+            poll_index += 1
+            response = self._parent.client.request("GET", _sync_path(sandbox_id, name))
+            sync = VolumeSync.model_validate(response)
+        if sync.state == "FAILED":
+            raise VolumeSyncFailedError(sandbox_id, name, sync.error)
+        return sync
+
 
 class AsyncVolumes:
     """Async volume operations for one owning ``AsyncSandboxClient``.
@@ -242,3 +318,45 @@ class AsyncVolumes:
         if not wait:
             return checkpoint
         return await self._parent.wait_for_checkpoint(checkpoint.id)
+
+    async def sync(
+        self,
+        sandbox_id: str,
+        name: str,
+        discard: bool = False,
+        wait: bool = True,
+        timeout_seconds: float = SYNC_WAIT_TIMEOUT_SECONDS,
+    ) -> VolumeSync:
+        """Sync one of a running sandbox's volume attachments to the volume's
+        committed head, re-attaching the volume at that head.
+
+        Read-only and discard syncs re-attach without publishing; a read-write
+        sync publishes this sandbox's unpublished writes first and waits for
+        their merge. With wait=True (the default), the returned sync is the
+        final state once DONE; a FAILED sync raises VolumeSyncFailedError and
+        an unfinished sync TimeoutError.
+        """
+        _validate_sync_timeout(timeout_seconds)
+        response = await self._parent.client.request(
+            "POST",
+            _sync_path(sandbox_id, name),
+            json={"discard": discard},
+        )
+        sync = VolumeSync.model_validate(response)
+        if not wait:
+            return sync
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while sync.state not in ("DONE", "FAILED"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    _sync_timeout_message(sandbox_id, name, timeout_seconds, sync)
+                )
+            await asyncio.sleep(min(_sync_poll_delay(poll_index), remaining))
+            poll_index += 1
+            response = await self._parent.client.request("GET", _sync_path(sandbox_id, name))
+            sync = VolumeSync.model_validate(response)
+        if sync.state == "FAILED":
+            raise VolumeSyncFailedError(sandbox_id, name, sync.error)
+        return sync

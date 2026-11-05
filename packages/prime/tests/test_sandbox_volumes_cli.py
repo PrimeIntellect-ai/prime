@@ -14,6 +14,8 @@ from prime_sandboxes import (
     Volume,
     VolumeListResponse,
     VolumeMount,
+    VolumeSync,
+    VolumeSyncFailedError,
 )
 from typer.testing import CliRunner
 
@@ -1213,3 +1215,145 @@ def test_ssh_connect_rejects_not_running(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     assert result.exit_code == 1, result.output
     assert "not running" in strip_ansi(result.output)
+
+
+# --- prime sandbox volumes sync ---
+
+
+def test_volume_sync_waits_by_default_and_prints_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_sync(
+        self: Any, sandbox_id: str, name: str, *, discard: bool = False, wait: bool = True
+    ) -> VolumeSync:
+        captured["args"] = (sandbox_id, name, discard, wait)
+        return VolumeSync(
+            sync_id="sync-1",
+            state="DONE",
+            checkpoint_id="ckpt-1",
+            head_id="ckpt-9",
+        )
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.sync", fake_sync)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert captured["args"] == ("sbx-1", "data", False, True)
+    assert "Synced volume data in sandbox sbx-1" in output
+    assert "Head checkpoint: ckpt-9" in output
+    assert "Published checkpoint: ckpt-1" in output
+
+
+def test_volume_sync_ro_done_omits_published_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.sync",
+        lambda self, sandbox_id, name, *, discard=False, wait=True: VolumeSync(
+            sync_id="sync-1", state="DONE", head_id="ckpt-9"
+        ),
+    )
+
+    result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert "Head checkpoint: ckpt-9" in output
+    assert "Published checkpoint" not in output
+
+
+def test_volume_sync_discard_no_wait_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_sync(
+        self: Any, sandbox_id: str, name: str, *, discard: bool = False, wait: bool = True
+    ) -> VolumeSync:
+        captured["args"] = (sandbox_id, name, discard, wait)
+        return VolumeSync(sync_id="sync-1", state="UNMOUNTING")
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.sync", fake_sync)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1", "--discard", "--no-wait"],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert captured["args"] == ("sbx-1", "data", True, False)
+    assert "Sync ID: sync-1" in output
+    assert "State: UNMOUNTING" in output
+    # No success claim before DONE.
+    assert "Synced volume" not in output
+    assert "has not finished" in output
+
+
+def test_volume_sync_failed_exits_nonzero_with_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.sync",
+        lambda self, sandbox_id, name, *, discard=False, wait=True: (
+            _ for _ in ()
+        ).throw(VolumeSyncFailedError("sbx-1", "data", "busy: volume in use by pids [123]")),
+    )
+
+    result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])
+
+    assert result.exit_code == 1, result.output
+    output = " ".join(strip_ansi(result.output).split())
+    assert "failed" in output
+    assert "busy: volume in use by pids [123]" in output
+    assert "Unexpected error" not in output
+
+
+def test_volume_sync_timeout_hints_rerun(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.sync",
+        lambda self, sandbox_id, name, *, discard=False, wait=True: (
+            _ for _ in ()
+        ).throw(TimeoutError("Volume 'data' in sandbox sbx-1 did not finish syncing"))
+    )
+
+    result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])
+
+    assert result.exit_code == 1, result.output
+    output = " ".join(strip_ansi(result.output).split())
+    assert "did not finish syncing" in output
+    assert "may still complete" in output
+    assert "Re-run this command" in output
+
+
+def test_volume_sync_surfaces_api_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    for message in (
+        "HTTP 404: Volume is not attached to this sandbox",
+        "HTTP 409: volume sync requires file-level merges on this deployment",
+    ):
+
+        def raise_api_error(
+            self: Any,
+            sandbox_id: str,
+            name: str,
+            *,
+            discard: bool = False,
+            wait: bool = True,
+            message: str = message,
+        ) -> Any:
+            raise APIError(message)
+
+        monkeypatch.setattr("prime_sandboxes.volumes.Volumes.sync", raise_api_error)
+        result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])
+        assert result.exit_code == 1, result.output
+        assert message in strip_ansi(result.output)

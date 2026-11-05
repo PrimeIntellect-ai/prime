@@ -391,6 +391,23 @@ class Volume(BaseModel):
     account_storage_limit_gb: Optional[int] = None
 
 
+class VolumeSync(BaseModel):
+    """One sandbox attachment's current volume sync.
+
+    state is null before the first sync, then one of UNMOUNTING,
+    PUBLISHING, REMOUNTING, DONE, or FAILED. checkpoint_id is the publish
+    a PUBLISHING sync waits on (set for a read-write sync that had
+    unpublished writes); head_id is the head being attached, and after
+    DONE the head the sandbox is mounted at.
+    """
+
+    sync_id: Optional[str] = None
+    state: Optional[str] = None
+    checkpoint_id: Optional[str] = None
+    head_id: Optional[str] = None
+    error: Optional[str] = None
+
+
 class VolumeListResponse(BaseModel):
     """Volume list response model"""
 

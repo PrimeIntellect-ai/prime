@@ -539,13 +539,17 @@ FACTORY_WORKLOADS_JSON_HELP = json_output_help(
 
 # Server-side filter values, mirrored from the public contract.
 WORKLOAD_TYPE_FILTERS = ("training", "inference", "slurm")
-WORKLOAD_STATE_FILTERS = ("running", "queued", "completed", "failed", "stopped", "all")
+# "stopped" is deliberately absent: the deployed backend's filter
+# vocabulary does not accept it yet, so offering `--state stopped`
+# would advertise a query the server rejects. Add it here once the
+# platform side is live.
+WORKLOAD_STATE_FILTERS = ("running", "queued", "completed", "failed", "all")
 # Terminal (or mixed-history) queries: larger result sets — the DURATION
-# column appears and a default --limit applies.
+# column appears and a default --limit applies. "stopped" is listed
+# ready for the filter above to accept it; unreachable until then.
 TERMINAL_QUERY_STATES = ("completed", "failed", "stopped", "all")
-# "stopped" (a run someone ended on purpose) is terminal like the other
-# two: it ages from ended_at and carries no allocated GPUs. Accepted
-# ahead of the backend emitting it - inert until then.
+# Rendering-only, and safe today: a `--state all` page may already carry
+# stopped rows, which age from ended_at and hold no allocated GPUs.
 WORKLOAD_TERMINAL_STATES = ("completed", "failed", "stopped")
 # History queries can be large; the server caps at 200 rows.
 WORKLOAD_LIMIT_MAX = 200
@@ -1137,8 +1141,8 @@ def factory_workloads(
     state: Optional[str] = typer.Option(
         None,
         "--state",
-        help="Filter by state: running, queued, completed, failed, stopped, "
-        "or all (default: running and queued)",
+        help="Filter by state: running, queued, completed, failed, or all "
+        "(default: running and queued)",
     ),
     since: Optional[str] = typer.Option(
         None,

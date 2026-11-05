@@ -206,6 +206,10 @@ def test_train_list_shows_gpu_count(monkeypatch) -> None:
 @pytest.fixture
 def temp_home(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    # CliRunner's `env` is additive, so an ambient PRIME_TEAM_ID (CI sets
+    # one) would otherwise win over the config file and decide the scope
+    # these tests assert on. Tests that want it set pass it explicitly.
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
 
 
 def _stub_list_runs(monkeypatch, runs: list[dict[str, Any]], total: int | None = None) -> None:

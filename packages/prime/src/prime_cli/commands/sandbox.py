@@ -64,10 +64,11 @@ console = get_console()
 LIST_SANDBOXES_JSON_HELP = json_output_help(
     ".sandboxes[] = {id, name, image, status, resources, labels[], created_at, "
     "timeout_minutes, expires_at?}",
-    ".total = number",
+    ".total? = number",
     ".page = number",
     ".per_page = number",
     ".has_next = boolean",
+    ".next_cursor? = string",
 )
 
 SANDBOX_DETAIL_JSON_HELP = json_output_help(
@@ -253,6 +254,12 @@ def list_sandboxes_cmd(
     ),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(50, "--num", "-n", help="Items per page"),
+    cursor: Optional[str] = typer.Option(
+        None,
+        "--cursor",
+        help="Opaque pagination cursor from a previous response's next_cursor "
+        "(pages the full history; ignores --page)",
+    ),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
@@ -276,11 +283,13 @@ def list_sandboxes_cmd(
             labels=labels,
             page=page,
             per_page=num,
+            cursor=cursor,
             exclude_terminated=exclude_terminated,
         )
 
+        total_label = str(sandbox_list.total) if sandbox_list.total is not None else "?"
         table = build_table(
-            f"Sandboxes (Total: {sandbox_list.total})",
+            f"Sandboxes (Total: {total_label})",
             [
                 ("ID", "cyan"),
                 ("Name", "blue"),
@@ -322,6 +331,7 @@ def list_sandboxes_cmd(
                 "page": sandbox_list.page,
                 "per_page": num,
                 "has_next": sandbox_list.has_next,
+                "next_cursor": sandbox_list.next_cursor,
             }
             output_data_as_json(output_data, console)
         else:
@@ -344,7 +354,11 @@ def list_sandboxes_cmd(
 
             console.print(table)
 
-            if sandbox_list.has_next:
+            if sandbox_list.has_next and sandbox_list.next_cursor:
+                console.print(
+                    f"\n[yellow]Use --cursor {sandbox_list.next_cursor} to see more.[/yellow]"
+                )
+            elif sandbox_list.has_next:
                 console.print(
                     f"\n[yellow]Showing page {page} of results. "
                     f"Use --page {page + 1} to see more.[/yellow]"

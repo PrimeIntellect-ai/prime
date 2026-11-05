@@ -354,6 +354,16 @@ for s in sandboxes.sandboxes:
     print(f"{s.name}: {s.status}")
 ```
 
+Offset pagination (`page`/`per_page`) is capped server-side at
+`page * per_page <= 10,000`. To page deeper, pass the `next_cursor` of a
+response as `list(cursor=response.next_cursor)`: cursor mode ignores `page`,
+returns `total=None`, and pages the full history at constant cost.
+
+```python
+page1 = sandbox_client.list(per_page=50)
+page2 = sandbox_client.list(per_page=50, cursor=page1.next_cursor)
+```
+
 ### Long-Running Tasks
 
 Use `start_background_job` to run long-running tasks that continue after the API call returns. Poll for completion with `get_background_job`.

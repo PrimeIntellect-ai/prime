@@ -279,6 +279,39 @@ jobs:
         PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}
       run: uv run pytest tests/ -v
 
+  test-prime-k8s-e2e:
+    # `prime cluster login` + the `prime auth k8s-token` exec plugin, driven by
+    # real kubectl against a kind apiserver. The platform side is a stand-in.
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+
+    - name: Install dependencies
+      working-directory: packages/prime
+      run: uv sync --all-extras
+
+    - name: Create kind cluster
+      uses: helm/kind-action@v1
+      with:
+        cluster_name: prime-e2e
+
+    - name: Run k8s e2e
+      working-directory: packages/prime
+      run: |
+        kind get kubeconfig --name prime-e2e > "$RUNNER_TEMP/admin.yaml"
+        PRIME_K8S_E2E_ADMIN_KUBECONFIG="$RUNNER_TEMP/admin.yaml" \
+          uv run pytest tests/test_cluster_kube_e2e.py -v
+
   type-check:
     runs-on: ubuntu-latest
     steps:

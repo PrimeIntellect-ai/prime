@@ -57,9 +57,11 @@ def test_list_sends_cursor_and_omits_it_without_one():
 
     client.list(cursor="cursor-1")
     assert captured["params"]["cursor"] == "cursor-1"
+    assert "page" not in captured["params"]
 
     client.list()
     assert "cursor" not in captured["params"]
+    assert "page" not in captured["params"]
 
 
 def test_list_parses_cursor_mode_response():

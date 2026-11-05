@@ -1226,10 +1226,41 @@ def test_sandbox_list_cursor_mode_json_includes_next_cursor(
     assert result.exit_code == 0, f"Failed: {result.output}"
     data = json.loads(result.output)
     assert captured["cursor"] == "cursor-1"
+    assert "page" not in captured
     # Cursor mode has no count, but offers the next cursor
     assert data["total"] is None
     assert data["next_cursor"] == "cursor-2"
     assert data["has_next"] is True
+    assert "page" not in data
+
+
+def test_sandbox_list_rejects_page_option(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(app, ["sandbox", "list", "--page", "2"])
+
+    assert result.exit_code != 0
+
+
+def test_sandbox_list_table_prints_cursor_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            sandboxes=[],
+            total=None,
+            per_page=50,
+            has_next=True,
+            next_cursor="cursor-2",
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+
+    result = runner.invoke(app, ["sandbox", "list"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Use --cursor cursor-2 to see more." in output
 
 
 def test_sandbox_create_defaults_disk_size_gb_to_5(

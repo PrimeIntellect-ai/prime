@@ -2463,7 +2463,6 @@ class SandboxClient:
         team_id: Optional[str] = None,
         status: Optional[str] = None,
         labels: Optional[List[str]] = None,
-        page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
         user_id: Optional[str] = None,
@@ -2474,8 +2473,7 @@ class SandboxClient:
         if team_id is None:
             team_id = self.client.config.team_id
 
-        params: Dict[str, Any] = {"page": page, "per_page": per_page}
-        # In cursor mode the server ignores page and returns total=null
+        params: Dict[str, Any] = {"per_page": per_page}
         if cursor is not None:
             params["cursor"] = cursor
         if team_id:
@@ -4179,7 +4177,6 @@ class AsyncSandboxClient:
         team_id: Optional[str] = None,
         status: Optional[str] = None,
         labels: Optional[List[str]] = None,
-        page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
         user_id: Optional[str] = None,
@@ -4189,8 +4186,7 @@ class AsyncSandboxClient:
         if team_id is None:
             team_id = self.client.config.team_id
 
-        params: Dict[str, Any] = {"page": page, "per_page": per_page}
-        # In cursor mode the server ignores page and returns total=null
+        params: Dict[str, Any] = {"per_page": per_page}
         if cursor is not None:
             params["cursor"] = cursor
         if team_id:

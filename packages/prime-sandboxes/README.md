@@ -346,7 +346,6 @@ sandbox = sandbox_client.create(CreateSandboxRequest(
 sandboxes = sandbox_client.list(
     status="RUNNING",
     labels=["experiment"],
-    page=1,
     per_page=50,
 )
 
@@ -354,14 +353,18 @@ for s in sandboxes.sandboxes:
     print(f"{s.name}: {s.status}")
 ```
 
-Offset pagination (`page`/`per_page`) is capped server-side at
-`page * per_page <= 10,000`. To page deeper, pass the `next_cursor` of a
-response as `list(cursor=response.next_cursor)`: cursor mode ignores `page`,
-returns `total=None`, and pages the full history at constant cost.
+Lists are cursor-paginated. When `next_cursor` is set, pass it as
+`list(cursor=...)` to fetch the next page. Cursor pages return
+`total=None`; only the first page (no `cursor`) includes `total`.
 
 ```python
-page1 = sandbox_client.list(per_page=50)
-page2 = sandbox_client.list(per_page=50, cursor=page1.next_cursor)
+response = sandbox_client.list(per_page=50)
+while True:
+    for s in response.sandboxes:
+        print(f"{s.name}: {s.status}")
+    if not response.next_cursor:
+        break
+    response = sandbox_client.list(per_page=50, cursor=response.next_cursor)
 ```
 
 ### Long-Running Tasks

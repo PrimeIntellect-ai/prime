@@ -51,7 +51,7 @@ from ..utils import (
 from .rl import VOLUME_DEFAULT_SIZE
 
 app = PlainTyper(
-    help="Manage volumes for dedicated run outputs and SFT datasets (closed beta)",
+    help="Manage volumes for dedicated run outputs and SFT datasets",
     no_args_is_help=True,
 )
 console = get_console()

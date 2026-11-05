@@ -1,5 +1,4 @@
 import asyncio
-import json
 import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,6 +32,11 @@ def _samples_upload_headers(api_key: Optional[str]) -> Dict[str, str]:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+def _json_body_bytes(value: Any) -> int:
+    # Use the same encoder as httpx.post(json=...), including its Unicode handling.
+    return len(httpx.Request("POST", "/", json=value).content)
 
 
 class EvalsClient:
@@ -291,28 +295,33 @@ class EvalsClient:
         """Build batches that fit within payload size limit."""
         batches: List[List[Dict[str, Any]]] = []
         current_batch: List[Dict[str, Any]] = []
-        current_bytes = 20
+        envelope_bytes = _json_body_bytes({"samples": []})
+        separator_bytes = _json_body_bytes([0, 0]) - _json_body_bytes([0]) - _json_body_bytes(0)
+        current_bytes = envelope_bytes
         skipped_count = 0
 
         for idx, sample in enumerate(samples):
-            sample_size = len(json.dumps(sample)) + 1
+            sample_size = _json_body_bytes(sample)
 
-            if sample_size + 20 > max_payload_bytes:
+            if sample_size + envelope_bytes > max_payload_bytes:
                 warnings.warn(
                     f"Sample {idx} exceeds maximum payload size "
-                    f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit), skipping",
+                    f"({sample_size} bytes > "
+                    f"{max_payload_bytes - envelope_bytes} bytes limit), skipping",
                     stacklevel=3,
                 )
                 skipped_count += 1
                 continue
 
-            if current_bytes + sample_size > max_payload_bytes and current_batch:
+            added_bytes = sample_size + (separator_bytes if current_batch else 0)
+            if current_bytes + added_bytes > max_payload_bytes and current_batch:
                 batches.append(current_batch)
                 current_batch = []
-                current_bytes = 20
+                current_bytes = envelope_bytes
+                added_bytes = sample_size
 
             current_batch.append(sample)
-            current_bytes += sample_size
+            current_bytes += added_bytes
 
         if current_batch:
             batches.append(current_batch)
@@ -681,28 +690,33 @@ class AsyncEvalsClient:
         """Build batches that fit within payload size limit."""
         batches: List[List[Dict[str, Any]]] = []
         current_batch: List[Dict[str, Any]] = []
-        current_bytes = 20
+        envelope_bytes = _json_body_bytes({"samples": []})
+        separator_bytes = _json_body_bytes([0, 0]) - _json_body_bytes([0]) - _json_body_bytes(0)
+        current_bytes = envelope_bytes
         skipped_count = 0
 
         for idx, sample in enumerate(samples):
-            sample_size = len(json.dumps(sample)) + 1
+            sample_size = _json_body_bytes(sample)
 
-            if sample_size + 20 > max_payload_bytes:
+            if sample_size + envelope_bytes > max_payload_bytes:
                 warnings.warn(
                     f"Sample {idx} exceeds maximum payload size "
-                    f"({sample_size} bytes > {max_payload_bytes - 20} bytes limit), skipping",
+                    f"({sample_size} bytes > "
+                    f"{max_payload_bytes - envelope_bytes} bytes limit), skipping",
                     stacklevel=3,
                 )
                 skipped_count += 1
                 continue
 
-            if current_bytes + sample_size > max_payload_bytes and current_batch:
+            added_bytes = sample_size + (separator_bytes if current_batch else 0)
+            if current_bytes + added_bytes > max_payload_bytes and current_batch:
                 batches.append(current_batch)
                 current_batch = []
-                current_bytes = 20
+                current_bytes = envelope_bytes
+                added_bytes = sample_size
 
             current_batch.append(sample)
-            current_bytes += sample_size
+            current_bytes += added_bytes
 
         if current_batch:
             batches.append(current_batch)

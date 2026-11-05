@@ -1,7 +1,8 @@
 """Inference trace-capture API client.
 
-Enablement is team policy on the platform API; the captured traces are read
-through ``prime traces`` under each route's ``run_id``.
+Enablement is account policy on the platform API: the selected team's, or
+with no team selected the caller's own personal account. The captured traces
+are read through ``prime traces`` under each route's ``run_id``.
 """
 
 from typing import Any, Dict, List, Literal, Optional
@@ -11,9 +12,8 @@ from pydantic import BaseModel
 from prime_cli.core import APIClient, APIError, NotFoundError, ServerError
 
 ENDPOINT = "/inference/trace-capture"
-BASE_LORA_ID = "__base__"
 
-InactiveReason = Literal["privacy_opt_out", "storage_limit", "route_unavailable"]
+InactiveReason = Literal["privacy_opt_out", "storage_limit", "enabler_unflagged"]
 
 
 class TraceCaptureForbiddenError(APIError):
@@ -28,7 +28,6 @@ class TraceCaptureRoute(BaseModel):
     """``enabled`` is the team's choice; ``active`` means calls are captured now."""
 
     model: str
-    lora_id: str = BASE_LORA_ID
     name: Optional[str] = None
     run_id: str
     enabled: bool
@@ -50,19 +49,23 @@ class TraceCaptureClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
-    def list_routes(self, team_id: str) -> List[TraceCaptureRoute]:
+    @staticmethod
+    def _params(team_id: Optional[str]) -> Optional[Dict[str, str]]:
+        # The platform's teamId query parameter is optional: absent means the
+        # caller's own personal account. An empty team id must not be sent.
+        return {"teamId": team_id} if team_id else None
+
+    def list_routes(self, team_id: Optional[str]) -> List[TraceCaptureRoute]:
         try:
-            response = self.client.get(ENDPOINT, params={"teamId": team_id})
+            response = self.client.get(ENDPOINT, params=self._params(team_id))
         except APIError as e:
             raise _failed("list trace-capture routes", e) from e
         return [TraceCaptureRoute.model_validate(r) for r in response.get("routes", [])]
 
-    def set_route(
-        self, team_id: str, model: str, enabled: bool, lora_id: str = BASE_LORA_ID
-    ) -> TraceCaptureRoute:
-        body: Dict[str, Any] = {"model": model, "lora_id": lora_id, "enabled": enabled}
+    def set_route(self, team_id: Optional[str], model: str, enabled: bool) -> TraceCaptureRoute:
+        body: Dict[str, Any] = {"model": model, "enabled": enabled}
         try:
-            response = self.client.request("PUT", ENDPOINT, params={"teamId": team_id}, json=body)
+            response = self.client.request("PUT", ENDPOINT, params=self._params(team_id), json=body)
         except APIError as e:
             raise _failed("enable trace capture" if enabled else "disable trace capture", e) from e
         return TraceCaptureRoute.model_validate(response)

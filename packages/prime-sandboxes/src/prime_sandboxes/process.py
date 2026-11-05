@@ -84,7 +84,11 @@ class AsyncSandboxProcess:
         send_signal: _SendSignal,
         transport: HTTPTransport | None = None,
         reconnect: _Reconnect | None = None,
+        session_uuid: str | None = None,
     ) -> None:
+        self.session_uuid = session_uuid
+        """The sandboxd session of this process, for another client to attach to it
+        (``AsyncSandboxClient.attach_process``)."""
         self.stdout = _AsyncProcessStream()
         self.stderr = _AsyncProcessStream()
         self._stream_client = stream_client
@@ -96,6 +100,7 @@ class AsyncSandboxProcess:
         self._remote_exited = False
         self._signals_sent: set[Literal["terminate", "kill"]] = set()
         self._closed = False
+        self._detaching = False
         self._close_lock = asyncio.Lock()
         loop = asyncio.get_running_loop()
         self._started: asyncio.Future[int] = loop.create_future()
@@ -117,11 +122,20 @@ class AsyncSandboxProcess:
         send_signal: _SendSignal,
         transport: HTTPTransport | None = None,
         reconnect: _Reconnect | None = None,
+        session_uuid: str | None = None,
+        attached: bool = False,
     ) -> "AsyncSandboxProcess":
-        process = cls(stream_client, stream, write_stdin, send_signal, transport, reconnect)
+        """``attached`` streams a process that outlives this handle (``attach_process``):
+        a failed or cancelled attach detaches from it instead of stopping it."""
+        process = cls(
+            stream_client, stream, write_stdin, send_signal, transport, reconnect, session_uuid
+        )
         try:
             await asyncio.shield(process._started)
         except asyncio.CancelledError:
+            if attached:
+                await process.detach()
+                raise
             # The Start RPC may already have created the remote process even if
             # its first event has not reached us. Briefly retain the stream so a
             # reported PID can be signalled instead of leaking on cancellation.
@@ -130,7 +144,7 @@ class AsyncSandboxProcess:
             await process.aclose()
             raise
         except BaseException:
-            await process.aclose()
+            await (process.detach() if attached else process.aclose())
             raise
         return process
 
@@ -220,6 +234,26 @@ class AsyncSandboxProcess:
             await self._close_transport()
             self._closed = True
 
+    async def detach(self) -> None:
+        """Release this handle's stream and transport and leave the process running,
+        for a client to attach to it later (``AsyncSandboxClient.attach_process``).
+        Unlike ``aclose()``, it sends no signal."""
+        async with self._close_lock:
+            if self._closed:
+                return
+            # The cancelled stream surfaces as a dropped stream, which the pump would
+            # otherwise re-attach.
+            self._detaching = True
+            if not self._pump_task.done():
+                self._pump_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self._pump_task
+            if not self._exit.done():
+                self._exit.set_exception(APIError("Process detached before its exit was observed"))
+            await self._stream_client.close()
+            await self._close_transport()
+            self._closed = True
+
     async def _close_transport(self) -> None:
         transport, self._transport = self._transport, None
         if transport is not None:
@@ -242,7 +276,12 @@ class AsyncSandboxProcess:
 
     def _can_reconnect(self, reconnects: int, error: BaseException | None) -> bool:
         """Whether the stream fault is recoverable and reconnect budget remains."""
-        if self._reconnect is None or self._remote_exited or reconnects >= _STREAM_MAX_RECONNECTS:
+        if (
+            self._reconnect is None
+            or self._remote_exited
+            or self._detaching
+            or reconnects >= _STREAM_MAX_RECONNECTS
+        ):
             return False
         return is_recoverable_stream_fault(error)
 

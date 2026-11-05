@@ -335,6 +335,34 @@ def test_train_list_survives_rich_markup_in_a_team_label(monkeypatch, temp_home)
     assert "[/dim]evil" in result.output
 
 
+def test_train_list_hint_carries_an_explicit_team_override(
+    monkeypatch, temp_home, tmp_path
+) -> None:
+    # `factory workloads` falls back to the configured team, so an
+    # unqualified hint after `--team X` would compare against the wrong
+    # team and recreate the mismatch the footer explains.
+    _write_team_config(tmp_path, team_id="team-config", team_name="configured")
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list("--team", "team-override")
+
+    assert result.exit_code == 0, result.output
+    assert "prime factory workloads --team team-override" in result.output
+
+
+def test_train_list_hint_stays_bare_without_an_override(monkeypatch, temp_home, tmp_path) -> None:
+    # No override: the unqualified command already resolves to the same
+    # configured team, so no redundant flag.
+    _write_team_config(tmp_path, team_id="team-config", team_name="configured")
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "prime factory workloads" in result.output
+    assert "--team" not in result.output.split("Live cluster workloads")[-1]
+
+
 def test_train_list_empty_result_still_shows_the_scope(monkeypatch, temp_home) -> None:
     # "No runs" under a stale team scope looks identical to "no runs at
     # all" - the footer is what tells them apart.

@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+import shlex
 import time
 from contextlib import nullcontext
 from decimal import Decimal
@@ -1637,9 +1638,17 @@ def _print_list_footer(
     # The listing is newest-first, so a long-running job drops off page
     # 1 as soon as newer runs are submitted - the common reason a run
     # visible on the console appears "missing" here.
+    #
+    # `factory workloads` resolves its own team as `--team or
+    # Config().team_id`, so an unqualified hint after `list --team X`
+    # would point at the configured team instead - recreating the very
+    # scope mismatch this footer exists to explain. Carry the override.
+    hint = "prime factory workloads"
+    if team_flag:
+        hint += f" --team {shlex.quote(team_flag)}"
     console.print(
         "[dim]Live cluster workloads (all teams, running/queued): "
-        "[bold]prime factory workloads[/bold][/dim]"
+        f"[bold]{rich_escape(hint)}[/bold][/dim]"
     )
 
 

@@ -308,6 +308,47 @@ def test_train_list_footer_pages_and_points_at_the_live_view(monkeypatch, temp_h
     assert "prime factory workloads" in result.output
 
 
+def test_train_list_survives_rich_markup_in_a_run_name(monkeypatch, temp_home) -> None:
+    # An unescaped name reaches Rich as markup: an unmatched closing tag
+    # raises MarkupError and one run breaks the listing for everyone on
+    # the team.
+    _stub_list_runs(
+        monkeypatch,
+        [{**_fake_run_payload("RUNNING", run_id="run-markup"), "name": "[/bold]oops"}],
+    )
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "[/bold]oops" in result.output
+
+
+def test_train_list_empty_result_still_shows_the_scope(monkeypatch, temp_home) -> None:
+    # "No runs" under a stale team scope looks identical to "no runs at
+    # all" - the footer is what tells them apart.
+    _stub_list_runs(monkeypatch, [], total=0)
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "No Hosted Training runs found" in result.output
+    assert "Scope: your personal runs + your teams" in result.output
+    assert "prime factory workloads" in result.output
+    # No rows means no page position to report.
+    assert "Page 1/1" not in result.output
+
+
+def test_train_list_page_past_the_end_still_shows_the_scope(monkeypatch, temp_home) -> None:
+    _stub_list_runs(monkeypatch, [], total=30)
+
+    result = _invoke_list("--page", "9", "--num", "20")
+
+    assert result.exit_code == 0, result.output
+    assert "No more results" in result.output
+    assert "Scope: your personal runs + your teams" in result.output
+    assert "Page 9/2 of 30 run(s)" in result.output
+
+
 def test_train_list_footer_on_a_single_page(monkeypatch, temp_home) -> None:
     _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
 

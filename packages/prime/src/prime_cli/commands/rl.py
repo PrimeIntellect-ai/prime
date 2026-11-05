@@ -1594,6 +1594,39 @@ def _list_scope_line(
     return " · ".join([scope, "yours only" if mine else "all members", "all clusters"])
 
 
+def _print_list_footer(
+    team_flag: Optional[str],
+    team_id: Optional[str],
+    config: Config,
+    mine: bool,
+    page: int,
+    num: int,
+    total_count: int,
+) -> None:
+    """Scope, position and the pointer to the live cluster view.
+
+    Printed for empty listings too - a scopeless "No Hosted Training
+    runs found" is the case the scope line exists to explain.
+    """
+    console.print(f"\n[dim]Scope: {_list_scope_line(team_flag, team_id, config, mine)}[/dim]")
+    if total_count:
+        total_pages = max(1, -(-total_count // num))
+        if total_count > page * num:
+            console.print(
+                f"[yellow]Page {page}/{total_pages} of {total_count} run(s). "
+                f"Use --page {page + 1} to see more.[/yellow]"
+            )
+        else:
+            console.print(f"[dim]Page {page}/{total_pages} of {total_count} run(s).[/dim]")
+    # The listing is newest-first, so a long-running job drops off page
+    # 1 as soon as newer runs are submitted - the common reason a run
+    # visible on the console appears "missing" here.
+    console.print(
+        "[dim]Live cluster workloads (all teams, running/queued): "
+        "[bold]prime factory workloads[/bold][/dim]"
+    )
+
+
 def _list_runs_impl(
     team: Optional[str], num: int, page: int, output: str, mine: bool = False
 ) -> None:
@@ -1656,6 +1689,10 @@ def _list_runs_impl(
                 console.print("[yellow]No more results.[/yellow]")
             else:
                 console.print("[yellow]No Hosted Training runs found.[/yellow]")
+            # An empty listing is exactly when the scope matters most:
+            # "no runs" under a stale PRIME_TEAM_ID looks identical to
+            # "no runs" at all. Print the footer here too.
+            _print_list_footer(team, team_id, config, mine, page, num, total_count)
             return
 
         table = Table(title="Hosted Training Runs")
@@ -1676,7 +1713,10 @@ def _list_runs_impl(
             status_color = _get_status_color(run.status)
             table.add_row(
                 formatted["id"],
-                formatted["name"][:30],
+                # A user-chosen name reaches Rich as markup unless it is
+                # escaped: an unmatched "[/bold]" raises MarkupError and
+                # one run would break the listing for the whole team.
+                rich_escape(formatted["name"][:30]),
                 f"[{status_color}]{formatted['status']}[/{status_color}]",
                 formatted["model"][:30],
                 formatted["environments"],
@@ -1686,23 +1726,7 @@ def _list_runs_impl(
             )
 
         console.print(table)
-
-        total_pages = max(1, -(-total_count // num))
-        console.print(f"\n[dim]Scope: {_list_scope_line(team, team_id, config, mine)}[/dim]")
-        if total_count > page * num:
-            console.print(
-                f"[yellow]Page {page}/{total_pages} of {total_count} run(s). "
-                f"Use --page {page + 1} to see more.[/yellow]"
-            )
-        else:
-            console.print(f"[dim]Page {page}/{total_pages} of {total_count} run(s).[/dim]")
-        # The listing is newest-first, so a long-running job drops off
-        # page 1 as soon as newer runs are submitted - the common reason
-        # a run visible on the console appears "missing" here.
-        console.print(
-            "[dim]Live cluster workloads (all teams, running/queued): "
-            "[bold]prime factory workloads[/bold][/dim]"
-        )
+        _print_list_footer(team, team_id, config, mine, page, num, total_count)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -1754,7 +1778,7 @@ def get_run(
 
         console.print(f"[bold]Run {run_id}[/bold]\n")
         if run.name:
-            console.print(f"  Name: {run.name}")
+            console.print(f"  Name: {rich_escape(run.name)}")
         status_text = run.status
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"

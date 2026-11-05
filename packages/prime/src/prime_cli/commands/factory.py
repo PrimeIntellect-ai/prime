@@ -542,7 +542,7 @@ WORKLOAD_TYPE_FILTERS = ("training", "inference", "slurm")
 WORKLOAD_STATE_FILTERS = ("running", "queued", "completed", "failed", "stopped", "all")
 # Terminal (or mixed-history) queries: larger result sets — the DURATION
 # column appears and a default --limit applies.
-TERMINAL_QUERY_STATES = ("completed", "failed", "all")
+TERMINAL_QUERY_STATES = ("completed", "failed", "stopped", "all")
 # "stopped" (a run someone ended on purpose) is terminal like the other
 # two: it ages from ended_at and carries no allocated GPUs. Accepted
 # ahead of the backend emitting it - inert until then.

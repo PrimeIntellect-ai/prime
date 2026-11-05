@@ -1196,6 +1196,22 @@ def test_workloads_state_all_shows_duration_and_default_limit(
     assert dummy.workloads_params()["limit"] == 50
 
 
+def test_workloads_state_stopped_is_treated_as_a_terminal_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `stopped` is terminal like completed/failed: it gets the DURATION
+    # column and the default history limit, not live-query handling.
+    row = _workload("training:run-1", "training", "stopped")
+    dummy = _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "stopped"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "DURATION" in output
+    assert dummy.workloads_params()["limit"] == 50
+
+
 def test_workloads_live_state_sends_no_default_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

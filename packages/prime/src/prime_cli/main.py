@@ -4,6 +4,7 @@ from typing import Optional
 import typer
 
 from . import __version__
+from .commands.agent import agent_command
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
 from .commands.disks import app as disks_app
@@ -42,6 +43,15 @@ app = PlainTyper(
 )
 
 # Model Factory commands
+app.command(
+    "agent",
+    rich_help_panel="Model Factory",
+    add_help_option=False,
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+    },
+)(agent_command)
 app.add_typer(lab_app, name="lab", hidden=True, deprecated=True)
 app.add_typer(env_app, name="env", rich_help_panel="Model Factory")
 app.command("fork", rich_help_panel="Model Factory", epilog=FORK_JSON_HELP)(fork_command)

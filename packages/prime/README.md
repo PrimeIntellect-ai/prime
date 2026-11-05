@@ -30,6 +30,7 @@ Prime is the official CLI and Python SDK for [Prime Intellect](https://primeinte
 
 **What can you do with Prime?**
 
+- Launch Prime Agent, with automatic installation on first use
 - Deploy GPU pods with H100, A100, and other high-performance GPUs
 - Discover and launch Hosted Training runs against verifiers environments
 - Create and manage isolated sandbox environments for running code
@@ -106,6 +107,18 @@ prime sandbox create python:3.11
 ```
 
 ## Features
+
+### Prime Agent
+
+Run `prime agent` to launch Prime Agent. Trailing arguments, including `--help`,
+are forwarded to it. If it is missing, the CLI downloads the stable installer,
+verifies a pinned SHA-256 digest before execution, and launches the installation
+from `~/.local/bin` or `PRIME_AGENT_RUST_PREFIX/bin`. Existing TypeScript
+installations are also discovered.
+
+The installer pin must be updated when the published script changes. A checksum
+mismatch stops installation; no downloaded script runs in that case.
+
 
 ### Hosted Training
 

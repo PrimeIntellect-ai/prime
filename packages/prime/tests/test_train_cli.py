@@ -361,6 +361,40 @@ def test_train_list_page_past_the_end_still_shows_the_scope(monkeypatch, temp_ho
     assert "Page 9/2 of 30 run(s)" in result.output
 
 
+def test_train_list_footer_honors_server_pagination(monkeypatch, temp_home) -> None:
+    # The response is authoritative about how it was actually paginated.
+    # Recomputing from --num would print "Page 1/1" and swallow the
+    # next-page hint when the server paged differently.
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        return {
+            "runs": [_fake_run_payload("RUNNING")],
+            "total": 500,
+            "page": 1,
+            "limit": 100,
+            "total_pages": 5,
+        }
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+
+    result = _invoke_list("--num", "1000")
+
+    assert result.exit_code == 0, result.output
+    assert "Page 1/5 of 500 run(s)" in result.output
+    assert "Use --page 2 to see more" in result.output
+
+
+def test_train_list_footer_falls_back_without_server_metadata(monkeypatch, temp_home) -> None:
+    # Legacy backend: no limit/total_pages to honor, so the local
+    # calculation still drives the footer.
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")], total=147)
+
+    result = _invoke_list("--num", "20")
+
+    assert result.exit_code == 0, result.output
+    assert "Page 1/8 of 147 run(s)" in result.output
+
+
 def test_train_list_footer_on_a_single_page(monkeypatch, temp_home) -> None:
     _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
 

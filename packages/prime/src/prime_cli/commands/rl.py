@@ -1606,16 +1606,28 @@ def _print_list_footer(
     page: int,
     num: int,
     total_count: int,
+    server_limit: Optional[int] = None,
+    server_total_pages: Optional[int] = None,
 ) -> None:
     """Scope, position and the pointer to the live cluster view.
 
     Printed for empty listings too - a scopeless "No Hosted Training
     runs found" is the case the scope line exists to explain.
+
+    Page arithmetic prefers the server's own `limit`/`total_pages` over
+    the requested `--num`: the response is authoritative about how it
+    was actually paginated, so a backend that serves a different page
+    size can never leave the footer claiming a last page that isn't.
+    The local calculation remains for the legacy un-paginated backend,
+    which sends no metadata to honor.
     """
     console.print(f"\n[dim]Scope: {_list_scope_line(team_flag, team_id, config, mine)}[/dim]")
     if total_count:
-        total_pages = max(1, -(-total_count // num))
-        if total_count > page * num:
+        per_page = server_limit or num
+        total_pages = (
+            server_total_pages if server_total_pages else max(1, -(-total_count // per_page))
+        )
+        if total_count > page * per_page:
             console.print(
                 f"[yellow]Page {page}/{total_pages} of {total_count} run(s). "
                 f"Use --page {page + 1} to see more.[/yellow]"
@@ -1696,7 +1708,17 @@ def _list_runs_impl(
             # An empty listing is exactly when the scope matters most:
             # "no runs" under a stale PRIME_TEAM_ID looks identical to
             # "no runs" at all. Print the footer here too.
-            _print_list_footer(team, team_id, config, mine, page, num, total_count)
+            _print_list_footer(
+                team,
+                team_id,
+                config,
+                mine,
+                page,
+                num,
+                total_count,
+                server_limit=run_page.limit,
+                server_total_pages=run_page.total_pages,
+            )
             return
 
         table = Table(title="Hosted Training Runs")
@@ -1730,7 +1752,17 @@ def _list_runs_impl(
             )
 
         console.print(table)
-        _print_list_footer(team, team_id, config, mine, page, num, total_count)
+        _print_list_footer(
+            team,
+            team_id,
+            config,
+            mine,
+            page,
+            num,
+            total_count,
+            server_limit=run_page.limit,
+            server_total_pages=run_page.total_pages,
+        )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

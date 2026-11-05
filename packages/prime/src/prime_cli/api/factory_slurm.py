@@ -89,6 +89,73 @@ class FactorySlurmClient:
     def remove_member(self, team_id: str, cluster_id: str, username: str) -> None:
         self.client.delete(f"/slurm-clusters/{team_id}/{cluster_id}/members/{username}")
 
+    def create_cluster(
+        self,
+        team_id: str,
+        prime_cluster_id: str,
+        slurm_cluster_name: str,
+        num_nodes: int,
+        members: List[Dict[str, Any]],
+        gpus_per_node: Optional[int] = None,
+        home_size: Optional[str] = None,
+        tailscale_auth_key: Optional[str] = None,
+        containers_enabled: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Create a new Slurm cluster deployment.
+
+        Platform API: POST /api/v1/slurm-clusters/{team_id}/deploy
+        Contract: backend/app/api/v1/slurm_clusters/router.py (develop branch)
+
+        Args:
+            team_id: The team ID that will own the cluster
+            prime_cluster_id: Target Model Factory or dedicated cluster id
+            slurm_cluster_name: Display name for the Slurm deployment (2-32 chars)
+            num_nodes: Number of nodes to deploy (required)
+            members: List of at least 1 member dict with:
+                - username: str (matching ^[a-z][a-z0-9-]{0,30}[a-z0-9]$, length 2-32)
+                - sshAuthorizedKeys: list[str] (at least 1)
+                - sudo: bool (default false)
+                - linkedUserId: Optional[str]
+            gpus_per_node: Optional number of GPUs per node
+            home_size: Optional home directory size
+            tailscale_auth_key: Optional Tailscale auth key
+            containers_enabled: Enable containers (default false)
+            timeout: Optional request timeout in seconds
+
+        Returns:
+            API response dict with:
+            - id: str (cluster/job identifier)
+            - primeClusterId: str
+            - status: str (starts PENDING)
+            - createdAt: str
+
+        Raises:
+            APIError: If the create request fails
+            - 403: API key lacks slurm_clusters:write scope or not team admin
+            - 404: prime cluster not found
+            - 409: conflict (e.g., name already exists, not enough nodes, port conflict)
+            - 422: validation error (invalid fields or missing requirements)
+        """
+        endpoint = f"/slurm-clusters/{team_id}/deploy"
+        body: Dict[str, Any] = {
+            "primeClusterId": prime_cluster_id,
+            "slurmClusterName": slurm_cluster_name,
+            "numNodes": num_nodes,
+            "members": members,
+            "containersEnabled": containers_enabled,
+        }
+        if gpus_per_node is not None:
+            body["gpusPerNode"] = gpus_per_node
+        if home_size is not None:
+            body["homeSize"] = home_size
+        if tailscale_auth_key is not None:
+            body["tailscaleAuthKey"] = tailscale_auth_key
+        try:
+            return self.client.post(endpoint, json=body, timeout=timeout)
+        except ValueError as exc:
+            raise APIError("Slurm cluster create API returned a malformed response body.") from exc
+
     def resize_cluster(
         self, team_id: str, cluster_id: str, num_nodes: int, timeout: Optional[float] = None
     ) -> Dict[str, Any]:

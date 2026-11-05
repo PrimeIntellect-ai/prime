@@ -202,6 +202,48 @@ def test_sft_online_eval_is_deferred_and_the_rest_is_validated(fake_schema):
         worker.normalize({**request, "config": online_eval})
 
 
+def test_pretrain_compiles_trainer_only_with_the_pretrain_schema(fake_schema, monkeypatch):
+    from types import ModuleType
+
+    from prime_cli.utils import training_schema_worker as worker
+    from pydantic import BaseModel
+
+    class Deployment(BaseModel):
+        type: str = "single_node"
+
+    class PretrainConfig(BaseModel):
+        data: dict
+        deployment: Deployment = Deployment()
+
+    pretrain = ModuleType("prime_rl.configs.pretrain")
+    pretrain.PretrainConfig = PretrainConfig
+    monkeypatch.setitem(sys.modules, "prime_rl.configs.pretrain", pretrain)
+    data = {"type": "datatrove", "paths": ["shards/train"]}
+
+    artifact = worker.normalize(
+        {
+            "mode": "pretrain",
+            "schema_commit": "a" * 40,
+            "sft_online_eval_keys": sorted(training_compiler.SFT_ONLINE_EVAL_KEYS),
+            "config": {"data": data},
+        }
+    )
+
+    assert (artifact["mode"], artifact["components"]) == (
+        "pretrain",
+        {"trainer": {"data": data, "deployment": {"type": "single_node"}}},
+    )
+
+
+def test_pretrain_on_a_build_without_it_names_the_fix(fake_schema, monkeypatch):
+    from prime_cli.utils import training_schema_worker as worker
+
+    monkeypatch.setitem(sys.modules, "prime_rl.configs.pretrain", None)
+
+    with pytest.raises(ValueError, match="no pretrain mode"):
+        worker.normalize({"mode": "pretrain", "schema_commit": "a" * 40, "config": {}})
+
+
 def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     monkeypatch.setenv("PRIME_API_KEY", "secret")
     monkeypatch.setenv("HF_TOKEN", "secret")

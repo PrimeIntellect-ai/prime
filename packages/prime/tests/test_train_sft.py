@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 import toml
 from prime_cli.api.training import build_payload_from_toml
-from prime_cli.commands.rl import _is_sft, _looks_like_sft
+from prime_cli.commands.rl import _looks_like_sft, _training_mode
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -78,11 +78,19 @@ def test_sft_detection_requires_data_without_rl_blocks() -> None:
     assert _looks_like_sft({}) is False
 
 
-def test_sft_flag_forces_the_sft_path() -> None:
-    assert _is_sft({}, flag=True) is True
-    assert _is_sft({"trainer": {}}, flag=True) is True  # flag forces; server validates
-    assert _is_sft({"data": {}}, flag=False) is True
-    assert _is_sft({}, flag=False) is False
+@pytest.mark.parametrize(
+    ("cfg", "sft", "mode"),
+    [
+        ({}, True, "sft"),
+        ({"trainer": {}}, True, "sft"),  # flag forces; server validates
+        ({"data": {}}, False, "sft"),
+        ({}, False, "rl"),
+        ({"data": {"type": "datatrove", "paths": ["shards"]}}, False, "pretrain"),
+        ({"data": {"type": "datatrove", "paths": ["shards"]}}, True, "pretrain"),
+    ],
+)
+def test_training_mode_follows_the_config_shape(cfg, sft, mode) -> None:
+    assert _training_mode(cfg, sft=sft) == mode
 
 
 # --- payload building --------------------------------------------------------

@@ -850,13 +850,20 @@ class TestRuns:
         client.list_run_steps(RESERVED_RUN_ID)
         assert paths == [ENCODED_RUN_PATH, ENCODED_RUN_PATH + b"/steps"]
 
-    @pytest.mark.parametrize("method", ["get_run", "list_run_steps"])
-    def test_run_reads_reject_run_id_with_slash_before_request(self, make_client, method):
-        def handler(request: httpx.Request) -> httpx.Response:
-            pytest.fail(f"unexpected request: {request.url}")
+    def test_run_reads_encode_the_slashes_of_an_inference_run_id(self, make_client):
+        paths = []
 
-        with pytest.raises(ValueError, match="run_id cannot contain '/'"):
-            getattr(make_client(handler), method)("team/run")
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.raw_path)
+            if request.url.raw_path.endswith(b"/steps"):
+                return httpx.Response(200, json=RUN_STEPS)
+            return httpx.Response(200, json={**RUN, "run_id": "inference/team/qwen3:lora-1"})
+
+        client = make_client(handler)
+        client.get_run("inference/team/qwen3:lora-1")
+        client.list_run_steps("inference/team/qwen3:lora-1")
+        path = b"/api/v1/runs/inference%2Fteam%2Fqwen3%3Alora-1"
+        assert paths == [path, path + b"/steps"]
 
 
 NODE = {

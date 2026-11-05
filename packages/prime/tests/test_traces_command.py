@@ -71,7 +71,6 @@ def test_search_json_preserves_continuation_coverage_and_scope(monkeypatch):
         ["search", "hello"],
         ["search", " ", "--run-id", "run"],
         ["search", "he", "--run-id", "run"],
-        ["search", "hello", "--run-id", "team/run"],
         ["search", "hello", "--run-id", "run", "--field", "sql"],
     ],
 )
@@ -2054,11 +2053,14 @@ def test_get_runs_rejects_raw_and_episodes(fake_client, extra):
     assert "get_run" not in fake_client.calls
 
 
-def test_get_runs_rejects_a_run_id_with_a_slash(fake_client):
-    result = runner.invoke(main_app, ["traces", "get", "team/run", "--runs"])
+def test_inference_runs_are_listed_by_type_and_read_by_slashed_id(fake_client):
+    listed = runner.invoke(main_app, ["traces", "list", "--runs", "--run-type", "inference"])
+    read = runner.invoke(main_app, ["traces", "get", "inference/team/qwen3", "--runs"])
 
-    assert result.exit_code == 2
-    assert "get_run" not in fake_client.calls
+    assert listed.exit_code == 0, listed.output
+    assert fake_client.calls["list_runs"]["run_type"] == ["inference"]
+    assert read.exit_code == 0, read.output
+    assert fake_client.calls["get_run"] == "inference/team/qwen3"
 
 
 def test_get_runs_not_found_names_the_account_it_searched(fake_client, monkeypatch):

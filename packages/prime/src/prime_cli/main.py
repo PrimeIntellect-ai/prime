@@ -6,7 +6,6 @@ import typer
 from . import __version__
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
-from .commands.data_factory import app as data_factory_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
 from .commands.evals import app as evals_app
@@ -19,6 +18,7 @@ from .commands.inference import app as inference_app
 from .commands.lab import app as lab_app
 from .commands.login import app as login_app
 from .commands.logout import app as logout_app
+from .commands.pipelines import app as pipelines_app
 from .commands.pods import app as pods_app
 from .commands.rl import app as train_app
 from .commands.sandbox import app as sandbox_app
@@ -57,8 +57,8 @@ app.add_typer(
     rich_help_panel="Model Factory",
 )
 app.add_typer(traces_app, name="traces", rich_help_panel="Model Factory")
-# Hidden while Data Factory is behind its flag on the platform.
-app.add_typer(data_factory_app, name="data-factory", rich_help_panel="Model Factory", hidden=True)
+# Hidden while pipelines are behind their flag on the platform.
+app.add_typer(pipelines_app, name="pipelines", rich_help_panel="Model Factory", hidden=True)
 
 # Compute commands
 app.add_typer(factory_app, name="factory", rich_help_panel="Compute")

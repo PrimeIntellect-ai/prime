@@ -1,4 +1,4 @@
-"""`prime data-factory`: run a Data Factory graph on the platform, and fetch what it made."""
+"""`prime pipelines`: run a pipeline (a Flow graph) on the platform, and fetch what it made."""
 
 import json
 import os
@@ -15,7 +15,7 @@ from ..core import Config
 from ..utils import PlainTyper, get_console, output_data_as_json, validate_output_format
 
 app = PlainTyper(
-    help="Run Data Factory graphs on the platform, follow them, and download what they made.",
+    help="Run a pipeline (a Flow graph) on the platform, and fetch what it made.",
     no_args_is_help=True,
 )
 console = get_console()
@@ -29,7 +29,9 @@ def _fail(error: Exception) -> None:
 def _summary(run: dict[str, Any]) -> None:
     stopped = " (stopped)" if run.get("stopped") else ""
     console.print(f"Run [bold]{run['id']}[/bold]: {run['status']}{stopped}")
-    console.print(f"Graph version: {run['version'][:12]}")
+    if run.get("pipeline_id"):
+        console.print(f"Pipeline: {run['pipeline_id']}")
+    console.print(f"Version: {run['version'][:12]}")
     if run.get("error") and not run.get("stopped"):
         console.print(f"[red]{escape(run['error'])}[/red]")
 
@@ -42,6 +44,11 @@ def run(
     team: Optional[str] = typer.Option(
         None, "--team", help="Run as this team (default: your selected team)."
     ),
+    pipeline_id: Optional[str] = typer.Option(
+        None,
+        "--pipeline-id",
+        help="Save the graph as a new version of this pipeline (default: a new pipeline).",
+    ),
     sample: Optional[int] = typer.Option(
         None, "--sample", min=1, help="Preview: items each input runs on."
     ),
@@ -52,7 +59,7 @@ def run(
     ),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:
-    """Submit a graph and start a run of it."""
+    """Save a graph as a pipeline and start a run of it."""
     validate_output_format(output, console)
     try:
         data = json.loads(graph.read_text())
@@ -64,18 +71,19 @@ def run(
     body = {
         "graph": data,
         "team_id": team or Config().team_id,
+        "pipeline_id": pipeline_id,
         "sample": sample,
         "secrets": {name: os.environ[name] for name in secret},
     }
     try:
-        started = APIClient().post("/data-factory/runs", json=body, timeout=120)
+        started = APIClient().post("/pipelines/runs", json=body, timeout=120)
     except APIError as error:
         _fail(error)
     if output == "json":
         output_data_as_json(started, console)
         return
     _summary(started)
-    console.print(f"Follow it with: prime data-factory status {started['id']}")
+    console.print(f"Follow it with: prime pipelines status {started['id']}")
 
 
 @app.command("status")
@@ -86,7 +94,7 @@ def status(
     """A run's status: per-node counts, what waits on a person, its cost and outputs."""
     validate_output_format(output, console)
     try:
-        found = APIClient().get(f"/data-factory/runs/{run_id}")
+        found = APIClient().get(f"/pipelines/runs/{run_id}")
     except APIError as error:
         _fail(error)
     if output == "json":
@@ -125,7 +133,7 @@ def outputs(
     """Download what a run's heads made: its report, its taskset package."""
     client = APIClient()
     try:
-        found = client.get(f"/data-factory/runs/{run_id}")
+        found = client.get(f"/pipelines/runs/{run_id}")
     except APIError as error:
         _fail(error)
     listed = found.get("outputs") or []
@@ -140,7 +148,7 @@ def outputs(
         target = directory / parts[0] / parts[1]
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(f".{target.name}.part")
-        url = f"{client.base_url}/api/v1/data-factory/runs/{run_id}/outputs/{out['name']}"
+        url = f"{client.base_url}/api/v1/pipelines/runs/{run_id}/outputs/{out['name']}"
         try:
             timeout = httpx.Timeout(300.0, connect=10.0)
             with client.client.stream("GET", url, timeout=timeout) as response:
@@ -160,7 +168,7 @@ def outputs(
 def stop(run_id: str = typer.Argument(..., help="The run's id.")) -> None:
     """Stop a run. Its runner and every sandbox it started end."""
     try:
-        stopped = APIClient().post(f"/data-factory/runs/{run_id}/stop")
+        stopped = APIClient().post(f"/pipelines/runs/{run_id}/stop")
     except APIError as error:
         _fail(error)
     _summary(stopped)

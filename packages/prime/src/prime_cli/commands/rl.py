@@ -1156,11 +1156,11 @@ def create_run(
             "for SFT the volume is mounted read-only at /volume, so "
             "data.name must point at a path on the volume (e.g. "
             '/volume/datasets/<name> or the relative "datasets/<name>" — '
-            "the platform resolves it). Get a dataset there yourself with "
-            "`prime volumes ssh <volume> --read-write` and the huggingface "
-            "CLI inside that session (see `prime volumes`); without a "
-            "volume, SFT only works with fake datasets. Closed beta, see "
-            "`prime volumes`. Falls back to a "
+            "the platform resolves it). Upload a dataset with `prime volumes "
+            "put`; accounts with a cluster allocation can also use `prime "
+            "volumes ssh <volume> --read-write` and the huggingface CLI "
+            "inside that session (see `prime volumes`). Without a volume, "
+            "SFT only works with fake datasets. Falls back to a "
             'top-level `volume = "..."` in the TOML. Created on the fly '
             "(default 5Ti) if it doesn't exist."
         ),

@@ -3,8 +3,11 @@
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from tenacity import wait_none
 
+from prime_evals import EvalsAPIError
 from prime_evals.evals import AsyncEvalsClient, EvalsClient
 from prime_evals.models import (
     CreateEvaluationRequest,
@@ -257,6 +260,66 @@ def test_async_push_samples_reports_progress_and_reuses_http_client(monkeypatch)
     assert len(posts) == 2
     assert len(created_clients) == 1
     assert posts[0]["headers"]["Authorization"] == "Bearer secret-token"
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "error_type,should_retry",
+    [(httpx.ReadError, False), (httpx.ConnectError, True)],
+    ids=["response-read-error", "connection-error"],
+)
+def test_push_samples_only_retries_connection_failures(
+    monkeypatch, is_async, error_type, should_retry
+):
+    requests = []
+    appended = []
+
+    def respond(request):
+        requests.append(request)
+        if len(requests) == 1 and error_type is httpx.ConnectError:
+            raise error_type("simulated connection failure", request=request)
+        appended.append(request.content)
+        if len(requests) == 1:
+            raise error_type("simulated response loss", request=request)
+        return httpx.Response(200, json={})
+
+    async def async_respond(request):
+        return respond(request)
+
+    # Preserve real retry behavior without waiting between synthetic failures.
+    monkeypatch.setattr("prime_evals.evals.wait_exponential", lambda **_: wait_none())
+    api_client = SimpleNamespace(base_url="https://api.example", api_key="test-key")
+    if is_async:
+        real_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            "prime_evals.evals.httpx.AsyncClient",
+            lambda **kwargs: real_client(transport=httpx.MockTransport(async_respond), **kwargs),
+        )
+        client = AsyncEvalsClient.__new__(AsyncEvalsClient)
+        client.client = api_client
+
+        def upload():
+            return asyncio.run(client.push_samples("eval-1", [{"sample_id": "one"}]))
+
+    else:
+        real_client = httpx.Client
+        monkeypatch.setattr(
+            "prime_evals.evals.httpx.Client",
+            lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+        )
+        client = EvalsClient(api_client)
+
+        def upload():
+            return client.push_samples("eval-1", [{"sample_id": "one"}])
+
+    if should_retry:
+        assert upload() == {"samples_pushed": 1, "samples_skipped": 0}
+        assert len(requests) == 2
+    else:
+        with pytest.raises(EvalsAPIError, match="simulated response loss"):
+            upload()
+        assert len(requests) == 1
+    assert len(appended) == 1
 
 
 def test_evals_client_context_manager():

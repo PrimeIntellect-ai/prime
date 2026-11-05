@@ -92,3 +92,32 @@ def test_status_as_json(api: Dict[str, Any]) -> None:
 def test_stop(api: Dict[str, Any]) -> None:
     result = runner.invoke(app, ["data-factory", "stop", "run1"], env=TEST_ENV)
     assert result.exit_code == 0 and api["post"] == ("/data-factory/runs/run1/stop", None)
+
+
+def test_status_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch) -> None:
+    run = {
+        **RUN,
+        "error": "bad [type=missing]",
+        "state": {
+            **RUN["state"],
+            "cards": [{**RUN["state"]["cards"][0], "question": "Choose [keep/drop]"}],
+        },
+    }
+    monkeypatch.setattr(
+        "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
+    )
+    result = runner.invoke(app, ["data-factory", "status", "run1"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert "bad [type=missing]" in result.output and "Choose [keep/drop]" in result.output
+
+
+def test_outputs_refuse_a_name_that_leaves_the_directory(monkeypatch, tmp_path) -> None:
+    run = {**RUN, "outputs": [{"name": "../evil", "node": "report", "bytes": 1}]}
+    monkeypatch.setattr(
+        "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
+    )
+    result = runner.invoke(
+        app, ["data-factory", "outputs", "run1", "--dir", str(tmp_path)], env=TEST_ENV
+    )
+    assert result.exit_code == 1 and "refusing" in result.output
+    assert not (tmp_path.parent / "evil").exists()

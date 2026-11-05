@@ -7,6 +7,7 @@ from typing import Any, List, Optional
 
 import httpx
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 from ..client import APIClient, APIError
@@ -30,7 +31,7 @@ def _summary(run: dict[str, Any]) -> None:
     console.print(f"Run [bold]{run['id']}[/bold]: {run['status']}{stopped}")
     console.print(f"Graph version: {run['version'][:12]}")
     if run.get("error") and not run.get("stopped"):
-        console.print(f"[red]{run['error']}[/red]")
+        console.print(f"[red]{escape(run['error'])}[/red]")
 
 
 @app.command("run")
@@ -97,7 +98,7 @@ def status(
         table = Table("node", "done", "running", "waiting on you", "failed", "cost")
         for node, counts in nodes.items():
             table.add_row(
-                node,
+                escape(node),
                 str(counts.get("done", 0)),
                 str(counts.get("running", 0)),
                 str(counts.get("held", 0)),
@@ -107,7 +108,9 @@ def status(
         console.print(table)
     for card in state.get("cards") or []:
         where = f"{card['node']} ({card['job']})"
-        console.print(f"[yellow]Waiting on you[/yellow] at {where}: {card['question']}")
+        console.print(
+            f"[yellow]Waiting on you[/yellow] at {escape(where)}: {escape(card['question'])}"
+        )
     if cost := (state.get("cost") or {}).get("usd"):
         console.print(f"Cost so far: ${cost:.2f}")
     for out in found.get("outputs") or []:
@@ -131,17 +134,24 @@ def outputs(
         return
     directory.mkdir(parents=True, exist_ok=True)
     for out in listed:
-        target = directory / out["node"] / out["name"]
+        parts = (str(out["node"]), str(out["name"]))
+        if any(not part or part in (".", "..") or "/" in part or "\\" in part for part in parts):
+            _fail(APIError(f"refusing an output named {out['node']}/{out['name']}"))
+        target = directory / parts[0] / parts[1]
         target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(f".{target.name}.part")
         url = f"{client.base_url}/api/v1/data-factory/runs/{run_id}/outputs/{out['name']}"
         try:
             timeout = httpx.Timeout(300.0, connect=10.0)
             with client.client.stream("GET", url, timeout=timeout) as response:
                 response.raise_for_status()
-                with target.open("wb") as file:
+                with partial.open("wb") as file:
                     for chunk in response.iter_bytes():
                         file.write(chunk)
+            # Only a complete download replaces what was there.
+            partial.replace(target)
         except httpx.HTTPError as error:
+            partial.unlink(missing_ok=True)
             _fail(APIError(f"downloading {out['name']}: {error}"))
         console.print(f"Saved {target}")
 

@@ -944,6 +944,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
 
     return {
         "id": run.id,
+        "name": run.name or "-",
         "status": run.status,
         "model": run.base_model or "-",
         "environments": envs_display,
@@ -1569,6 +1570,30 @@ def request_models() -> None:
     console.print("[green]Request submitted. Thanks![/green]")
 
 
+def _list_scope_line(
+    team_flag: Optional[str], team_id: Optional[str], config: Config, mine: bool
+) -> str:
+    """One line naming the scope the listing actually covers.
+
+    `prime train list` and the Model Factory table on the console look
+    like the same question but scope on different axes: this listing is
+    the TEAM's run history across every cluster and every status, while
+    the console table is every running/queued workload on the team's
+    HARDWARE (other teams' runs on that cluster included). Without the
+    scope spelled out, a run visible on one and not the other reads as
+    data loss rather than a different query.
+    """
+    if not team_id:
+        scope = "your personal runs + your teams"
+    elif team_flag:
+        scope = f"team {team_flag}"
+    elif config.team_id_from_env:
+        scope = f"team {team_id} (from PRIME_TEAM_ID)"
+    else:
+        scope = f"team {config.team_name or team_id}"
+    return " · ".join([scope, "yours only" if mine else "all members", "all clusters"])
+
+
 def _list_runs_impl(
     team: Optional[str], num: int, page: int, output: str, mine: bool = False
 ) -> None:
@@ -1635,6 +1660,10 @@ def _list_runs_impl(
 
         table = Table(title="Hosted Training Runs")
         table.add_column("ID", style="cyan", no_wrap=True)
+        # The console labels a run by its name and falls back to
+        # `dedicated-<id>`; without the name here there is no column the
+        # two views share to line a row up by.
+        table.add_column("Name")
         table.add_column("Status", style="bold")
         table.add_column("Model", style="magenta")
         table.add_column("Environments", style="green")
@@ -1647,6 +1676,7 @@ def _list_runs_impl(
             status_color = _get_status_color(run.status)
             table.add_row(
                 formatted["id"],
+                formatted["name"][:30],
                 f"[{status_color}]{formatted['status']}[/{status_color}]",
                 formatted["model"][:30],
                 formatted["environments"],
@@ -1657,13 +1687,22 @@ def _list_runs_impl(
 
         console.print(table)
 
+        total_pages = max(1, -(-total_count // num))
+        console.print(f"\n[dim]Scope: {_list_scope_line(team, team_id, config, mine)}[/dim]")
         if total_count > page * num:
             console.print(
-                f"\n[yellow]Showing page {page} of results. "
+                f"[yellow]Page {page}/{total_pages} of {total_count} run(s). "
                 f"Use --page {page + 1} to see more.[/yellow]"
             )
         else:
-            console.print(f"\n[dim]Total: {total_count} run(s)[/dim]")
+            console.print(f"[dim]Page {page}/{total_pages} of {total_count} run(s).[/dim]")
+        # The listing is newest-first, so a long-running job drops off
+        # page 1 as soon as newer runs are submitted - the common reason
+        # a run visible on the console appears "missing" here.
+        console.print(
+            "[dim]Live cluster workloads (all teams, running/queued): "
+            "[bold]prime factory workloads[/bold][/dim]"
+        )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -1714,6 +1753,8 @@ def get_run(
         status_color = _get_status_color(run.status)
 
         console.print(f"[bold]Run {run_id}[/bold]\n")
+        if run.name:
+            console.print(f"  Name: {run.name}")
         status_text = run.status
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"

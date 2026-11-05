@@ -92,7 +92,6 @@ class Pod(BaseModel):
     provisioning_price_hr: Optional[float] = Field(None, alias="provisioningPriceHr")
     base_price_hr: Optional[float] = Field(None, alias="basePriceHr")
     base_currency: Optional[str] = Field(None, alias="baseCurrency")
-    custom_template_id: Optional[str] = Field(None, alias="customTemplateId")
     is_spot: Optional[bool] = Field(None, alias="isSpot")
     auto_restart: Optional[bool] = Field(None, alias="autoRestart")
 
@@ -123,7 +122,6 @@ class PodConfig(BaseModel):
     vcpus: Optional[int]
     memory: Optional[int]
     image: Optional[str]
-    custom_template_id: Optional[str] = Field(None, alias="customTemplateId")
     data_center_id: Optional[str] = Field(None, alias="dataCenterId")
     country: Optional[str]
     security: Optional[str]

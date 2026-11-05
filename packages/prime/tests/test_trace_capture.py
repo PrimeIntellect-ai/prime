@@ -29,13 +29,16 @@ def _route(**overrides):
 
 @pytest.fixture
 def platform(monkeypatch):
-    """Answers like the platform route; tests set `status` or `routes`."""
-    state = {"status": 200, "routes": [_route()], "requests": []}
+    """Answers like the platform route; tests set `status`, `routes`, or `team_id`."""
+    state = {"status": 200, "routes": [_route()], "requests": [], "team_id": "team-1"}
 
     def respond(request: httpx.Request) -> httpx.Response:
         state["requests"].append(request)
         assert request.url.path == "/api/v1/inference/trace-capture"
-        assert request.url.params["teamId"] == "team-1"
+        if state["team_id"]:
+            assert request.url.params["teamId"] == state["team_id"]
+        else:
+            assert "teamId" not in request.url.params
         if state["status"] != 200:
             return httpx.Response(state["status"], json={"detail": "nope"})
         if request.method == "GET":
@@ -48,11 +51,12 @@ def platform(monkeypatch):
         client.client = httpx.Client(transport=httpx.MockTransport(respond))
         return client
 
-    class TeamConfig:
-        team_id = "team-1"
+    class Config:
+        def __init__(self):
+            self.team_id = state["team_id"]
 
     monkeypatch.setattr(trace_capture, "APIClient", api_client)
-    monkeypatch.setattr(trace_capture, "Config", TeamConfig)
+    monkeypatch.setattr(trace_capture, "Config", Config)
     # Both dimensions: rich ignores a bare width on dumb or non-tty terminals
     # (80x25 short-circuit), and ANSI styling around styled cells would break
     # the row assertions below.
@@ -93,6 +97,18 @@ def test_list_shows_enabled_active_and_the_inactive_reason(platform):
     assert any("team/off no off inference/team/off" in row for row in rows)
     assert any("team/unflagged yes inactive: enabler lost capture access" in row for row in rows)
     assert "Custom trace capture is active on 1 of 4 route(s)." in result.output
+
+
+def test_without_a_team_the_commands_target_the_personal_account(platform):
+    platform["team_id"] = None
+
+    list_result = _run("list")
+    enable_result = _run("enable", MODEL, "--yes")
+
+    assert list_result.exit_code == 0, list_result.output
+    assert "teamId" not in platform["requests"][0].url.params
+    assert enable_result.exit_code == 0, enable_result.output
+    assert "teamId" not in platform["requests"][1].url.params
 
 
 def test_enable_sends_the_exact_two_field_write(platform):

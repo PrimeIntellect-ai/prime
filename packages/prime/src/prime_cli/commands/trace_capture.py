@@ -1,6 +1,10 @@
-"""`prime inference trace-capture`: per-route custom trace capture for the team."""
+"""`prime inference trace-capture`: per-route custom trace capture.
 
-from typing import List, NoReturn
+Targets the selected team, or with no team selected the caller's personal
+account.
+"""
+
+from typing import List, NoReturn, Optional
 
 import typer
 from rich.markup import escape
@@ -25,7 +29,11 @@ from ..utils import (
 )
 
 app = PlainTyper(
-    help="Turn custom inference trace capture on or off per route for the active team.",
+    help=(
+        "Turn custom inference trace capture on or off per route. With a team"
+        " selected, this manages the team's routes (writes need team ADMIN);"
+        " with no team selected, it manages your personal account's routes."
+    ),
     no_args_is_help=True,
 )
 console = get_console()
@@ -33,34 +41,32 @@ error_console = get_console(stderr=True)
 
 ROUTE_JSON = "{model, name, run_id, enabled, active, inactive_reason}"
 INACTIVE_REASONS = {
-    "privacy_opt_out": "team privacy opt-out",
+    "privacy_opt_out": "trace privacy opt-out",
     "storage_limit": "trace storage limit reached",
     "enabler_unflagged": "enabler lost capture access",
     "route_unavailable": "route unavailable",
 }
 
 
-def _team_id() -> str:
-    team_id = Config().team_id
-    if not team_id:
-        error_console.print(
-            "[red]Error:[/red] trace capture is configured per team and no team is selected."
-            " Use [bold]prime switch[/bold] or set PRIME_TEAM_ID."
-        )
-        raise typer.Exit(1)
-    return team_id
+def _team_id() -> Optional[str]:
+    """The selected team, or None for the caller's personal account.
+
+    The platform's teamId parameter is optional: sending it targets the team,
+    omitting it targets the caller's own account.
+    """
+    return Config().team_id or None
 
 
 def _fail(error: APIError) -> NoReturn:
     if isinstance(error, TraceCaptureForbiddenError):
         error_console.print(
             "[red]Not allowed:[/red] listing needs the traces:read scope;"
-            " enable and disable need traces:write and team ADMIN."
+            " enable and disable need traces:write and, for a team, team ADMIN."
         )
     elif isinstance(error, TraceCaptureUnavailableError):
         error_console.print(
-            "[red]Not available:[/red] trace capture is not enabled for this team,"
-            " you are not a member, or the route is not eligible."
+            "[red]Not available:[/red] trace capture is not enabled for this account,"
+            " you are not a member of the team, or the route is not eligible."
         )
     else:
         error_console.print(f"[red]Error:[/red] {escape(str(error))}")
@@ -87,7 +93,10 @@ def _summary(routes: List[TraceCaptureRoute]) -> str:
 def list_routes(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List the team's capturable routes with whether capture is enabled and active.
+    """List capturable routes with whether capture is enabled and active.
+
+    With a team selected this covers the team's routes; without one it covers
+    your personal account's.
 
     Example:
 
@@ -102,7 +111,7 @@ def list_routes(
         output_data_as_json({"routes": [route.model_dump() for route in routes]}, console)
         return
     if not routes:
-        console.print("[yellow]No routes this team can capture.[/yellow]")
+        console.print("[yellow]No routes this account can capture.[/yellow]")
         return
 
     table = Table(title="Inference trace capture")
@@ -146,14 +155,17 @@ def enable(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Capture the team's calls to one route as traces. Requires team ADMIN.
+    """Capture calls to one route as traces.
+
+    With a team selected this manages the team's route and requires team
+    ADMIN; without one it manages your personal account's route.
 
     Example:
 
         prime inference trace-capture enable <model> --yes
     """
     validate_output_format(output, error_console)
-    prompt = "Store the prompts and completions of the team's calls to this route as traces?"
+    prompt = "Store the prompts and completions of this account's calls to this route as traces?"
     if not confirm_or_skip(prompt, yes, err=True):
         raise typer.Exit(1)
     _set(model, True, output)
@@ -164,7 +176,10 @@ def disable(
     model: str = typer.Argument(..., help=MODEL_HELP),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Stop capturing one route. Requires team ADMIN. Existing traces are kept.
+    """Stop capturing one route. Existing traces are kept.
+
+    With a team selected this manages the team's route and requires team
+    ADMIN; without one it manages your personal account's route.
 
     Example:
 

@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from prime_cli.core import APIClient, APIError, NotFoundError, ServerError
 
 ENDPOINT = "/inference/trace-capture"
-BASE_LORA_ID = "__base__"
 
 InactiveReason = Literal["privacy_opt_out", "storage_limit", "route_unavailable"]
 
@@ -28,7 +27,6 @@ class TraceCaptureRoute(BaseModel):
     """``enabled`` is the team's choice; ``active`` means calls are captured now."""
 
     model: str
-    lora_id: str = BASE_LORA_ID
     name: Optional[str] = None
     run_id: str
     enabled: bool
@@ -57,10 +55,8 @@ class TraceCaptureClient:
             raise _failed("list trace-capture routes", e) from e
         return [TraceCaptureRoute.model_validate(r) for r in response.get("routes", [])]
 
-    def set_route(
-        self, team_id: str, model: str, enabled: bool, lora_id: str = BASE_LORA_ID
-    ) -> TraceCaptureRoute:
-        body: Dict[str, Any] = {"model": model, "lora_id": lora_id, "enabled": enabled}
+    def set_route(self, team_id: str, model: str, enabled: bool) -> TraceCaptureRoute:
+        body: Dict[str, Any] = {"model": model, "enabled": enabled}
         try:
             response = self.client.request("PUT", ENDPOINT, params={"teamId": team_id}, json=body)
         except APIError as e:

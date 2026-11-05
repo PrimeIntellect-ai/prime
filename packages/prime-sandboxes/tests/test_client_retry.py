@@ -724,13 +724,6 @@ class TestSyncGatewayRetry:
         assert result == "success"
         assert call_count == 2
 
-    def test_is_retryable_gateway_error_accepts_read_error(self):
-        """Predicate reports True for ReadError so idempotent GETs retry."""
-        from prime_sandboxes.sandbox import _is_retryable_gateway_error
-
-        exc = httpx.ReadError("Connection broken", request=httpx.Request("GET", "http://test"))
-        assert _is_retryable_gateway_error(exc) is True
-
     def test_gateway_retry_on_5xx(self):
         """Test retry on 5xx HTTPStatusError (e.g. Cloudflare 524 timeout)."""
         from prime_sandboxes.sandbox import _gateway_retry

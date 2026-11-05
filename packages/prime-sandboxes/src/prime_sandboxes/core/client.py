@@ -4,6 +4,8 @@ import sys
 from typing import Any, Dict, Optional
 
 import httpx
+from connectrpc.code import Code
+from connectrpc.errors import ConnectError
 from tenacity import (
     RetryCallState,
     retry,
@@ -11,25 +13,99 @@ from tenacity import (
     stop_after_attempt,
     wait_random_exponential,
 )
+from tenacity.stop import stop_base
 from tenacity.wait import wait_base
 
 from .config import Config
 
-# Retry configuration for transient connection errors. POST only retries errors
-# that happen before the server can process the request; retrying ReadError on a
-# non-idempotent POST can duplicate side effects after a committed response-path
-# failure.
-POST_RETRYABLE_EXCEPTIONS = (
+# Requests that failed before the server could process them: safe to resend
+# even for an operation that is not idempotent.
+NOT_PROCESSED_EXCEPTIONS = (
     httpx.RemoteProtocolError,  # Server disconnected unexpectedly
     httpx.ConnectError,  # Connection refused/failed
+    httpx.ConnectTimeout,  # Timed out before the request was sent
     httpx.PoolTimeout,  # No connection available in pool
 )
 
-IDEMPOTENT_RETRYABLE_EXCEPTIONS = POST_RETRYABLE_EXCEPTIONS + (
-    httpx.ReadError,  # Connection broken while reading response (e.g., TCP reset)
+# Statuses and codes that are definitive answers. Everything else a transport
+# returns is a link or load fault and is retried (deny-list).
+_RETRYABLE_4XX_STATUSES = frozenset({408, 425, 429})
+_PERMANENT_5XX_STATUSES = frozenset({501, 505})
+PERMANENT_CONNECT_CODES = frozenset(
+    {
+        Code.CANCELED,
+        Code.INVALID_ARGUMENT,
+        Code.NOT_FOUND,
+        Code.ALREADY_EXISTS,
+        Code.PERMISSION_DENIED,
+        Code.FAILED_PRECONDITION,
+        Code.OUT_OF_RANGE,
+        Code.UNIMPLEMENTED,
+        Code.UNAUTHENTICATED,
+    }
 )
+# Local misconfiguration surfaced as transport errors; resending cannot fix it.
+_PERMANENT_TRANSPORT_EXCEPTIONS = (httpx.UnsupportedProtocol, httpx.LocalProtocolError)
 
-IDEMPOTENT_RETRYABLE_STATUSES = frozenset({502, 503, 504})
+
+def _is_sandbox_not_found_response(response: httpx.Response) -> bool:
+    """The gateway's 502 for a sandbox that no longer exists is an answer, not a fault."""
+    if response.status_code != 502:
+        return False
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    return isinstance(body, dict) and body.get("error") == "sandbox_not_found"
+
+
+def is_retryable(exc: BaseException, *, idempotent: bool) -> bool:
+    """The one retry classifier for SDK calls.
+
+    A transport failure is retried unless it is a definitive answer. A call that
+    is not idempotent retries only failures that prove the request was never
+    processed (connection-phase errors and 429). Plain APIError wrappers are
+    unwrapped to their transport cause; any other exception (SDK outcomes such
+    as a command timeout or a terminated sandbox, or a local defect) is final.
+    """
+    while type(exc) is APIError and exc.__cause__ is not None:
+        exc = exc.__cause__
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status == 429:
+            return True
+        if not idempotent:
+            return False
+        if status >= 500:
+            return status not in _PERMANENT_5XX_STATUSES and not _is_sandbox_not_found_response(
+                exc.response
+            )
+        return status in _RETRYABLE_4XX_STATUSES
+    if isinstance(exc, ConnectError):
+        return idempotent and exc.code not in PERMANENT_CONNECT_CODES
+    if isinstance(exc, _PERMANENT_TRANSPORT_EXCEPTIONS):
+        return False
+    if isinstance(exc, httpx.TransportError):
+        return idempotent or isinstance(exc, NOT_PROCESSED_EXCEPTIONS)
+    return False
+
+
+def retry_transient(
+    *,
+    idempotent: bool,
+    stop: stop_base,
+    wait: wait_base,
+    rate_limit_delays: tuple[float, ...],
+) -> Any:
+    """Tenacity decorator over is_retryable; call sites choose only the budget."""
+    return retry(
+        retry=retry_if_exception(lambda exc: is_retryable(exc, idempotent=idempotent)),
+        stop=stop,
+        wait=_RateLimitAwareWait(wait, rate_limit_delays),
+        reraise=True,
+    )
+
+
 IDEMPOTENT_HTTP_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
 _PLATFORM_RATE_LIMIT_DELAYS = (10.0, 30.0)
 
@@ -50,27 +126,12 @@ class _RateLimitAwareWait(wait_base):
 
 # Three attempts permit only two sleeps, so 429s wait 10s then 30s (~40s total).
 # Connection and 5xx errors keep the existing tight random-exponential budget.
-_PLATFORM_RETRY_WAIT = _RateLimitAwareWait(
-    wait_random_exponential(multiplier=0.1, max=2),
-    _PLATFORM_RATE_LIMIT_DELAYS,
-)
-
-
-def _is_rate_limit_error(exc: BaseException) -> bool:
-    # A 429 rejects the request before processing, so retrying is safe for every method.
-    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
-
-
-def _is_non_idempotent_request_retryable_error(exc: BaseException) -> bool:
-    return isinstance(exc, POST_RETRYABLE_EXCEPTIONS) or _is_rate_limit_error(exc)
-
-
-def _is_idempotent_request_retryable_error(exc: BaseException) -> bool:
-    if isinstance(exc, IDEMPOTENT_RETRYABLE_EXCEPTIONS) or _is_rate_limit_error(exc):
-        return True
-    return (
-        isinstance(exc, httpx.HTTPStatusError)
-        and exc.response.status_code in IDEMPOTENT_RETRYABLE_STATUSES
+def _platform_retry(idempotent: bool) -> Any:
+    return retry_transient(
+        idempotent=idempotent,
+        stop=stop_after_attempt(3),
+        wait=wait_random_exponential(multiplier=0.1, max=2),
+        rate_limit_delays=_PLATFORM_RATE_LIMIT_DELAYS,
     )
 
 
@@ -135,12 +196,7 @@ class APIClient:
                 "No API key configured. Set PRIME_API_KEY environment variable.",
             )
 
-    @retry(
-        retry=retry_if_exception(_is_idempotent_request_retryable_error),
-        stop=stop_after_attempt(3),
-        wait=_PLATFORM_RETRY_WAIT,
-        reraise=True,
-    )
+    @_platform_retry(idempotent=True)
     def _idempotent_request_with_retry(
         self,
         method: str,
@@ -154,12 +210,7 @@ class APIClient:
         response.raise_for_status()
         return response
 
-    @retry(
-        retry=retry_if_exception(_is_non_idempotent_request_retryable_error),
-        stop=stop_after_attempt(3),
-        wait=_PLATFORM_RETRY_WAIT,
-        reraise=True,
-    )
+    @_platform_retry(idempotent=False)
     def _non_idempotent_request_with_retry(
         self,
         method: str,
@@ -174,12 +225,7 @@ class APIClient:
             response.raise_for_status()
         return response
 
-    @retry(
-        retry=retry_if_exception(_is_idempotent_request_retryable_error),
-        stop=stop_after_attempt(3),
-        wait=_PLATFORM_RETRY_WAIT,
-        reraise=True,
-    )
+    @_platform_retry(idempotent=True)
     def _idempotent_post_request_with_retry(
         self,
         method: str,
@@ -301,12 +347,7 @@ class AsyncAPIClient:
                 "No API key configured. Set PRIME_API_KEY environment variable.",
             )
 
-    @retry(
-        retry=retry_if_exception(_is_idempotent_request_retryable_error),
-        stop=stop_after_attempt(3),
-        wait=_PLATFORM_RETRY_WAIT,
-        reraise=True,
-    )
+    @_platform_retry(idempotent=True)
     async def _idempotent_request_with_retry(
         self,
         method: str,
@@ -320,12 +361,7 @@ class AsyncAPIClient:
         response.raise_for_status()
         return response
 
-    @retry(
-        retry=retry_if_exception(_is_non_idempotent_request_retryable_error),
-        stop=stop_after_attempt(3),
-        wait=_PLATFORM_RETRY_WAIT,
-        reraise=True,
-    )
+    @_platform_retry(idempotent=False)
     async def _non_idempotent_request_with_retry(
         self,
         method: str,
@@ -340,12 +376,7 @@ class AsyncAPIClient:
             response.raise_for_status()
         return response
 
-    @retry(
-        retry=retry_if_exception(_is_idempotent_request_retryable_error),
-        stop=stop_after_attempt(3),
-        wait=_PLATFORM_RETRY_WAIT,
-        reraise=True,
-    )
+    @_platform_retry(idempotent=True)
     async def _idempotent_post_request_with_retry(
         self,
         method: str,

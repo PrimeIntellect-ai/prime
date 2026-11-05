@@ -1582,15 +1582,19 @@ def _list_scope_line(
     HARDWARE (other teams' runs on that cluster included). Without the
     scope spelled out, a run visible on one and not the other reads as
     data loss rather than a different query.
+
+    The team label is caller-controlled (a `--team` value or the stored
+    team name), and the footer prints into a markup-enabled string, so
+    it is escaped here rather than at each call site.
     """
     if not team_id:
         scope = "your personal runs + your teams"
     elif team_flag:
-        scope = f"team {team_flag}"
+        scope = f"team {rich_escape(team_flag)}"
     elif config.team_id_from_env:
-        scope = f"team {team_id} (from PRIME_TEAM_ID)"
+        scope = f"team {rich_escape(team_id)} (from PRIME_TEAM_ID)"
     else:
-        scope = f"team {config.team_name or team_id}"
+        scope = f"team {rich_escape(config.team_name or team_id)}"
     return " · ".join([scope, "yours only" if mine else "all members", "all clusters"])
 
 

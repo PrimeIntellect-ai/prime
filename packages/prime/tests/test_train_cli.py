@@ -323,6 +323,18 @@ def test_train_list_survives_rich_markup_in_a_run_name(monkeypatch, temp_home) -
     assert "[/bold]oops" in result.output
 
 
+def test_train_list_survives_rich_markup_in_a_team_label(monkeypatch, temp_home) -> None:
+    # Same class as the run name: the team label is caller-controlled
+    # and the footer is markup-enabled, so "[/dim]" would raise
+    # MarkupError on every listing, empty ones included.
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list("--team", "[/dim]evil")
+
+    assert result.exit_code == 0, result.output
+    assert "[/dim]evil" in result.output
+
+
 def test_train_list_empty_result_still_shows_the_scope(monkeypatch, temp_home) -> None:
     # "No runs" under a stale team scope looks identical to "no runs at
     # all" - the footer is what tells them apart.

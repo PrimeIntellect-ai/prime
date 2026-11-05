@@ -12,7 +12,9 @@ from prime_cli.core import APIClient, APIError, NotFoundError, ServerError
 
 ENDPOINT = "/inference/trace-capture"
 
-InactiveReason = Literal["privacy_opt_out", "storage_limit", "route_unavailable"]
+InactiveReason = Literal[
+    "privacy_opt_out", "storage_limit", "enabler_unflagged", "route_unavailable"
+]
 
 
 class TraceCaptureForbiddenError(APIError):

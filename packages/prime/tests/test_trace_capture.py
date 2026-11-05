@@ -74,6 +74,12 @@ def test_list_shows_enabled_active_and_the_inactive_reason(platform):
             inactive_reason="storage_limit",
         ),
         _route(model="team/off", run_id="inference/team/off"),
+        _route(
+            model="team/unflagged",
+            run_id="inference/team/unflagged",
+            enabled=True,
+            inactive_reason="enabler_unflagged",
+        ),
     ]
 
     result = _run("list")
@@ -85,7 +91,8 @@ def test_list_shows_enabled_active_and_the_inactive_reason(platform):
     assert any(f"{MODEL} yes active inference/{MODEL}" in row for row in rows)
     assert any("team/other yes inactive: trace storage limit reached" in row for row in rows)
     assert any("team/off no off inference/team/off" in row for row in rows)
-    assert "Custom trace capture is active on 1 of 3 route(s)." in result.output
+    assert any("team/unflagged yes inactive: enabler lost capture access" in row for row in rows)
+    assert "Custom trace capture is active on 1 of 4 route(s)." in result.output
 
 
 def test_enable_sends_the_exact_two_field_write(platform):

@@ -35,6 +35,7 @@ ROUTE_JSON = "{model, name, run_id, enabled, active, inactive_reason}"
 INACTIVE_REASONS = {
     "privacy_opt_out": "team privacy opt-out",
     "storage_limit": "trace storage limit reached",
+    "enabler_unflagged": "enabler lost capture access",
     "route_unavailable": "route unavailable",
 }
 

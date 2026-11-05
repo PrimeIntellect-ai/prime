@@ -117,9 +117,57 @@ ENV_VAR_DETAIL_JSON_HELP = json_output_help(
 )
 
 
+_UNMET_REQUIREMENTS = (Path(__file__).parent.parent / "utils" / "unmet_requirements.py").read_text()
+
+
 def _uv_pip_command(subcommand: str, *args: str) -> List[str]:
     """Run uv pip against the workspace interpreter."""
     return ["uv", "pip", subcommand, "--python", resolve_workspace_python(), *args]
+
+
+def _install_missing_requirements(target: Path) -> None:
+    """Install into `target`, one layer at a time and without their dependencies, the
+    requirements of its distributions that the workspace interpreter lacks, so `target` only
+    ever holds what the interpreter doesn't, and nothing in it shadows a package it has."""
+    attempted: set[str] = set()
+    while unmet := _unmet_requirements(target):
+        conflicts = attempted.intersection(unmet)
+        if conflicts:
+            raise RuntimeError(
+                f"requirements still unmet after installing them, conflicting with the "
+                f"environment's own packages: {', '.join(sorted(conflicts))}"
+            )
+        attempted.update(unmet)
+        execute_install_command(
+            _uv_pip_command("install", "--target", str(target), "--no-deps", *unmet),
+            str(target),
+            "requirements",
+            "uv",
+        )
+
+
+def _unmet_requirements(target: Path) -> List[str]:
+    return subprocess.run(
+        [resolve_workspace_python(), "-I", "-B", "-c", _UNMET_REQUIREMENTS, str(target)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+
+def _into_target(cmd: List[str], target: Path) -> List[str]:
+    """The install command, writing only the environment's own package into `target`."""
+    return [*cmd, "--target", str(target), "--no-deps"]
+
+
+def _workspace_has_package(package: str) -> bool:
+    return (
+        subprocess.run(
+            ["uv", "pip", "show", "--python", resolve_workspace_python(), package],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
 
 
 def _parse_environment_slug(environment: str) -> Tuple[str, str]:
@@ -2162,6 +2210,15 @@ def install(
         "--prerelease",
         help="Allow pre-release versions (e.g., verifiers>=0.1.12.dev3).",
     ),
+    target: Optional[Path] = typer.Option(
+        None,
+        "--target",
+        help=(
+            "Install Hub environments into this directory, for PYTHONPATH, instead of the "
+            "active environment. An environment the active one already has is kept unless "
+            "a version is given, and only requirements it lacks are installed alongside."
+        ),
+    ),
 ) -> None:
     """Install a verifiers environment.
 
@@ -2173,6 +2230,7 @@ def install(
         prime env install owner/environment@0.2.3  # specific version
         prime env install owner/environment --with pip
         prime env install env1 env2 env3           # install multiple
+        prime env install owner/environment --target /envs
     """
     try:
         client = APIClient(require_auth=False)
@@ -2182,6 +2240,9 @@ def install(
             console.print(
                 f"[red]Error: Unsupported package manager '{with_tool}'. Use 'uv' or 'pip'.[/red]"
             )
+            raise typer.Exit(1)
+        if target is not None and with_tool != "uv":
+            console.print("[red]Error: --target installs with uv only.[/red]")
             raise typer.Exit(1)
 
         # Check if tool is installed
@@ -2196,6 +2257,7 @@ def install(
         installable_envs = []
         failed_envs = []
         skipped_envs = []
+        kept_envs = []
 
         console.print(
             f"[bold]Resolving {len(env_ids)} "
@@ -2204,6 +2266,10 @@ def install(
         for env_id in env_ids:
             # Check if this is a local environment (no "/" in the name)
             local_name = env_id.split("@")[0]
+            if "/" not in local_name and target is not None:
+                failed_envs.append((env_id, "--target installs Hub environments only"))
+                console.print(f"[red]✗ {env_id}: --target installs Hub environments only[/red]")
+                continue
             if "/" not in local_name:
                 if not local_name or not local_name.strip():
                     skipped_envs.append((env_id, "Empty environment name"))
@@ -2243,6 +2309,14 @@ def install(
                 continue
 
             owner, name = env_id.split("/")
+            if (
+                target is not None
+                and target_version == "latest"
+                and _workspace_has_package(normalize_package_name(name))
+            ):
+                kept_envs.append(env_id)
+                console.print(f"[green]✓ {env_id} is already installed; keeping it[/green]")
+                continue
 
             # Fetch environment details
             try:
@@ -2280,6 +2354,8 @@ def install(
                             cmd_parts.append("--upgrade")
                         if prerelease:
                             cmd_parts.append("--pre")
+                    if target is not None:
+                        cmd_parts = _into_target(cmd_parts, target)
                     installable_envs.append((cmd_parts, env_id, resolved_version, name))
                     console.print(f"[green]✓ Built {env_id}@{resolved_version}[/green]")
                 except Exception as e:
@@ -2320,9 +2396,16 @@ def install(
                 )
                 continue
 
+            if target is not None:
+                cmd_parts = _into_target(cmd_parts, target)
             installable_envs.append((cmd_parts, env_id, target_version, name))
 
+        if failed_envs or (target is not None and skipped_envs):
+            console.print("[red]Error: Unable to resolve every environment[/red]")
+            raise typer.Exit(1)
         if not installable_envs:
+            if kept_envs:
+                return
             console.print("[red]Error: Unable to resolve installable environments[/red]")
             raise typer.Exit(1)
 
@@ -2337,6 +2420,8 @@ def install(
         for cmd_parts, env_id, target_version, name in installable_envs:
             try:
                 execute_install_command(cmd_parts, env_id, target_version, with_tool)
+                if target is not None:
+                    _install_missing_requirements(target)
                 installed_envs.append((env_id, target_version))
 
                 # Display usage instructions
@@ -2367,6 +2452,7 @@ def install(
             )
             for env_id, reason in install_failed_envs:
                 console.print(f"[red]✗ {env_id} - {reason}")
+            raise typer.Exit(1)
 
     except typer.Exit:
         raise

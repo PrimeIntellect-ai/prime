@@ -539,11 +539,18 @@ FACTORY_WORKLOADS_JSON_HELP = json_output_help(
 
 # Server-side filter values, mirrored from the public contract.
 WORKLOAD_TYPE_FILTERS = ("training", "inference", "slurm")
+# "stopped" is deliberately absent: the deployed backend's filter
+# vocabulary does not accept it yet, so offering `--state stopped`
+# would advertise a query the server rejects. Add it here once the
+# platform side is live.
 WORKLOAD_STATE_FILTERS = ("running", "queued", "completed", "failed", "all")
 # Terminal (or mixed-history) queries: larger result sets — the DURATION
-# column appears and a default --limit applies.
-TERMINAL_QUERY_STATES = ("completed", "failed", "all")
-WORKLOAD_TERMINAL_STATES = ("completed", "failed")
+# column appears and a default --limit applies. "stopped" is listed
+# ready for the filter above to accept it; unreachable until then.
+TERMINAL_QUERY_STATES = ("completed", "failed", "stopped", "all")
+# Rendering-only, and safe today: a `--state all` page may already carry
+# stopped rows, which age from ended_at and hold no allocated GPUs.
+WORKLOAD_TERMINAL_STATES = ("completed", "failed", "stopped")
 # History queries can be large; the server caps at 200 rows.
 WORKLOAD_LIMIT_MAX = 200
 WORKLOAD_TERMINAL_DEFAULT_LIMIT = 50
@@ -798,6 +805,8 @@ def _workload_state_cell(workload: FactoryWorkload) -> str:
         "stopping": "yellow",
         "failed": "red",
         "completed": "dim",
+        # Dim, not red: stopping a run on purpose is not an error.
+        "stopped": "dim",
     }
     state = workload.state
     if state in state_styles:

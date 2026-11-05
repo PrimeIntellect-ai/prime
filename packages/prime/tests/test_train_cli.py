@@ -203,6 +203,236 @@ def test_train_list_shows_gpu_count(monkeypatch) -> None:
     assert gpus == {"run-gpu": "16", "run-legacy": "-"}
 
 
+@pytest.fixture
+def temp_home(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # CliRunner's `env` is additive, so an ambient PRIME_TEAM_ID (CI sets
+    # one) would otherwise win over the config file and decide the scope
+    # these tests assert on. Tests that want it set pass it explicitly.
+    monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
+
+
+def _stub_list_runs(monkeypatch, runs: list[dict[str, Any]], total: int | None = None) -> None:
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        return {"runs": runs, "total": len(runs) if total is None else total}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+
+
+def _write_team_config(tmp_path: Path, **fields: str) -> None:
+    config_dir = tmp_path / ".prime"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(json.dumps(fields))
+
+
+def _invoke_list(*args: str, **env: str):
+    return runner.invoke(
+        app,
+        ["train", "list", *args],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200", **env},
+    )
+
+
+def test_train_list_shows_run_name(monkeypatch, temp_home) -> None:
+    _stub_list_runs(
+        monkeypatch,
+        [
+            {**_fake_run_payload("RUNNING", run_id="run-named"), "name": "qwen3.5-9b-resume300"},
+            _fake_run_payload("COMPLETED", run_id="run-unnamed"),
+        ],
+    )
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    header = next(cells for line in lines if (cells := _table_cells(line))[:1] == ["ID"])
+    names = {
+        cells[0]: cells[header.index("Name")]
+        for line in lines
+        if (cells := _table_cells(line))[:1] and cells[0].startswith("run-")
+    }
+    assert names == {"run-named": "qwen3.5-9b-resume300", "run-unnamed": "-"}
+
+
+def test_train_list_footer_names_the_configured_team(monkeypatch, temp_home, tmp_path) -> None:
+    _write_team_config(tmp_path, team_id="team-abc", team_name="prime-research")
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "Scope: team prime-research · all members · all clusters" in result.output
+
+
+def test_train_list_footer_flags_a_team_pinned_by_env(monkeypatch, temp_home, tmp_path) -> None:
+    # A stale PRIME_TEAM_ID silently scopes the listing to a different
+    # team than the console's team selector - say so rather than render
+    # an unexplained short list.
+    _write_team_config(tmp_path, team_id="team-abc", team_name="prime-research")
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list(PRIME_TEAM_ID="team-other")
+
+    assert result.exit_code == 0, result.output
+    assert "Scope: team team-other (from PRIME_TEAM_ID)" in result.output
+
+
+def test_train_list_footer_without_a_team(monkeypatch, temp_home) -> None:
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "Scope: your personal runs + your teams · all members · all clusters" in result.output
+
+
+def test_train_list_footer_reflects_mine(monkeypatch, temp_home) -> None:
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list("--mine")
+
+    assert result.exit_code == 0, result.output
+    assert "· yours only ·" in result.output
+
+
+def test_train_list_footer_pages_and_points_at_the_live_view(monkeypatch, temp_home) -> None:
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")], total=147)
+
+    result = _invoke_list("--num", "20")
+
+    assert result.exit_code == 0, result.output
+    assert "Page 1/8 of 147 run(s)" in result.output
+    assert "Use --page 2 to see more" in result.output
+    assert "prime factory workloads" in result.output
+
+
+def test_train_list_survives_rich_markup_in_a_run_name(monkeypatch, temp_home) -> None:
+    # An unescaped name reaches Rich as markup: an unmatched closing tag
+    # raises MarkupError and one run breaks the listing for everyone on
+    # the team.
+    _stub_list_runs(
+        monkeypatch,
+        [{**_fake_run_payload("RUNNING", run_id="run-markup"), "name": "[/bold]oops"}],
+    )
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "[/bold]oops" in result.output
+
+
+def test_train_list_survives_rich_markup_in_a_team_label(monkeypatch, temp_home) -> None:
+    # Same class as the run name: the team label is caller-controlled
+    # and the footer is markup-enabled, so "[/dim]" would raise
+    # MarkupError on every listing, empty ones included.
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list("--team", "[/dim]evil")
+
+    assert result.exit_code == 0, result.output
+    assert "[/dim]evil" in result.output
+
+
+def test_train_list_hint_carries_an_explicit_team_override(
+    monkeypatch, temp_home, tmp_path
+) -> None:
+    # `factory workloads` falls back to the configured team, so an
+    # unqualified hint after `--team X` would compare against the wrong
+    # team and recreate the mismatch the footer explains.
+    _write_team_config(tmp_path, team_id="team-config", team_name="configured")
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list("--team", "team-override")
+
+    assert result.exit_code == 0, result.output
+    assert "prime factory workloads --team team-override" in result.output
+
+
+def test_train_list_hint_stays_bare_without_an_override(monkeypatch, temp_home, tmp_path) -> None:
+    # No override: the unqualified command already resolves to the same
+    # configured team, so no redundant flag.
+    _write_team_config(tmp_path, team_id="team-config", team_name="configured")
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "prime factory workloads" in result.output
+    assert "--team" not in result.output.split("Live cluster workloads")[-1]
+
+
+def test_train_list_empty_result_still_shows_the_scope(monkeypatch, temp_home) -> None:
+    # "No runs" under a stale team scope looks identical to "no runs at
+    # all" - the footer is what tells them apart.
+    _stub_list_runs(monkeypatch, [], total=0)
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "No Hosted Training runs found" in result.output
+    assert "Scope: your personal runs + your teams" in result.output
+    assert "prime factory workloads" in result.output
+    # No rows means no page position to report.
+    assert "Page 1/1" not in result.output
+
+
+def test_train_list_page_past_the_end_still_shows_the_scope(monkeypatch, temp_home) -> None:
+    _stub_list_runs(monkeypatch, [], total=30)
+
+    result = _invoke_list("--page", "9", "--num", "20")
+
+    assert result.exit_code == 0, result.output
+    assert "No more results" in result.output
+    assert "Scope: your personal runs + your teams" in result.output
+    assert "Page 9/2 of 30 run(s)" in result.output
+
+
+def test_train_list_footer_honors_server_pagination(monkeypatch, temp_home) -> None:
+    # The response is authoritative about how it was actually paginated.
+    # Recomputing from --num would print "Page 1/1" and swallow the
+    # next-page hint when the server paged differently.
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        return {
+            "runs": [_fake_run_payload("RUNNING")],
+            "total": 500,
+            "page": 1,
+            "limit": 100,
+            "total_pages": 5,
+        }
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+
+    result = _invoke_list("--num", "1000")
+
+    assert result.exit_code == 0, result.output
+    assert "Page 1/5 of 500 run(s)" in result.output
+    assert "Use --page 2 to see more" in result.output
+
+
+def test_train_list_footer_falls_back_without_server_metadata(monkeypatch, temp_home) -> None:
+    # Legacy backend: no limit/total_pages to honor, so the local
+    # calculation still drives the footer.
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")], total=147)
+
+    result = _invoke_list("--num", "20")
+
+    assert result.exit_code == 0, result.output
+    assert "Page 1/8 of 147 run(s)" in result.output
+
+
+def test_train_list_footer_on_a_single_page(monkeypatch, temp_home) -> None:
+    _stub_list_runs(monkeypatch, [_fake_run_payload("RUNNING")])
+
+    result = _invoke_list()
+
+    assert result.exit_code == 0, result.output
+    assert "Page 1/1 of 1 run(s)" in result.output
+    assert "--page 2" not in result.output
+
+
 def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
 

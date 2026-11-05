@@ -1,4 +1,4 @@
-"""`prime inference trace-capture`: per-route custom trace capture.
+"""`prime inference trace-capture`: per-route trace capture.
 
 Targets the selected team, or with no team selected the caller's personal
 account.
@@ -30,7 +30,7 @@ from ..utils import (
 
 app = PlainTyper(
     help=(
-        "Turn custom inference trace capture on or off per route. With a team"
+        "Turn inference trace capture on or off per route. With a team"
         " selected, this manages the team's routes (writes need team ADMIN);"
         " with no team selected, it manages your personal account's routes."
     ),
@@ -44,7 +44,6 @@ INACTIVE_REASONS = {
     "privacy_opt_out": "trace privacy opt-out",
     "storage_limit": "trace storage limit reached",
     "enabler_unflagged": "enabler lost capture access",
-    "route_unavailable": "route unavailable",
 }
 
 
@@ -85,8 +84,8 @@ def _status(route: TraceCaptureRoute) -> Text:
 def _summary(routes: List[TraceCaptureRoute]) -> str:
     active = [route for route in routes if route.active]
     if not active:
-        return "Custom trace capture is not active on any route."
-    return f"Custom trace capture is active on {len(active)} of {len(routes)} route(s)."
+        return "Trace capture is not active on any route."
+    return f"Trace capture is active on {len(active)} of {len(routes)} route(s)."
 
 
 @app.command("list", epilog=json_output_help(f".routes[] = {ROUTE_JSON}"))

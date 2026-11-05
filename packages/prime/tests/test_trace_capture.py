@@ -96,7 +96,7 @@ def test_list_shows_enabled_active_and_the_inactive_reason(platform):
     assert any("team/other yes inactive: trace storage limit reached" in row for row in rows)
     assert any("team/off no off inference/team/off" in row for row in rows)
     assert any("team/unflagged yes inactive: enabler lost capture access" in row for row in rows)
-    assert "Custom trace capture is active on 1 of 4 route(s)." in result.output
+    assert "Trace capture is active on 1 of 4 route(s)." in result.output
 
 
 def test_without_a_team_the_commands_target_the_personal_account(platform):

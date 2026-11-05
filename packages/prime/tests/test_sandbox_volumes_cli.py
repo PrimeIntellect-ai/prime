@@ -336,9 +336,7 @@ def test_volume_publish_waits_by_default(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert "not yet DURABLE" not in output
 
 
-def test_volume_publish_force_no_wait_flags(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
+def test_volume_publish_force_no_wait_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -380,17 +378,13 @@ def test_volume_publish_surfaces_api_errors(monkeypatch: pytest.MonkeyPatch, tmp
         ) -> Any:
             raise APIError(message)
 
-        monkeypatch.setattr(
-            "prime_sandboxes.volumes.Volumes.publish", raise_api_error
-        )
+        monkeypatch.setattr("prime_sandboxes.volumes.Volumes.publish", raise_api_error)
         result = runner.invoke(app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1"])
         assert result.exit_code == 1, result.output
         assert message in strip_ansi(result.output)
 
 
-def test_volume_publish_409_even_with_force(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
+def test_volume_publish_409_even_with_force(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
 
@@ -441,9 +435,7 @@ def test_volume_publish_wait_failed_exits_error(
     monkeypatch.setattr(
         "prime_sandboxes.volumes.Volumes.publish",
         lambda self, sandbox_id, name, force=True, wait=True: (_ for _ in ()).throw(
-            RuntimeError(
-                "Checkpoint chk-1 cannot become durable (state=FAILED): no error details"
-            )
+            RuntimeError("Checkpoint chk-1 cannot become durable (state=FAILED): no error details")
         ),
     )
 
@@ -464,9 +456,7 @@ def test_volume_publish_requires_sandbox_option(
     assert "--sandbox" in strip_ansi(result.output)
 
 
-def test_volume_publish_has_no_team_option(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
+def test_volume_publish_has_no_team_option(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
 
     result = runner.invoke(
@@ -474,7 +464,6 @@ def test_volume_publish_has_no_team_option(
     )
 
     assert result.exit_code == 2, result.output
-
 
 
 # --- D2: prime sandbox create --volume ---
@@ -643,12 +632,8 @@ def _configure_import_mocks(
         state["checkpoint_waits"].append(checkpoint_id)
         return SimpleNamespace(id=checkpoint_id, state="DURABLE")
 
-    monkeypatch.setattr(
-        "prime_sandboxes.volumes.Volumes.create", fake_volume_create
-    )
-    monkeypatch.setattr(
-        "prime_sandboxes.volumes.Volumes.publish", fake_publish
-    )
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", fake_volume_create)
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.publish", fake_publish)
     monkeypatch.setattr(
         "prime_cli.commands.sandbox_volumes.SandboxClient.create", fake_sandbox_create
     )
@@ -684,9 +669,11 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     output = strip_ansi(result.output)
     assert "Created volume data" in output
     # Two generic phase lines in order, no implementation-detail chatter.
-    assert output.index("Importing files into volume...") < output.index(
-        "Publishing volume..."
-    ) < output.index("✓ Published volume data")
+    assert (
+        output.index("Importing files into volume...")
+        < output.index("Publishing volume...")
+        < output.index("✓ Published volume data")
+    )
     assert "DURABLE" in output
     assert "Waiting for importer sandbox" not in output
     assert "rsync" not in output
@@ -758,9 +745,7 @@ def test_volume_import_uses_prod_channel_on_default_api(
     assert state["sandbox_request"].docker_image == "volume-import:prod"
 
 
-def test_volume_import_forwards_size_gb(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
+def test_volume_import_forwards_size_gb(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     state = _configure_import_mocks(monkeypatch, tmp_path)
     data_dir = tmp_path / "data"
@@ -998,8 +983,6 @@ def test_volume_import_interrupt_before_publish_cleans_up(
     assert state["closed_sessions"] == [("sbx-import-1", "sess-1")]
 
 
-
-
 def test_volume_import_publish_conflict_retains_importer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
@@ -1158,6 +1141,7 @@ def test_volume_import_interrupt_during_publish_retains_importer(
     assert "prime sandbox checkpoint get chk-1" in output
     assert "prime sandbox delete sbx-import-1" in output
     assert "30 minutes without transfer activity" in output
+
 
 def test_volume_import_rejects_missing_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any

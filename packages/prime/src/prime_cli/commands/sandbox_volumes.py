@@ -191,10 +191,7 @@ def _print_retained_importer(
             "confirm this publish. Check any checkpoint id with "
             "'prime sandbox checkpoint get <checkpoint-id>'."
         )
-    console.print(
-        "The imported data is private to the importer until a publish "
-        "reaches DURABLE."
-    )
+    console.print("The imported data is private to the importer until a publish reaches DURABLE.")
     # The importer is not kept indefinitely: the idle monitor reaps it after
     # _IMPORTER_IDLE_TIMEOUT_MINUTES without transfer activity, and the
     # publish itself does not reset that clock.
@@ -226,9 +223,7 @@ def _import_volume(
     sandbox_client = SandboxClient(APIClient())
     # The retention hint needs the scope the API resolves team_id to; read
     # it from the client's own config, the same source the requests use.
-    effective_team_id = (
-        team_id if team_id is not None else sandbox_client.client.config.team_id
-    )
+    effective_team_id = team_id if team_id is not None else sandbox_client.client.config.team_id
 
     try:
         sandbox_client.volumes.create(name, team_id=team_id, size_gb=size_gb)
@@ -296,10 +291,7 @@ def _import_volume(
         except TimeoutError as error:
             # The wait budget expiring is not a publish failure; the upload
             # may still complete after the CLI exits.
-            console.print(
-                f"[red]Error:[/red] {escape(str(error))} The publish may still "
-                "complete."
-            )
+            console.print(f"[red]Error:[/red] {escape(str(error))} The publish may still complete.")
             raise typer.Exit(1)
         except RuntimeError as error:
             console.print(f"[red]Error:[/red] {escape(str(error))} The publish failed.")
@@ -312,8 +304,7 @@ def _import_volume(
     except KeyboardInterrupt:
         if publish_requested:
             console.print(
-                "\n[yellow]Interrupted while publishing:[/yellow] the publish "
-                "state is unknown."
+                "\n[yellow]Interrupted while publishing:[/yellow] the publish state is unknown."
             )
         else:
             console.print(

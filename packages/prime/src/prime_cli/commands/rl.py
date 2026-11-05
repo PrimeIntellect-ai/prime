@@ -362,10 +362,22 @@ def _looks_like_sft(cfg: Dict[str, Any]) -> bool:
     return "data" in cfg and "trainer" not in cfg and "orchestrator" not in cfg
 
 
-def _is_sft(cfg: Dict[str, Any], *, flag: bool) -> bool:
-    """Dispatch as SFT if `--sft` was passed, or if the config carries the
-    SFT schema shape (see `_looks_like_sft`)."""
-    return flag or _looks_like_sft(cfg)
+def _looks_like_pretrain(cfg: Dict[str, Any]) -> bool:
+    """True iff the config reads datatrove token shards, which only prime-rl's
+    PretrainConfig accepts. Pretrain configs also have the SFT shape, so this
+    sniff runs first."""
+    data = cfg.get("data")
+    return isinstance(data, dict) and data.get("type") == "datatrove"
+
+
+def _training_mode(cfg: Dict[str, Any], *, sft: bool) -> str:
+    """The prime-rl schema the config follows: pretrain for datatrove data, SFT
+    if `--sft` was passed or the config has the SFT shape, else RL."""
+    if _looks_like_pretrain(cfg):
+        return "pretrain"
+    if sft or _looks_like_sft(cfg):
+        return "sft"
+    return "rl"
 
 
 def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> None:
@@ -1050,7 +1062,7 @@ def validate_training_config(
                 "submit with --volume (or set top-level `volume`)."
             )
         config = _schema_input(_hosted_config(raw, notices))
-        mode = "sft" if _is_sft(raw, flag=sft) else "rl"
+        mode = _training_mode(raw, sft=sft)
         payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
         if selected_image:
             payload["imageTag"] = selected_image
@@ -1266,25 +1278,28 @@ def create_run(
         )
         raise typer.Exit(1)
 
-    # Dispatch routing: a [data] block with no [trainer]/[orchestrator] is
-    # unambiguously the prime-rl SFT schema (the two mega-TOML schemas are
-    # disjoint); everything else is an RL run. Unset [deployment] sizing
+    # Dispatch routing (see `_training_mode`). Unset [deployment] sizing
     # falls through to prime-rl's own default, same as a local run.
-    mode: Optional[str] = None
-    if _is_sft(raw_cfg, flag=sft):
-        if full_finetune:
-            console.print(
-                f"[red]Error:[/red] {config_path} looks like an SFT config "
-                "(a \\[data] block, no \\[trainer]/\\[orchestrator]) but "
-                "--full-finetune/--fft was passed. Use --sft instead."
-            )
-            raise typer.Exit(1)
-        # On SFT the volume is also the dataset contract: it is mounted
-        # read-only at /volume, so `data.name` must point at a path on the
-        # volume (e.g. /volume/datasets/<name> or the relative
-        # datasets/<name> — the platform resolves it; users stage it via
-        # `prime volumes ssh --read-write` + the HF CLI).
-        mode = "sft"
+    mode: Optional[str] = _training_mode(raw_cfg, sft=sft)
+    if mode == "sft" and full_finetune:
+        console.print(
+            f"[red]Error:[/red] {config_path} looks like an SFT config "
+            "(a \\[data] block, no \\[trainer]/\\[orchestrator]) but "
+            "--full-finetune/--fft was passed. Use --sft instead."
+        )
+        raise typer.Exit(1)
+    if mode == "pretrain" and full_finetune:
+        console.print(
+            f"[red]Error:[/red] {config_path} is a pretrain config (datatrove "
+            "\\[data]) but --full-finetune/--fft was passed. Remove it."
+        )
+        raise typer.Exit(1)
+    # On SFT and pretrain the volume is also the dataset contract: it is
+    # mounted read-only at /volume, so `data.name` (SFT) or `data.paths`
+    # (pretrain shards) must point at paths on the volume; the platform
+    # resolves relative ones. RL payloads omit the mode.
+    if mode == "rl":
+        mode = None
 
     _dispatch_dedicated_run(
         raw_cfg=raw_cfg,
@@ -2478,19 +2493,19 @@ def list_components(
     table.add_column("Env", style="green")
     table.add_column("Status")
 
-    # SFT runs are trainer-only — the release has no orchestrator pod —
+    # SFT and pretrain runs are trainer-only, with no orchestrator pod,
     # UNLESS they carry online evals (ENG-6565), which add an inference pool
     # and an eval pod that the chart renders under the `orchestrator` role.
     # Mirrors the platform's dedicated_primary_component choice, plus the
     # same `[eval]` probe the dashboard's log tabs use.
-    is_sft = run.loss == "sft"
+    supervised = run.loss in ("sft", "pretrain")
     run_config = run.run_config if isinstance(run.run_config, dict) else {}
-    sft_online_eval = is_sft and isinstance(run_config.get("eval"), dict)
+    online_eval = supervised and isinstance(run_config.get("eval"), dict)
 
     # Only the primary carries the run's status; the platform exposes no
     # per-pod status for the others, so they show "-" like env-servers.
-    table.add_row("trainer" if is_sft else "orchestrator", "-", run.status)
-    if sft_online_eval:
+    table.add_row("trainer" if supervised else "orchestrator", "-", run.status)
+    if online_eval:
         # Readable with `-c orchestrator` / `-c inference`; without these rows
         # the eval pod and its inference pool are invisible from the CLI.
         table.add_row("orchestrator", "-", "-")

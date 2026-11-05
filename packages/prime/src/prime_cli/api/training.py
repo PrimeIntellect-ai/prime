@@ -44,7 +44,7 @@ class SchemaInstallInputs(BaseModel):
 
 class LocalValidationPreparation(BaseModel):
     contract_version: Literal[1]
-    mode: Literal["rl", "sft"]
+    mode: Literal["rl", "sft", "pretrain"]
     runtime: PreparedTrainingRuntime
     schema_install: SchemaInstallInputs
     submission_supported: bool
@@ -678,10 +678,10 @@ def build_payload_from_toml(
         so config data.name must point at a path on the volume (e.g.
         "/volume/datasets/<name>" or the relative "datasets/<name>" —
         the platform resolves it).
-      - mode: the prime-rl schema family the config belongs to ("rl" or
-        "sft"). Omitted by default so existing RL payloads stay
-        byte-compatible; set to "sft" for SFT configs so the backend +
-        validator dispatch to SFTConfig instead of the RL schema.
+      - mode: the prime-rl schema family the config belongs to ("rl",
+        "sft" or "pretrain"). Omitted by default so existing RL payloads
+        stay byte-compatible; set to "sft" or "pretrain" so the backend
+        dispatches a trainer-only run with SFTConfig or PretrainConfig.
       - source_ref: a prime-rl git ref (branch / tag / sha) the pods
         overlay onto the image at startup, for testing unmerged code
         without an image build. The platform pins the resolved commit.

@@ -98,9 +98,7 @@ def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch)
             updated_at=datetime.now(timezone.utc),
         )
 
-    monkeypatch.setattr(
-        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint
-    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint)
 
     for checkpoint_id, (state, error) in states.items():
         result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])

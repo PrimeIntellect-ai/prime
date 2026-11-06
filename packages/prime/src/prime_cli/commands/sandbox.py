@@ -4,7 +4,7 @@ import shlex
 import string
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from inspect import signature
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -752,15 +752,32 @@ def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
         )
 
 
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_duration(value: str) -> int:
+    """'90', '30m', '12h' or '7d' as seconds."""
+    raw = value.strip().lower()
+    unit = _DURATION_UNITS.get(raw[-1:], None)
+    number = raw[:-1] if unit else raw
+    if not number.isdigit() or int(number) <= 0:
+        raise typer.BadParameter(f"invalid duration {value!r}; use e.g. 30m, 12h, 7d")
+    return int(number) * (unit or 1)
+
+
 @checkpoint_app.command("create")
 def checkpoint_create(
     sandbox_id: str,
+    ttl: Optional[str] = typer.Option(
+        None, "--ttl", help="Delete the checkpoint after this long, e.g. 12h or 7d"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Request a filesystem checkpoint of a running sandbox."""
     validate_output_format(output, console)
+    ttl_seconds = _parse_duration(ttl) if ttl else None
     try:
-        result = SandboxClient(APIClient()).checkpoint(sandbox_id)
+        result = SandboxClient(APIClient()).checkpoint(sandbox_id, ttl_seconds=ttl_seconds)
         _print_checkpoint(result, output)
     except APIError as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
@@ -769,16 +786,42 @@ def checkpoint_create(
 
 @checkpoint_app.command("list")
 def checkpoint_list(
-    sandbox_id: str,
+    sandbox_id: Optional[str] = typer.Argument(
+        None, help="Sandbox ID; omit to list every checkpoint of your account or team"
+    ),
     checkpoint_id: Optional[str] = typer.Option(
         None, "--checkpoint-id", help="Show only this checkpoint"
     ),
+    team_id: Optional[str] = typer.Option(
+        None, "--team-id", help="Team ID (uses config team_id if omitted)"
+    ),
+    state: Optional[List[str]] = typer.Option(
+        None, "--state", help="Only this state (repeatable), e.g. DURABLE or FAILED"
+    ),
+    older_than: Optional[str] = typer.Option(
+        None, "--older-than", help="Only checkpoints older than this, e.g. 7d"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List a sandbox's filesystem checkpoints and their state."""
+    """List checkpoints of one sandbox, or of your whole account (incl. deleted sandboxes)."""
     validate_output_format(output, console)
+    if checkpoint_id and (not sandbox_id or state or older_than):
+        console.print(
+            "[red]Error:[/red] --checkpoint-id needs a sandbox ID and no --state/--older-than; "
+            "use 'prime sandbox checkpoint get ID' to look one up."
+        )
+        raise typer.Exit(1)
+    client = SandboxClient(APIClient())
     try:
-        results = SandboxClient(APIClient()).list_checkpoints(sandbox_id, checkpoint_id)
+        if sandbox_id and not (state or older_than):
+            results = client.list_checkpoints(sandbox_id, checkpoint_id)
+        else:
+            results = client.list_all_checkpoints(
+                team_id=team_id or client.client.config.team_id,
+                sandbox_id=sandbox_id,
+                states=[s.upper() for s in state] if state else None,
+                created_before=_older_than(older_than),
+            )
     except APIError as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
@@ -788,11 +831,14 @@ def checkpoint_list(
     if not results:
         console.print("No checkpoints found.")
         return
+    # One sandbox: show lineage (Parent); account-wide: which sandbox it came from.
+    # Expires only when some checkpoint has a TTL, to keep the table narrow.
+    show_expiry = any(c.expires_at for c in results)
     table = build_table(
-        f"Checkpoints: {escape(sandbox_id)}",
+        f"Checkpoints: {escape(sandbox_id or 'all sandboxes')}",
         [
             ("ID", "cyan"),
-            ("Parent", "white"),
+            ("Parent" if sandbox_id else "Sandbox", "white"),
             ("State", "white"),
             ("Depth", "white"),
             # Size is the quota measure (occupied bytes); Stored is the
@@ -800,21 +846,30 @@ def checkpoint_list(
             ("Size", "white"),
             ("Stored", "white"),
             ("Age", "white"),
+            *([("Expires", "white")] if show_expiry else []),
             ("Error", "red"),
         ],
     )
     for c in results:
+        expiry = [c.expires_at.strftime("%Y-%m-%d %H:%M UTC") if c.expires_at else "-"]
         table.add_row(
             escape(c.id),
-            escape(c.parent_id or "-"),
+            escape((c.parent_id or "-") if sandbox_id else c.sandbox_id),
             escape(c.state),
             str(c.depth),
             f"{c.occupied_bytes / 1024**2:.1f} MiB",
             f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
             human_age(c.created_at),
+            *(expiry if show_expiry else []),
             escape(c.error or ""),
         )
     console.print(table)
+
+
+def _older_than(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    return datetime.now(timezone.utc) - timedelta(seconds=_parse_duration(value))
 
 
 @checkpoint_app.command("get")
@@ -849,30 +904,65 @@ def checkpoint_delete(
     sandbox_id: Optional[str] = typer.Option(
         None, "--sandbox", "-s", help="Delete every checkpoint of this sandbox"
     ),
+    delete_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Delete every checkpoint of your account or team (incl. deleted sandboxes)",
+    ),
+    team_id: Optional[str] = typer.Option(
+        None, "--team-id", help="With --all: team ID (uses config team_id if omitted)"
+    ),
+    state: Optional[List[str]] = typer.Option(
+        None, "--state", help="With --all: only DURABLE or FAILED (repeatable)"
+    ),
+    older_than: Optional[str] = typer.Option(
+        None, "--older-than", help="With --all: only checkpoints older than this, e.g. 7d"
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Delete checkpoints by ID, or all of a sandbox's with --sandbox.
+    """Delete checkpoints by ID, all of a sandbox's with --sandbox, or all with --all.
 
     Deleting stops storage billing. Data is kept while descendant checkpoints
     still need it, without charges.
     """
     validate_output_format(output, console)
-    if bool(checkpoint_ids) == bool(sandbox_id):
-        console.print("[red]Error:[/red] Pass checkpoint IDs or --sandbox, not both.")
+    if sum((bool(checkpoint_ids), bool(sandbox_id) and not delete_all, delete_all)) != 1:
+        console.print("[red]Error:[/red] Pass checkpoint IDs, --sandbox, or --all.")
         raise typer.Exit(1)
     parts = (s.strip() for arg in checkpoint_ids or [] for s in arg.split(","))
     ids = [i for i in dict.fromkeys(parts) if i]
-    target = (
-        f"all checkpoints of sandbox {sandbox_id}" if sandbox_id else f"{len(ids)} checkpoint(s)"
-    )
+    client = SandboxClient(APIClient())
+    resolved_team = team_id or client.client.config.team_id
+    if delete_all:
+        scope = f"team {resolved_team}" if resolved_team else "your personal account"
+        filters = "".join(
+            [
+                f" of sandbox {sandbox_id}" if sandbox_id else "",
+                f" in state {', '.join(state)}" if state else "",
+                f" older than {older_than}" if older_than else "",
+            ]
+        )
+        target = f"ALL checkpoints{filters} in {scope}"
+    elif sandbox_id:
+        target = f"all checkpoints of sandbox {sandbox_id}"
+    else:
+        target = f"{len(ids)} checkpoint(s)"
     if not confirm_or_skip(f"Delete {target}?", yes):
         return
-    client = SandboxClient(APIClient())
     deleted: List[str] = []
     errors: List[Dict[str, str]] = []
     try:
-        if sandbox_id:
+        if delete_all:
+            result = client.delete_all_checkpoints(
+                team_id=resolved_team,
+                sandbox_id=sandbox_id,
+                states=[s.upper() for s in state] if state else None,
+                created_before=_older_than(older_than),
+            )
+            deleted = result.deleted
+            errors = [e.model_dump() for e in result.errors]
+        elif sandbox_id:
             result = client.delete_sandbox_checkpoints(sandbox_id)
             deleted = result.deleted
             errors = [e.model_dump() for e in result.errors]

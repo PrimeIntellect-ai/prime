@@ -577,3 +577,74 @@ async def test_async_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) 
         await client.resume("sandbox-1")
 
     assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]
+
+
+def test_account_wide_list_and_delete_follow_cursors(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+    pages = {
+        ("GET", None): {"checkpoints": [checkpoint_response("DURABLE")], "next_cursor": "c1"},
+        ("GET", "c1"): {"checkpoints": [checkpoint_response("FAILED")], "next_cursor": None},
+        ("DELETE", None): {"deleted": ["a"], "errors": [], "next_cursor": "c1"},
+        ("DELETE", "c1"): {
+            "deleted": ["b"],
+            "errors": [{"checkpoint_id": "tip", "code": "CONFLICT", "message": "active"}],
+            "next_cursor": None,
+        },
+    }
+
+    def request(method: str, path: str, params: dict) -> dict:
+        calls.append((method, path, dict(params)))
+        return pages[(method, params.get("cursor"))]
+
+    monkeypatch.setattr(client.client, "request", request)
+    before = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    listed = client.list_all_checkpoints(
+        team_id="team-1", states=["DURABLE"], created_before=before
+    )
+    result = client.delete_all_checkpoints(team_id="team-1")
+
+    assert [c.state for c in listed] == ["DURABLE", "FAILED"]
+    assert calls[0] == (
+        "GET",
+        "/sandbox/checkpoints",
+        {"team_id": "team-1", "state": ["DURABLE"], "created_before": before.isoformat()},
+    )
+    assert calls[1][2]["cursor"] == "c1"
+    assert result.deleted == ["a", "b"]
+    assert [e.checkpoint_id for e in result.errors] == ["tip"]
+
+
+def test_account_wide_calls_default_to_configured_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_TEAM_ID", "configured-team")
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str, params: dict) -> dict:
+        calls.append((method, dict(params)))
+        if method == "GET":
+            return {"checkpoints": [], "next_cursor": None}
+        return {"deleted": [], "errors": [], "next_cursor": None}
+
+    monkeypatch.setattr(client.client, "request", request)
+    client.list_all_checkpoints()
+    client.delete_all_checkpoints()
+    client.delete_all_checkpoints(team_id="explicit-team")
+    assert [p.get("team_id") for _, p in calls] == [
+        "configured-team",
+        "configured-team",
+        "explicit-team",
+    ]
+
+
+def test_explicit_zero_ttl_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    sent = []
+
+    def request(method: str, path: str, json: dict | None = None) -> dict:
+        sent.append(json)
+        return checkpoint_response()
+
+    monkeypatch.setattr(client.client, "request", request)
+    client.checkpoint("sandbox-1", ttl_seconds=0)
+    assert sent == [{"ttl_seconds": 0}]

@@ -1843,6 +1843,25 @@ def _validate_env_key(key: str) -> str:
     return key
 
 
+def _owner_checkpoint_params(
+    team_id: Optional[str],
+    sandbox_id: Optional[str],
+    states: Optional[List[str]],
+    created_before: Optional[datetime],
+) -> Dict[str, Any]:
+    """Query params shared by the account-wide checkpoint list and delete."""
+    params: Dict[str, Any] = {}
+    if team_id:
+        params["team_id"] = team_id
+    if sandbox_id:
+        params["sandbox_id"] = sandbox_id
+    if states:
+        params["state"] = states
+    if created_before:
+        params["created_before"] = created_before.isoformat()
+    return params
+
+
 def _validate_unique_batch_values(values: List[str], field_name: str) -> None:
     """Validate the shared bounded, non-empty, unique batch contract."""
     if not values or len(values) > MAX_STATUS_BATCH_SIZE:
@@ -2520,10 +2539,62 @@ class SandboxClient:
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
 
-    def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
-        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
-        response = self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+    def checkpoint(self, sandbox_id: str, ttl_seconds: Optional[int] = None) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring.
+
+        With ttl_seconds the platform deletes the checkpoint that long after the request.
+        """
+        path = f"/sandbox/{sandbox_id}/checkpoints"
+        if ttl_seconds is not None:
+            response = self.client.request("POST", path, json={"ttl_seconds": ttl_seconds})
+        else:
+            response = self.client.request("POST", path)
         return SandboxCheckpoint.model_validate(response)
+
+    def list_all_checkpoints(
+        self,
+        team_id: Optional[str] = None,
+        sandbox_id: Optional[str] = None,
+        states: Optional[List[str]] = None,
+        created_before: Optional[datetime] = None,
+    ) -> List[SandboxCheckpoint]:
+        """List every rootfs checkpoint of your account (or team_id), oldest first.
+
+        Includes checkpoints of deleted sandboxes.
+        """
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        results: List[SandboxCheckpoint] = []
+        while True:
+            response = self.client.request("GET", "/sandbox/checkpoints", params=params)
+            results += [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+            if not response.get("next_cursor"):
+                return results
+            params["cursor"] = response["next_cursor"]
+
+    def delete_all_checkpoints(
+        self,
+        team_id: Optional[str] = None,
+        sandbox_id: Optional[str] = None,
+        states: Optional[List[str]] = None,
+        created_before: Optional[datetime] = None,
+    ) -> DeleteSandboxCheckpointsResponse:
+        """Delete every matching durable or failed checkpoint, with per-checkpoint errors.
+
+        Each deletion behaves like delete_checkpoint; the active tip of a running
+        sandbox is kept and reported as CONFLICT.
+        """
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
+        while True:
+            response = self.client.request("DELETE", "/sandbox/checkpoints", params=params)
+            page = DeleteSandboxCheckpointsResponse.model_validate(response)
+            total.deleted += page.deleted
+            total.errors += page.errors
+            if not response.get("next_cursor"):
+                return total
+            params["cursor"] = response["next_cursor"]
 
     def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
         """Get the latest state of a filesystem checkpoint."""
@@ -4237,10 +4308,57 @@ class AsyncSandboxClient:
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
 
-    async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
-        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
-        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+    async def checkpoint(
+        self, sandbox_id: str, ttl_seconds: Optional[int] = None
+    ) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring.
+
+        With ttl_seconds the platform deletes the checkpoint that long after the request.
+        """
+        path = f"/sandbox/{sandbox_id}/checkpoints"
+        if ttl_seconds is not None:
+            response = await self.client.request("POST", path, json={"ttl_seconds": ttl_seconds})
+        else:
+            response = await self.client.request("POST", path)
         return SandboxCheckpoint.model_validate(response)
+
+    async def list_all_checkpoints(
+        self,
+        team_id: Optional[str] = None,
+        sandbox_id: Optional[str] = None,
+        states: Optional[List[str]] = None,
+        created_before: Optional[datetime] = None,
+    ) -> List[SandboxCheckpoint]:
+        """List every rootfs checkpoint of your account (or team_id), oldest first."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        results: List[SandboxCheckpoint] = []
+        while True:
+            response = await self.client.request("GET", "/sandbox/checkpoints", params=params)
+            results += [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+            if not response.get("next_cursor"):
+                return results
+            params["cursor"] = response["next_cursor"]
+
+    async def delete_all_checkpoints(
+        self,
+        team_id: Optional[str] = None,
+        sandbox_id: Optional[str] = None,
+        states: Optional[List[str]] = None,
+        created_before: Optional[datetime] = None,
+    ) -> DeleteSandboxCheckpointsResponse:
+        """Delete every matching durable or failed checkpoint, with per-checkpoint errors."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
+        while True:
+            response = await self.client.request("DELETE", "/sandbox/checkpoints", params=params)
+            page = DeleteSandboxCheckpointsResponse.model_validate(response)
+            total.deleted += page.deleted
+            total.errors += page.errors
+            if not response.get("next_cursor"):
+                return total
+            params["cursor"] = response["next_cursor"]
 
     async def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
         """Get the latest state of a filesystem checkpoint."""

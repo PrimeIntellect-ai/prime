@@ -512,6 +512,8 @@ class SandboxCheckpoint(BaseModel):
     # 0 for grandfathered pre-measurement records; older responses omit it.
     occupied_bytes: int = 0
     error: Optional[str] = None
+    # When the platform deletes it (set by a TTL at creation); None keeps it.
+    expires_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 

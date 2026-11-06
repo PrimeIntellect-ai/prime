@@ -48,6 +48,25 @@ class FactorySlurmMember(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class FactorySlurmConnection(BaseModel):
+    """SSH login coordinates for one deployment.
+
+    `connectable` is the server's own verdict: a non-RUNNING
+    deployment, or one with no customer-reachable endpoint, reports
+    False with null fields. `ssh_command` is the authoritative
+    copy-paste command, resolved server-side so it always matches the
+    dashboard's connect box. A null `ssh_port` means the default port
+    22, NOT a missing value; an admin-set full-command override
+    carries no host or port at all. Field names are snake_case because
+    the API spells them that way on this route.
+    """
+
+    connectable: bool
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[int] = None
+    ssh_command: Optional[str] = None
+
+
 class FactorySlurmClient:
     """Client for the team-scoped /slurm-clusters roster surface."""
 
@@ -67,6 +86,19 @@ class FactorySlurmClient:
 
     def list_members(self, team_id: str, cluster_id: str) -> Dict[str, Any]:
         return self._get_json(f"/slurm-clusters/{team_id}/{cluster_id}/members")
+
+    def get_connection(self, team_id: str, cluster_id: str) -> Dict[str, Any]:
+        """SSH login coordinates for one deployment.
+
+        Note the route shape: the team is a query parameter here, not a
+        path segment as in every other route on this surface. The server
+        replies in snake_case (`ssh_host`/`ssh_port`), unlike the
+        camelCase roster payloads — echoed verbatim so --json stays an
+        exact copy of the response.
+        """
+        return self._get_json(
+            f"/slurm-clusters/{cluster_id}/connection", params={"team_id": team_id}
+        )
 
     def add_member(
         self,
@@ -127,4 +159,9 @@ class FactorySlurmClient:
             raise APIError("Slurm cluster resize API returned a malformed response body.") from exc
 
 
-__all__ = ["FactorySlurmClient", "FactorySlurmCluster", "FactorySlurmMember"]
+__all__ = [
+    "FactorySlurmClient",
+    "FactorySlurmCluster",
+    "FactorySlurmConnection",
+    "FactorySlurmMember",
+]

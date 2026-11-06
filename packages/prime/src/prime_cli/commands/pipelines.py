@@ -5,6 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any, List, Optional
+from urllib.parse import quote
 
 import httpx
 import typer
@@ -149,7 +150,10 @@ def outputs(
         target = directory / parts[0] / parts[1]
         target.parent.mkdir(parents=True, exist_ok=True)
         partial: Optional[Path] = None
-        url = f"{client.base_url}/api/v1/pipelines/runs/{run_id}/outputs/{out['name']}"
+        url = (
+            f"{client.base_url}/api/v1/pipelines/runs/{quote(run_id, safe='')}"
+            f"/outputs/{quote(str(out['name']), safe='')}"
+        )
         try:
             timeout = httpx.Timeout(300.0, connect=10.0)
             with client.client.stream("GET", url, timeout=timeout) as response:

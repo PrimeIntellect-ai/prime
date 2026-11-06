@@ -171,3 +171,34 @@ def test_outputs_never_write_through_a_planted_symlink(
     assert result.exit_code == 0, result.output
     assert victim.read_text() == "keep"
     assert (tmp_path / "out" / "report" / "report.md").read_text() == "# R"
+
+
+def test_outputs_encode_names_in_the_download_url(
+    api: Dict[str, Any], monkeypatch, tmp_path
+) -> None:
+    from contextlib import contextmanager
+
+    run = {**RUN, "outputs": [{"name": "report?v=1#x.md", "node": "report", "bytes": 3}]}
+    monkeypatch.setattr(
+        "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
+    )
+    urls = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def iter_bytes(self):
+            yield b"# R"
+
+    @contextmanager
+    def stream(self: Any, method: str, url: str, **kwargs: Any):
+        urls.append(url)
+        yield Response()
+
+    monkeypatch.setattr("httpx.Client.stream", stream)
+    result = runner.invoke(
+        app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path)], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert urls[0].endswith("/api/v1/pipelines/runs/run1/outputs/report%3Fv%3D1%23x.md")

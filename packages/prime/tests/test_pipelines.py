@@ -123,8 +123,9 @@ def test_status_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch
     assert "report/[/red].md" in result.output
 
 
-def test_outputs_refuse_a_name_that_leaves_the_directory(monkeypatch, tmp_path) -> None:
-    run = {**RUN, "outputs": [{"name": "../evil", "node": "report", "bytes": 1}]}
+@pytest.mark.parametrize("name", ["../evil", "D:evil"])
+def test_outputs_refuse_a_name_that_leaves_the_directory(monkeypatch, tmp_path, name) -> None:
+    run = {**RUN, "outputs": [{"name": name, "node": "report", "bytes": 1}]}
     monkeypatch.setattr(
         "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
     )

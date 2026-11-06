@@ -145,7 +145,10 @@ def outputs(
     directory.mkdir(parents=True, exist_ok=True)
     for out in listed:
         parts = (str(out["node"]), str(out["name"]))
-        if any(not part or part in (".", "..") or "/" in part or "\\" in part for part in parts):
+        if any(
+            not part or part in (".", "..") or "/" in part or "\\" in part or ":" in part
+            for part in parts
+        ):
             _fail(APIError(f"refusing an output named {out['node']}/{out['name']}"))
         target = directory / parts[0] / parts[1]
         target.parent.mkdir(parents=True, exist_ok=True)

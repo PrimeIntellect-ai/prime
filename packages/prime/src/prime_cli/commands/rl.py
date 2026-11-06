@@ -951,7 +951,8 @@ def _describe_failure(failure: RunFailure) -> str:
 
 
 def _print_log_tail(message: str, max_lines: Optional[int] = None) -> None:
-    lines = message.rstrip("\n").splitlines()
+    # A container's log can carry terminal colors and cursor controls, which a console acts on.
+    lines = strip_ansi(message).rstrip("\n").splitlines()
     if max_lines is not None:
         lines = lines[-max_lines:]
     for line in lines:

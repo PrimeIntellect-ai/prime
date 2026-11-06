@@ -1046,6 +1046,23 @@ def test_train_get_restarts_lists_every_failure_with_its_log(monkeypatch) -> Non
     assert "more (prime train get" not in result.output
 
 
+def test_train_get_strips_terminal_controls_from_restart_logs(monkeypatch) -> None:
+    colored = (
+        "\x1b[31mTraceback (most recent call last):\x1b[0m\n"
+        "\x1b[2J\x1b[1;31mValueError: bad\x1b[0m\n"
+    )
+    failure = _failure(1, exitCode=1, exitReason="Error", exitMessage=colored)
+    _run_with_restarts(monkeypatch, {"count": 1, "failures": [failure]})
+
+    for args in ([], ["--restarts"]):
+        result = runner.invoke(app, ["train", "get", "restarted-run", *args], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert "\x1b" not in result.output
+        assert "│ Traceback (most recent call last):" in result.output
+        assert "│ ValueError: bad" in result.output
+
+
 def test_train_get_shows_no_restarts_for_a_run_without_any(monkeypatch) -> None:
     for restarts in (None, {"count": 0, "failures": []}):
         _run_with_restarts(monkeypatch, restarts)

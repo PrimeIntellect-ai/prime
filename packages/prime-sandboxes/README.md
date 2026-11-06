@@ -241,6 +241,31 @@ PROVISIONING, RUNNING, PAUSED, or TERMINATING) fails with HTTP 409. Deleting a
 team volume additionally requires team admin and fails with HTTP 403 otherwise.
 Volume deletes retry transient 5xx automatically.
 
+## Secrets
+
+Platform secrets are values stored once per user/team and substituted by the
+sandbox's node into egress header-rule values (`Secret.fill("NAME")`); they
+never enter the sandbox. Scope follows the caller's configured team, matching
+sandbox create: pass `team_id` (or set a team in the client config /
+`PRIME_TEAM_ID`) for team scope, otherwise the personal scope applies. A
+sandbox created in a team scope can only reference secrets owned by that team.
+
+```python
+from prime_sandboxes import APIClient, SandboxClient
+
+secrets = SandboxClient(APIClient()).secrets
+secret = secrets.create("OPENAI_KEY", "sk-...", team_id="team-id")
+secret = secrets.create("OPENAI_KEY", "sk-...")  # configured team, or personal
+mine = secrets.list(team_id="team-id")
+secret = secrets.get("secret-id", team_id="team-id")
+secret = secrets.update("secret-id", value="sk-new", team_id="team-id")
+secrets.delete("secret-id", team_id="team-id")  # 204, returns None
+```
+
+Values never leave the server: responses carry metadata only.
+`AsyncSandboxClient` exposes the same operations with `await` on its own
+`secrets` namespace.
+
 ## Authentication
 
 The SDK looks for credentials in this order:

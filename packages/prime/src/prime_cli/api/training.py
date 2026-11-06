@@ -48,6 +48,7 @@ class LocalValidationPreparation(BaseModel):
     runtime: PreparedTrainingRuntime
     schema_install: SchemaInstallInputs
     submission_supported: bool
+    supervised_online_eval_supported: bool = False
 
 
 class HostedTrainingRunResponse(BaseModel):

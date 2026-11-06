@@ -202,6 +202,154 @@ def test_sft_online_eval_is_deferred_and_the_rest_is_validated(fake_schema):
         worker.normalize({**request, "config": online_eval})
 
 
+def _supervised_eval_schema(shared_monitors):
+    from pydantic import BaseModel, ConfigDict, model_validator
+
+    class Strict(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    class Deployment(Strict):
+        type: str = "single_node"
+        num_infer_gpus: int = 1
+
+    class Model(Strict):
+        name: str = "owner/model"
+
+    class Log(Strict):
+        level: str = "info"
+        json_logging: bool = False
+
+    class Prime(Strict):
+        name: str | None = "run"
+        upload: bool = True
+
+    class File(Strict):
+        path: str = "metrics.jsonl"
+
+    class Monitors(Strict):
+        wandb: dict | None = None
+        file: File | None = File()
+        prime: Prime | None = Prime()
+
+    class EvalMonitors(Strict):
+        wandb: dict | None = None
+        file: File | None = None
+        prime: dict | None = None
+
+    class WeightBroadcast(Strict):
+        type: str = "filesystem"
+
+    class Inference(Strict):
+        vllm: dict = {}
+        deployment: dict | None = None
+        output_dir: str | None = None
+        router: dict | None = {"policy": "sticky"}
+
+    class Eval(Strict):
+        interval: int = 1
+        env: dict = {}
+        source: list[dict] = []
+        monitors: (Monitors if shared_monitors else EvalMonitors) | None = None
+
+        @model_validator(mode="after")
+        def validate_non_empty_sources(self):
+            if not self.source:
+                raise ValueError("At least one eval source is required.")
+            return self
+
+        @model_validator(mode="after")
+        def needs_source_plugins(self):
+            if self.source:
+                raise ValueError("eval sources need environment plugins")
+            return self
+
+        @classmethod
+        def inherit_group_defaults(cls, data):
+            sources = [
+                {**s, "env": {**data.get("env", {}), **s.get("env", {})}} for s in data["source"]
+            ]
+            return {**data, "source": sources}
+
+    class SFT(Strict):
+        deployment: Deployment = Deployment()
+        model: Model = Model()
+        max_steps: int = 10
+        log: Log = Log()
+        monitors: Monitors = Monitors()
+        eval: Eval | None = None
+        inference: Inference | None = None
+        weight_broadcast: WeightBroadcast | None = None
+        slurm: dict | None = None
+        dry_run: bool = False
+        clean: bool = False
+
+        @model_validator(mode="after")
+        def auto_setup_online_eval(self):
+            if self.eval is not None and self.weight_broadcast is None:
+                self.weight_broadcast = WeightBroadcast(type="nccl")
+            return self
+
+    return SFT
+
+
+@pytest.mark.parametrize("shared_monitors", [True, False])
+def test_supervised_online_evals_compile_to_trainer_eval_and_inference(
+    fake_schema, shared_monitors
+):
+    from prime_cli.utils import training_schema_worker as worker
+
+    sys.modules["prime_rl.configs.sft"].SFTConfig = _supervised_eval_schema(shared_monitors)
+    request = {
+        "mode": "sft",
+        "schema_commit": "a" * 40,
+        "sft_online_eval_keys": sorted(training_compiler.SFT_ONLINE_EVAL_KEYS),
+        "online_eval_components": True,
+    }
+    config = {
+        "eval": {"interval": 5, "env": {"timeout": 1}, "source": [{"env": {"id": "a"}}]},
+        "inference": {"vllm": {"model": "owner/model"}},
+    }
+
+    components = worker.normalize({**request, "config": config})["components"]
+
+    sources = [{"env": {"timeout": 1, "id": "a"}}]
+    # prime-rl's own online-eval setup ran: it chose the weight broadcast.
+    assert components["trainer"]["weight_broadcast"] == {"type": "nccl"}
+    assert "inference" not in components["trainer"]
+    assert components["trainer"]["eval"]["source"] == sources
+    evals = components["orchestrator"]
+    assert evals["source"] == sources
+    assert (evals["model"], evals["max_steps"]) == ("owner/model", 10)
+    assert evals["weight_broadcast"] == {"type": "nccl"}
+    assert evals["log"] == {"level": "info", "json_logging": False}
+    trainer_monitors = {
+        "wandb": None,
+        "file": {"path": "metrics.jsonl"},
+        "prime": {"name": "run", "upload": True},
+    }
+    assert evals["monitors"] == (
+        trainer_monitors if shared_monitors else {**trainer_monitors, "prime": {"name": "run"}}
+    )
+    assert components["inference"] == {
+        "vllm": {"model": "owner/model"},
+        "router": {"policy": "sticky"},
+    }
+
+    config["deployment"] = {"type": "multi_node"}
+    components = worker.normalize({**request, "config": config})["components"]
+    assert not {"deployment", "slurm", "dry_run", "clean"} & components["trainer"].keys()
+    assert components["inference"]["router"] is None
+
+    with pytest.raises(ValueError, match=r"eval\.intervall\n  Extra inputs"):
+        worker.normalize(
+            {**request, "config": {**config, "eval": {"intervall": 5, "source": sources}}}
+        )
+    with pytest.raises(ValueError, match="At least one eval source"):
+        worker.normalize({**request, "config": {**config, "eval": {"interval": 5}}})
+    with pytest.raises(ValueError, match=r"need an \[inference\] table"):
+        worker.normalize({**request, "config": {"eval": config["eval"]}})
+
+
 def test_pretrain_compiles_trainer_only_with_the_pretrain_schema(fake_schema, monkeypatch):
     from types import ModuleType
 
@@ -280,6 +428,22 @@ def test_schema_subprocesses_keep_windows_user_directories(monkeypatch, stage):
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == directories | {name: None for name in secrets}
+
+
+@pytest.mark.parametrize("supported", [None, False, True])
+def test_worker_compiles_online_evals_only_for_platforms_that_run_them(monkeypatch, supported):
+    requests = []
+
+    def schema_request(request, *args):
+        requests.append(request)
+        return {"artifact": {"contract_version": 4}}
+
+    monkeypatch.setattr(training_compiler, "_schema_request", schema_request)
+    preparation = {"runtime": {"schema_commit": "a" * 40}, "submission_supported": True}
+    if supported is not None:
+        preparation["supervised_online_eval_supported"] = supported
+    training_compiler.compile_locally({}, preparation)
+    assert requests[0]["online_eval_components"] is (supported is True)
 
 
 def test_artifact_runtime_comes_from_the_preparation(monkeypatch):
@@ -730,6 +894,8 @@ def test_validate_writes_normalized_config_without_rendering_or_submitting(
         ("supported", "sft", {"eval": {"interval": 10}}, 0, False),
         ("supported", "sft", {"inference": {}}, 0, False),
         ("supported", "sft", {"weight_broadcast": {"type": "nccl"}}, 0, False),
+        ("online_eval_supported", "sft", {"eval": {"interval": 10}}, 0, True),
+        ("online_eval_supported", "sft", {}, 0, True),
         ("schema_error", "rl", {}, 1, False),
     ],
 )
@@ -762,7 +928,11 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
         return client
 
     def prepare(self, payload):
-        return {"mode": mode, "submission_supported": case != "unsupported"}
+        return {
+            "mode": mode,
+            "submission_supported": case != "unsupported",
+            "supervised_online_eval_supported": case == "online_eval_supported",
+        }
 
     def compile(config, prepared):
         if case == "schema_error":

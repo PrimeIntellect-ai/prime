@@ -155,9 +155,7 @@ def outputs(
         partial: Optional[Path] = None
         url = (
             f"{client.base_url}/api/v1/pipelines/runs/{quote(run_id, safe='')}"
-            f"/outputs/{quote(str(out['name']), safe='')}"
-            # Two heads may write the same name: the node picks this one.
-            f"?node={quote(str(out['node']), safe='')}"
+            f"/outputs/{quote(str(out['node']), safe='')}/{quote(str(out['name']), safe='')}"
         )
         try:
             timeout = httpx.Timeout(300.0, connect=10.0)

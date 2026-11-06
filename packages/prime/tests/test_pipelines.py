@@ -202,7 +202,7 @@ def test_outputs_encode_names_in_the_download_url(
         app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path)], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    assert urls[0].endswith("/api/v1/pipelines/runs/run1/outputs/report%3Fv%3D1%23x.md?node=report")
+    assert urls[0].endswith("/api/v1/pipelines/runs/run1/outputs/report/report%3Fv%3D1%23x.md")
 
 
 def test_outputs_of_the_same_name_from_two_heads_are_both_saved(
@@ -233,7 +233,7 @@ def test_outputs_of_the_same_name_from_two_heads_are_both_saved(
 
     @contextmanager
     def stream(self: Any, method: str, url: str, **kwargs: Any):
-        yield Response(url.rsplit("node=", 1)[1].encode())
+        yield Response(url.rsplit("/", 2)[1].encode())
 
     monkeypatch.setattr("httpx.Client.stream", stream)
     result = runner.invoke(

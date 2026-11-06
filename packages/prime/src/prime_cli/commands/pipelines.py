@@ -96,7 +96,7 @@ def status(
     """A run's status: per-node counts, what waits on a person, its cost and outputs."""
     validate_output_format(output, console)
     try:
-        found = APIClient().get(f"/pipelines/runs/{run_id}")
+        found = APIClient().get(f"/pipelines/runs/{quote(run_id, safe='')}")
     except APIError as error:
         _fail(error)
     if output == "json":
@@ -135,7 +135,7 @@ def outputs(
     """Download what a run's heads made: its report, its taskset package."""
     client = APIClient()
     try:
-        found = client.get(f"/pipelines/runs/{run_id}")
+        found = client.get(f"/pipelines/runs/{quote(run_id, safe='')}")
     except APIError as error:
         _fail(error)
     listed = found.get("outputs") or []
@@ -156,6 +156,8 @@ def outputs(
         url = (
             f"{client.base_url}/api/v1/pipelines/runs/{quote(run_id, safe='')}"
             f"/outputs/{quote(str(out['name']), safe='')}"
+            # Two heads may write the same name: the node picks this one.
+            f"?node={quote(str(out['node']), safe='')}"
         )
         try:
             timeout = httpx.Timeout(300.0, connect=10.0)
@@ -180,7 +182,7 @@ def outputs(
 def stop(run_id: str = typer.Argument(..., help="The run's id.")) -> None:
     """Stop a run. Its runner and every sandbox it started end."""
     try:
-        stopped = APIClient().post(f"/pipelines/runs/{run_id}/stop")
+        stopped = APIClient().post(f"/pipelines/runs/{quote(run_id, safe='')}/stop")
     except APIError as error:
         _fail(error)
     _summary(stopped)

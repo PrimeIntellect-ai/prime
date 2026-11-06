@@ -202,4 +202,43 @@ def test_outputs_encode_names_in_the_download_url(
         app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path)], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    assert urls[0].endswith("/api/v1/pipelines/runs/run1/outputs/report%3Fv%3D1%23x.md")
+    assert urls[0].endswith("/api/v1/pipelines/runs/run1/outputs/report%3Fv%3D1%23x.md?node=report")
+
+
+def test_outputs_of_the_same_name_from_two_heads_are_both_saved(
+    api: Dict[str, Any], monkeypatch, tmp_path
+) -> None:
+    from contextlib import contextmanager
+
+    run = {
+        **RUN,
+        "outputs": [
+            {"name": "report.md", "node": "a", "bytes": 1},
+            {"name": "report.md", "node": "b", "bytes": 1},
+        ],
+    }
+    monkeypatch.setattr(
+        "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
+    )
+
+    class Response:
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def iter_bytes(self):
+            yield self.body
+
+    @contextmanager
+    def stream(self: Any, method: str, url: str, **kwargs: Any):
+        yield Response(url.rsplit("node=", 1)[1].encode())
+
+    monkeypatch.setattr("httpx.Client.stream", stream)
+    result = runner.invoke(
+        app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path)], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "a" / "report.md").read_text() == "a"
+    assert (tmp_path / "b" / "report.md").read_text() == "b"

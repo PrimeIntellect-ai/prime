@@ -10,6 +10,8 @@ tests are hermetic.
 import json
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,12 +30,24 @@ REAL_RUN, REAL_POPEN = subprocess.run, subprocess.Popen
 def _docker_ok() -> bool:
     if not shutil.which("docker"):
         return False
-    return REAL_RUN(["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0 or (
-        REAL_RUN(["docker", "pull", "-q", IMAGE], capture_output=True).returncode == 0
+    has_image = (
+        REAL_RUN(["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0
+        or REAL_RUN(["docker", "pull", "-q", IMAGE], capture_output=True).returncode == 0
     )
+    return has_image and _docker_sees_host_tmp()
 
 
-docker = pytest.mark.skipif(not _docker_ok(), reason="needs Docker")
+def _docker_sees_host_tmp() -> bool:
+    """A Docker VM that does not share the host temp dir (colima's default
+    on macOS) mounts it as an empty directory."""
+    with tempfile.TemporaryDirectory() as folder:
+        Path(folder, "probe").touch()
+        mount = ["-v", f"{folder}:/probe:ro"]
+        probe = ["docker", "run", "--rm", *mount, IMAGE, "test", "-e", "/probe/probe"]
+        return REAL_RUN(probe, capture_output=True).returncode == 0
+
+
+docker = pytest.mark.skipif(not _docker_ok(), reason="needs Docker that mounts the host temp dir")
 
 
 def _run(*args):

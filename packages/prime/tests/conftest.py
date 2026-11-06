@@ -1,6 +1,13 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _auto_detect_terminal(monkeypatch):
+    # Rich treats FORCE_COLOR (any value) as a terminal; with TERM=dumb it then
+    # fixes the width at 80 and ignores the COLUMNS the tests pass.
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+
+
 @pytest.fixture
 def stub_local_schema_validation(monkeypatch):
     monkeypatch.setattr(

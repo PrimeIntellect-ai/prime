@@ -1,7 +1,7 @@
 """`prime factory slurm` — the team's Slurm deployment roster."""
 
 import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
@@ -9,7 +9,12 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from ..api.factory_slurm import FactorySlurmClient, FactorySlurmCluster, FactorySlurmMember
+from ..api.factory_slurm import (
+    FactorySlurmClient,
+    FactorySlurmCluster,
+    FactorySlurmConnection,
+    FactorySlurmMember,
+)
 from ..client import APIClient, APIError
 from ..core import Config
 from ..utils import (
@@ -40,6 +45,15 @@ MEMBERS_JSON_HELP = json_output_help(
     ". = {data[]}",
     ".data[] = {username, uid, sshAuthorizedKeys[], sudo, status,",
     "            linkedUserId?, linkedUserName?, linkedUserEmail?}",
+    "--team: use a different team than the selected account context",
+)
+# The cluster row is echoed verbatim from the list response; `connection`
+# is the separate /connection payload, also verbatim (hence its
+# snake_case keys), or null when that lookup failed.
+GET_JSON_HELP = json_output_help(
+    ". = {id, primeClusterId, displayName, status, gpuType, gpuCount,",
+    "      createdAt, startedAt?, ...,",
+    "      connection: {connectable, ssh_host, ssh_port} | null}",
     "--team: use a different team than the selected account context",
 )
 
@@ -147,34 +161,92 @@ def list_clusters(
     console.print(table)
 
 
-def _find_cluster(
+def _find_cluster_row(
     team_id: str, cluster_id: str, err_console: Optional[Console] = None
-) -> FactorySlurmCluster:
+) -> Tuple[FactorySlurmCluster, Dict[str, Any]]:
+    """The matching deployment, paired with its untouched list row.
+
+    The parsed model drops fields this CLI version doesn't model, so
+    --json echoes the raw row rather than a re-serialized model.
+    """
     envelope = _client().list_clusters(team_id)
-    for cluster in _cluster_rows(envelope):
+    for cluster, raw in zip(_cluster_rows(envelope), envelope["data"]):
         if cluster.id == cluster_id:
-            return cluster
+            return cluster, raw
     (err_console or console).print(
         f"[red]Error:[/red] No Slurm deployment matched '{escape(cluster_id)}'."
     )
     raise typer.Exit(1)
 
 
-@app.command(name="get")
+def _find_cluster(
+    team_id: str, cluster_id: str, err_console: Optional[Console] = None
+) -> FactorySlurmCluster:
+    return _find_cluster_row(team_id, cluster_id, err_console)[0]
+
+
+def _fetch_connection(
+    team_id: str, cluster_id: str, err_console: Console
+) -> Tuple[Optional[Dict[str, Any]], Optional[FactorySlurmConnection]]:
+    """The deployment's SSH coordinates as (raw payload, parsed), or
+    (None, None) when unobtainable.
+
+    A failure here never fails `get`: the roster details are still
+    worth printing, so the error is reported on stderr and the connect
+    block reads as unavailable. The raw payload is kept so --json
+    echoes the response rather than a re-serialized model.
+    """
+    try:
+        payload = _client().get_connection(team_id, cluster_id)
+        return payload, FactorySlurmConnection.model_validate(payload)
+    except (APIError, ValueError) as e:
+        err_console.print(f"[dim]Could not read SSH coordinates: {escape(str(e))}[/dim]")
+        return None, None
+
+
+def _print_connection(connection: Optional[FactorySlurmConnection]) -> None:
+    """Render the connect block, never inventing a coordinate the API
+    withheld — a non-RUNNING or half-configured deployment has no usable
+    login target and must say so."""
+    if connection is None or not connection.connectable:
+        console.print("SSH: unavailable (deployment is not RUNNING, or has no public endpoint)")
+        return
+    console.print(f"SSH host: {escape(str(connection.ssh_host))}")
+    console.print(f"SSH port: {connection.ssh_port}")
+    console.print(f"SSH: ssh -p {connection.ssh_port} username@{escape(str(connection.ssh_host))}")
+    console.print(
+        "[dim]Replace `username` with your cluster login (see `prime factory slurm members`).[/dim]"
+    )
+
+
+@app.command(name="get", epilog=GET_JSON_HELP)
 def get_cluster(
     cluster_id: str,
     team: Optional[str] = TEAM_OPTION,
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the API response as JSON (same as --output json)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Show one Slurm deployment's details."""
-    err_console = _stderr_console_for("table")
+    """Show one Slurm deployment's details, including its SSH login address."""
+    if json_output:
+        output = "json"
+    validate_output_format(output, console)
+    err_console = _stderr_console_for(output)
     team_id = _resolve_team_id(team, err_console)
     if not team_id:
         return
 
     try:
-        cluster = _find_cluster(team_id, cluster_id)
+        cluster, raw = _find_cluster_row(team_id, cluster_id, err_console)
     except (APIError, ValueError) as e:
         _plain_error(e, err_console)
+
+    connection_payload, connection = _fetch_connection(team_id, cluster_id, err_console)
+
+    if output == "json":
+        output_data_as_json({**raw, "connection": connection_payload}, console)
+        return
 
     console.print(f"Name: {escape(cluster.display_name)}")
     console.print(f"Status: {escape(cluster.status)}")
@@ -182,6 +254,7 @@ def get_cluster(
     console.print(f"GPUs: {cluster.gpu_count}")
     if cluster.started_at:
         console.print(f"Started: {escape(str(cluster.started_at))}")
+    _print_connection(connection)
 
 
 @app.command(name="members", no_args_is_help=True, epilog=MEMBERS_JSON_HELP)

@@ -51,15 +51,20 @@ class FactorySlurmMember(BaseModel):
 class FactorySlurmConnection(BaseModel):
     """SSH login coordinates for one deployment.
 
-    `connectable` is the server's own verdict and requires BOTH a host
-    and a port; a non-RUNNING or half-configured deployment reports
-    False with null coordinates. Field names are snake_case because the
-    API spells them that way on this route.
+    `connectable` is the server's own verdict: a non-RUNNING
+    deployment, or one with no customer-reachable endpoint, reports
+    False with null fields. `ssh_command` is the authoritative
+    copy-paste command, resolved server-side so it always matches the
+    dashboard's connect box. A null `ssh_port` means the default port
+    22, NOT a missing value; an admin-set full-command override
+    carries no host or port at all. Field names are snake_case because
+    the API spells them that way on this route.
     """
 
     connectable: bool
     ssh_host: Optional[str] = None
     ssh_port: Optional[int] = None
+    ssh_command: Optional[str] = None
 
 
 class FactorySlurmClient:

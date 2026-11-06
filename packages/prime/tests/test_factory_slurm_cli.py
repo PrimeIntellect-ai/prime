@@ -63,6 +63,7 @@ def _connection_payload(**overrides: Any) -> Dict[str, Any]:
         "connectable": True,
         "ssh_host": "203.0.113.10",
         "ssh_port": 22033,
+        "ssh_command": "ssh -p 22033 username@203.0.113.10",
     }
     row.update(overrides)
     return row
@@ -180,7 +181,8 @@ def test_slurm_get_renders_ssh_coordinates(monkeypatch: pytest.MonkeyPatch) -> N
     assert result.exit_code == 0, result.output
     assert "SSH host: 203.0.113.10" in output
     assert "SSH port: 22033" in output
-    assert "ssh -p 22033 username@203.0.113.10" in output
+    # Rendered from the server's own ssh_command, never rebuilt here.
+    assert "SSH: ssh -p 22033 username@203.0.113.10" in output
     # The team is a query parameter on this route, not a path segment.
     connection_call = dummy.calls[-1]
     assert connection_call["endpoint"] == "/slurm-clusters/job-123/connection"
@@ -198,6 +200,47 @@ def test_slurm_get_json_merges_connection(monkeypatch: pytest.MonkeyPatch) -> No
     assert json.loads(result.stdout) == {**row, "connection": _connection_payload()}
 
 
+def test_slurm_get_omits_port_when_the_api_omits_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A null ssh_port is the default port 22, not a missing value: the
+    # CLI must render the server's command as-is rather than inventing
+    # a -p flag the dashboard doesn't show.
+    _install(
+        monkeypatch,
+        _clusters_payload(),
+        connection_payload=_connection_payload(
+            ssh_port=None, ssh_command="ssh username@203.0.113.10"
+        ),
+    )
+    result = runner.invoke(app, ["factory", "slurm", "get", "job-123"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "SSH host: 203.0.113.10" in output
+    assert "SSH port:" not in output
+    assert "SSH: ssh username@203.0.113.10" in output
+    assert "-p" not in output
+
+
+def test_slurm_get_renders_command_override_without_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An admin-set full-command override is opaque (jump hosts, custom
+    # identity files) and arrives with no host or port to render.
+    _install(
+        monkeypatch,
+        _clusters_payload(),
+        connection_payload=_connection_payload(
+            ssh_host=None,
+            ssh_port=None,
+            ssh_command="ssh -J bastion.example.com username@login.internal",
+        ),
+    )
+    result = runner.invoke(app, ["factory", "slurm", "get", "job-123"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "SSH: ssh -J bastion.example.com username@login.internal" in output
+    assert "SSH host:" not in output and "SSH port:" not in output
+
+
 def test_slurm_get_never_invents_connect_info(monkeypatch: pytest.MonkeyPatch) -> None:
     # A deployment the API reports as not connectable has no usable
     # login target: the detail view renders what the API provides and
@@ -205,7 +248,9 @@ def test_slurm_get_never_invents_connect_info(monkeypatch: pytest.MonkeyPatch) -
     _install(
         monkeypatch,
         _clusters_payload([_cluster(status="PENDING")]),
-        connection_payload=_connection_payload(connectable=False, ssh_host=None, ssh_port=None),
+        connection_payload=_connection_payload(
+            connectable=False, ssh_host=None, ssh_port=None, ssh_command=None
+        ),
     )
     result = runner.invoke(app, ["factory", "slurm", "get", "job-123"], env=TEST_ENV)
     output = strip_ansi(result.output)

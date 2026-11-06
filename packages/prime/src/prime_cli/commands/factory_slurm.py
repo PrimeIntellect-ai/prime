@@ -53,7 +53,9 @@ MEMBERS_JSON_HELP = json_output_help(
 GET_JSON_HELP = json_output_help(
     ". = {id, primeClusterId, displayName, status, gpuType, gpuCount,",
     "      createdAt, startedAt?, ...,",
-    "      connection: {connectable, ssh_host, ssh_port} | null}",
+    "      connection: {connectable, ssh_host, ssh_port, ssh_command}",
+    "                  | null}",
+    "connection.ssh_port null means the default port 22",
     "--team: use a different team than the selected account context",
 )
 
@@ -205,18 +207,28 @@ def _fetch_connection(
 
 
 def _print_connection(connection: Optional[FactorySlurmConnection]) -> None:
-    """Render the connect block, never inventing a coordinate the API
-    withheld — a non-RUNNING or half-configured deployment has no usable
-    login target and must say so."""
+    """Render the connect block from the server's own resolution.
+
+    `ssh_command` is authoritative — the server builds the same string
+    the dashboard's connect box shows, so the two can't drift. The
+    coordinates are printed only when the server reports them: a
+    command override (jump host, custom identity file) carries no
+    host/port, and a null `ssh_port` means the default 22, never a
+    port this CLI should guess at.
+    """
     if connection is None or not connection.connectable:
         console.print("SSH: unavailable (deployment is not RUNNING, or has no public endpoint)")
         return
-    console.print(f"SSH host: {escape(str(connection.ssh_host))}")
-    console.print(f"SSH port: {connection.ssh_port}")
-    console.print(f"SSH: ssh -p {connection.ssh_port} username@{escape(str(connection.ssh_host))}")
-    console.print(
-        "[dim]Replace `username` with your cluster login (see `prime factory slurm members`).[/dim]"
-    )
+    if connection.ssh_host:
+        console.print(f"SSH host: {escape(connection.ssh_host)}")
+    if connection.ssh_port:
+        console.print(f"SSH port: {connection.ssh_port}")
+    if connection.ssh_command:
+        console.print(f"SSH: {escape(connection.ssh_command)}")
+        console.print(
+            "[dim]Replace `username` with your cluster login "
+            "(see `prime factory slurm members`).[/dim]"
+        )
 
 
 @app.command(name="get", epilog=GET_JSON_HELP)

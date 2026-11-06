@@ -131,3 +131,41 @@ def test_outputs_refuse_a_name_that_leaves_the_directory(monkeypatch, tmp_path) 
     )
     assert result.exit_code == 1 and "refusing" in result.output
     assert not (tmp_path.parent / "evil").exists()
+
+
+def test_errors_with_markup_print_as_written(api: Dict[str, Any], tmp_path) -> None:
+    graph = tmp_path / "g.json"
+    graph.write_text("{}")
+    result = runner.invoke(
+        app, ["pipelines", "run", str(graph), "--secret", "[/red]"], env=TEST_ENV
+    )
+    assert result.exit_code == 1 and "[/red]" in result.output
+
+
+def test_outputs_never_write_through_a_planted_symlink(
+    api: Dict[str, Any], monkeypatch, tmp_path
+) -> None:
+    from contextlib import contextmanager
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def iter_bytes(self):
+            yield b"# R"
+
+    @contextmanager
+    def stream(self: Any, method: str, url: str, **kwargs: Any):
+        yield Response()
+
+    monkeypatch.setattr("httpx.Client.stream", stream)
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    (tmp_path / "out" / "report").mkdir(parents=True)
+    (tmp_path / "out" / "report" / ".report.md.part").symlink_to(victim)
+    result = runner.invoke(
+        app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path / "out")], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert victim.read_text() == "keep"
+    assert (tmp_path / "out" / "report" / "report.md").read_text() == "# R"

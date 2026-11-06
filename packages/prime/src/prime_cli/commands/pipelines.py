@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -22,7 +23,7 @@ console = get_console()
 
 
 def _fail(error: Exception) -> None:
-    console.print(f"[red]Error:[/red] {error}")
+    console.print(f"[red]Error:[/red] {escape(str(error))}")
     raise typer.Exit(1)
 
 
@@ -147,19 +148,23 @@ def outputs(
             _fail(APIError(f"refusing an output named {out['node']}/{out['name']}"))
         target = directory / parts[0] / parts[1]
         target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(f".{target.name}.part")
+        partial: Optional[Path] = None
         url = f"{client.base_url}/api/v1/pipelines/runs/{run_id}/outputs/{out['name']}"
         try:
             timeout = httpx.Timeout(300.0, connect=10.0)
             with client.client.stream("GET", url, timeout=timeout) as response:
                 response.raise_for_status()
-                with partial.open("wb") as file:
+                # A new file with a random name (O_EXCL), so nothing already there is followed.
+                handle, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+                partial = Path(name)
+                with os.fdopen(handle, "wb") as file:
                     for chunk in response.iter_bytes():
                         file.write(chunk)
             # Only a complete download replaces what was there.
             partial.replace(target)
-        except httpx.HTTPError as error:
-            partial.unlink(missing_ok=True)
+        except (httpx.HTTPError, OSError) as error:
+            if partial is not None:
+                partial.unlink(missing_ok=True)
             _fail(APIError(f"downloading {out['name']}: {error}"))
         console.print(f"Saved {target}")
 

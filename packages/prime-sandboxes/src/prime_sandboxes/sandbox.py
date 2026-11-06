@@ -2463,17 +2463,19 @@ class SandboxClient:
         team_id: Optional[str] = None,
         status: Optional[str] = None,
         labels: Optional[List[str]] = None,
-        page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
         user_id: Optional[str] = None,
+        cursor: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         # Auto-populate team_id from config if not specified
         if team_id is None:
             team_id = self.client.config.team_id
 
-        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        params: Dict[str, Any] = {"per_page": per_page}
+        if cursor is not None:
+            params["cursor"] = cursor
         if team_id:
             params["team_id"] = team_id
         if user_id:
@@ -4175,16 +4177,18 @@ class AsyncSandboxClient:
         team_id: Optional[str] = None,
         status: Optional[str] = None,
         labels: Optional[List[str]] = None,
-        page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
         user_id: Optional[str] = None,
+        cursor: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         if team_id is None:
             team_id = self.client.config.team_id
 
-        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        params: Dict[str, Any] = {"per_page": per_page}
+        if cursor is not None:
+            params["cursor"] = cursor
         if team_id:
             params["team_id"] = team_id
         if user_id:

@@ -346,12 +346,25 @@ sandbox = sandbox_client.create(CreateSandboxRequest(
 sandboxes = sandbox_client.list(
     status="RUNNING",
     labels=["experiment"],
-    page=1,
     per_page=50,
 )
 
 for s in sandboxes.sandboxes:
     print(f"{s.name}: {s.status}")
+```
+
+Lists are cursor-paginated. When `next_cursor` is set, pass it as
+`list(cursor=...)` to fetch the next page. Cursor pages return
+`total=None`; only the first page (no `cursor`) includes `total`.
+
+```python
+response = sandbox_client.list(per_page=50)
+while True:
+    for s in response.sandboxes:
+        print(f"{s.name}: {s.status}")
+    if not response.next_cursor:
+        break
+    response = sandbox_client.list(per_page=50, cursor=response.next_cursor)
 ```
 
 ### Long-Running Tasks

@@ -271,10 +271,12 @@ class SandboxListResponse(BaseModel):
     """Sandbox list response model"""
 
     sandboxes: List[Sandbox]
-    total: int
+    # Null in cursor mode, which pages the full history without a count
+    total: Optional[int] = None
     page: int
     per_page: int = Field(..., alias="perPage")
     has_next: bool = Field(..., alias="hasNext")
+    next_cursor: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 

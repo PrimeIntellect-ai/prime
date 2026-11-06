@@ -273,7 +273,11 @@ def test_slurm_get_survives_connection_lookup_failure(monkeypatch: pytest.Monkey
     assert result.exit_code == 0, result.output
     assert "research-b300-slurm" in output
     assert "Could not read SSH coordinates" in output
-    assert "SSH: unavailable" in output
+    # Not "unavailable": a failed lookup knows nothing either way, and
+    # claiming the deployment isn't RUNNING would contradict the
+    # RUNNING status printed two lines above.
+    assert "SSH: unknown" in output
+    assert "not RUNNING" not in output
 
     json_result = runner.invoke(app, ["factory", "slurm", "get", "job-123", "--json"], env=TEST_ENV)
     assert json_result.exit_code == 0, json_result.output

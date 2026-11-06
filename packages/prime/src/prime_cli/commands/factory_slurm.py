@@ -216,7 +216,13 @@ def _print_connection(connection: Optional[FactorySlurmConnection]) -> None:
     host/port, and a null `ssh_port` means the default 22, never a
     port this CLI should guess at.
     """
-    if connection is None or not connection.connectable:
+    if connection is None:
+        # The lookup itself failed (its own error line precedes this):
+        # nothing is known either way, which is not the same claim as
+        # the server reporting no login target.
+        console.print("SSH: unknown (coordinates could not be read)")
+        return
+    if not connection.connectable:
         console.print("SSH: unavailable (deployment is not RUNNING, or has no public endpoint)")
         return
     if connection.ssh_host:

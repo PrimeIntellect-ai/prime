@@ -112,6 +112,7 @@ def test_status_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch
             **RUN["state"],
             "cards": [{**RUN["state"]["cards"][0], "question": "Choose [keep/drop]"}],
         },
+        "outputs": [{"name": "[/red].md", "node": "report", "bytes": 3}],
     }
     monkeypatch.setattr(
         "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
@@ -119,6 +120,7 @@ def test_status_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch
     result = runner.invoke(app, ["pipelines", "status", "run1"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert "bad [type=missing]" in result.output and "Choose [keep/drop]" in result.output
+    assert "report/[/red].md" in result.output
 
 
 def test_outputs_refuse_a_name_that_leaves_the_directory(monkeypatch, tmp_path) -> None:

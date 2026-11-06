@@ -123,7 +123,7 @@ def status(
     if cost := (state.get("cost") or {}).get("usd"):
         console.print(f"Cost so far: ${cost:.2f}")
     for out in found.get("outputs") or []:
-        console.print(f"Output: {out['node']}/{out['name']} ({out['bytes']} bytes)")
+        console.print(f"Output: {escape(out['node'] + '/' + out['name'])} ({out['bytes']} bytes)")
 
 
 @app.command("outputs")
@@ -166,7 +166,7 @@ def outputs(
             if partial is not None:
                 partial.unlink(missing_ok=True)
             _fail(APIError(f"downloading {out['name']}: {error}"))
-        console.print(f"Saved {target}")
+        console.print(f"Saved {escape(str(target))}")
 
 
 @app.command("stop")

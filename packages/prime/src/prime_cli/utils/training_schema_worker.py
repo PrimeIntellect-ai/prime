@@ -16,6 +16,14 @@ def defer_environments(orch):
     return saved
 
 
+def model_class(annotation, attribute):
+    """The class in an `X | None` field annotation that defines `attribute`."""
+    return next(
+        (cls for cls in get_args(annotation) or (annotation,) if hasattr(cls, attribute)),
+        None,
+    )
+
+
 def inherit_group_defaults(model, orch, saved):
     """Fill deferred sources with their group's defaults, as prime-rl's validation does."""
     from pydantic import TypeAdapter
@@ -25,17 +33,10 @@ def inherit_group_defaults(model, orch, saved):
     for name, key in (("train", "train_source"), ("eval", "eval")):
         if key not in saved or name not in groups:
             continue
-        annotation = groups[name].annotation
-        hook = next(
-            (
-                cls.inherit_group_defaults
-                for cls in get_args(annotation) or (annotation,)
-                if hasattr(cls, "inherit_group_defaults")
-            ),
-            None,
-        )
-        if hook is None:
+        group = model_class(groups[name].annotation, "inherit_group_defaults")
+        if group is None:
             continue
+        hook = group.inherit_group_defaults
         if name == "train":
             block = hook({**deepcopy(orch.get("train") or {}), "source": saved[key]})
             saved[key] = jsonable(block["source"], mode="json")
@@ -127,6 +128,111 @@ def reject_unsupported_hosted_settings(config):
         )
 
 
+def supervised_online_eval(model, data):
+    """Trainer, eval process and inference components for a supervised run's
+    online evals, split as prime-rl's launcher does.
+
+    The eval sources need environment plugins, so they are lifted out while
+    the rest validates: prime-rl's own online-eval setup (inference sizing,
+    weight broadcast, model wiring) still runs, and the sources come back
+    with their group defaults for the hosted eval process to load.
+    """
+    from pydantic import TypeAdapter, create_model, model_validator
+
+    sources = data["eval"].get("source")
+    if not isinstance(sources, list) or not sources:
+        raise ValueError(
+            "At least one eval source is required. Add an [[eval.source]] block, "
+            "or drop the [eval] block to train without online evals."
+        )
+    if data.get("inference") is None:
+        raise ValueError(
+            "Hosted online evals need an [inference] table: the eval scores the "
+            "weights the trainer broadcasts to the run's own inference."
+        )
+    if "eval" not in model.model_fields:
+        raise ValueError(
+            "This prime-rl build has no online evals for this mode: pick a newer image "
+            "with --image-tag, or drop the [eval] block."
+        )
+    evaluation = model_class(model.model_fields["eval"].annotation, "model_fields")
+
+    class EvalWithoutSources(evaluation):
+        @model_validator(mode="after")
+        def validate_non_empty_sources(self):
+            return self
+
+    hosted = create_model(
+        f"Hosted{model.__name__}", __base__=model, eval=(EvalWithoutSources | None, None)
+    )
+    config = hosted.model_validate({**data, "eval": {**data["eval"], "source": []}})
+    group = model_class(model.model_fields["eval"].annotation, "inherit_group_defaults")
+    if group is not None:
+        sources = group.inherit_group_defaults({**data["eval"], "source": sources})["source"]
+    sources = TypeAdapter(Any).dump_python(sources, mode="json")
+    reject_unsupported_online_eval_settings(config)
+
+    multi = config.deployment.type == "multi_node"
+    trainer = config.model_dump(
+        mode="json",
+        exclude={"inference"} | ({"deployment", "slurm", "dry_run", "clean"} if multi else set()),
+    )
+    # The trainer schedules its weight broadcasts from the eval sources.
+    trainer["eval"]["source"] = sources
+    evals = config.eval.model_dump(mode="json")
+    evals.update(
+        source=sources,
+        model=config.model.name,
+        max_steps=config.max_steps,
+        log={"level": config.log.level, "json_logging": config.log.json_logging},
+        weight_broadcast=config.weight_broadcast
+        and config.weight_broadcast.model_dump(mode="json"),
+    )
+    if "monitors" in type(config.eval).model_fields:
+        evals["monitors"] = eval_monitors(config)
+    inference = config.inference.model_dump(
+        mode="json", exclude={"deployment", "slurm", "output_dir", "dry_run"}
+    )
+    if multi:
+        inference["router"] = None
+    return config, {"trainer": trainer, "orchestrator": evals, "inference": inference}
+
+
+def reject_unsupported_online_eval_settings(config):
+    if config.clean:
+        raise ValueError("clean = true is unsupported for hosted runs: start a new run instead.")
+    inference_deployment = getattr(config.inference, "deployment", None)
+    if getattr(inference_deployment, "type", None) == "disaggregated":
+        raise ValueError(
+            'inference.deployment type = "disaggregated" is unsupported for hosted runs.'
+        )
+    deployment = config.deployment
+    if deployment.type == "multi_node":
+        missing = not getattr(deployment, "num_infer_nodes", None)
+    else:
+        missing = not getattr(deployment, "num_infer_gpus", None)
+    if missing:
+        raise ValueError(
+            "Hosted online evals need inference GPUs: set deployment.num_infer_gpus "
+            "(or num_infer_nodes for multi-node runs)."
+        )
+
+
+def eval_monitors(config):
+    """The eval process reports to the trainer's monitors. Schemas before the
+    shared monitors config give it its own, whose platform monitor only names
+    the run."""
+    monitors = model_class(type(config.eval).model_fields["monitors"].annotation, "model_fields")
+    if monitors is not None and isinstance(config.monitors, monitors):
+        return config.monitors.model_dump(mode="json")
+    prime = config.monitors.prime
+    return {
+        "wandb": config.monitors.wandb and config.monitors.wandb.model_dump(mode="json"),
+        "file": config.monitors.file and config.monitors.file.model_dump(mode="json"),
+        "prime": prime and {"name": prime.name},
+    }
+
+
 def installed_commit(install):
     if "vcs_info" in install:
         return install["vcs_info"].get("commit_id")
@@ -166,21 +272,36 @@ def normalize(request):
         )
     from prime_rl.utils import config as serialization
 
-    model = config_class(request["mode"])
-    if request["mode"] == "rl":
-        deferred = defer_environments(data.get("orchestrator") or {})
-    else:
-        deferred = {key: data.pop(key) for key in request["sft_online_eval_keys"] if key in data}
+    mode = request["mode"]
+    model = config_class(mode)
     # Schema launchers normally provide SLURM settings.
     if (data.get("deployment") or {}).get("type") == "multi_node" and "slurm" not in data:
         data["slurm"] = {}
-    config = model.model_validate(data)
-    if request["mode"] == "rl":
-        reject_unsupported_hosted_settings(config)
-    check_deferred_settings(model, data, deferred, request["mode"])
-    if request["mode"] != "rl":
+    # Platforms that run supervised online evals take them as components;
+    # older ones validate the deferred blocks themselves.
+    components_supported = mode != "rl" and request.get("online_eval_components")
+    if components_supported and isinstance(data.get("eval"), dict):
+        config, components = supervised_online_eval(model, data)
+    elif components_supported:
+        stray = [key for key in ("inference", "weight_broadcast") if data.get(key) is not None]
+        if stray:
+            raise ValueError(
+                f"{' and '.join(f'[{key}]' for key in stray)} only "
+                f"{'apply' if len(stray) > 1 else 'applies'} to online evals: add an "
+                f"[eval] block, or remove {'them' if len(stray) > 1 else 'it'}."
+            )
+        config = model.model_validate(data)
+        components = {"trainer": config.model_dump(mode="json")}
+    elif mode != "rl":
+        deferred = {key: data.pop(key) for key in request["sft_online_eval_keys"] if key in data}
+        config = model.model_validate(data)
+        check_deferred_settings(model, data, deferred, mode)
         components = {"trainer": config.model_dump(mode="json") | deferred}
     else:
+        deferred = defer_environments(data.get("orchestrator") or {})
+        config = model.model_validate(data)
+        reject_unsupported_hosted_settings(config)
+        check_deferred_settings(model, data, deferred, mode)
         dump = getattr(serialization, "dump_rl_components", None)
         if dump is not None:
             components = dump(config)
@@ -199,7 +320,7 @@ def normalize(request):
         restore_environments(components["orchestrator"], deferred)
     return {
         "contract_version": 4,
-        "mode": request["mode"],
+        "mode": mode,
         "schema_commit": request["schema_commit"],
         "deployment": config.deployment.model_dump(mode="json"),
         "components": components,

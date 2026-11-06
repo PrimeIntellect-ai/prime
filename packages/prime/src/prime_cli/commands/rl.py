@@ -19,7 +19,7 @@ from rich.text import Text
 
 from prime_cli.core import Config
 
-from ..api.rl import EnvServerInfo, RLClient, RLRun
+from ..api.rl import EnvServerInfo, RLClient, RLRun, RunFailure, RunRestarts
 from ..api.training import (
     HostedTrainingClient,
     HostedTrainingRunResponse,
@@ -55,7 +55,14 @@ console = get_console()
 RL_RUN_JSON_HELP = json_output_help(
     ".run = {id, name?, status, base_model, environments[], "
     "rollouts_per_example, max_steps, batch_size, gpu_count?, created_at, updated_at, ...}",
+    ".run.restarts? = {count, failures[{role, index, kind, failed_at, exit_code?, "
+    "exit_reason?, exit_message?}]} — dedicated runs; failures oldest first",
 )
+
+# How many of a run's latest failures `prime train get` lists, and how many lines of the last
+# one's log it shows, without --restarts.
+RESTARTS_SHOWN = 3
+LOG_TAIL_LINES = 10
 
 RL_DISPATCH_JSON_HELP = json_output_help(
     ".run = {runId, sourceRef?, onDemand?, gpuType?, pricePerGpuHour?, "
@@ -932,6 +939,55 @@ def _render_failure_analysis(analysis: Dict[str, Any]) -> None:
             console.print(f"    - [dim]{rich_escape(str(line))}[/dim]")
 
 
+def _describe_failure(failure: RunFailure) -> str:
+    """One failure as the dashboard words it: "trainer 0 was OOM-killed (exit 137)"."""
+    job = f"{failure.role} {failure.index}"
+    if failure.kind == "DISRUPTED":
+        return f"{job} was taken away by the cluster"
+    exit_code = "" if failure.exit_code is None else f" (exit {failure.exit_code})"
+    if failure.exit_reason == "OOMKilled":
+        return f"{job} was OOM-killed{exit_code}"
+    return f"{job} failed{exit_code}"
+
+
+def _print_log_tail(message: str, max_lines: Optional[int] = None) -> None:
+    # A container's log can carry terminal colors and cursor controls, which a console acts on.
+    lines = strip_ansi(message).rstrip("\n").splitlines()
+    if max_lines is not None:
+        lines = lines[-max_lines:]
+    for line in lines:
+        # Logs are often drawn to a width; wrapping them would break the drawing.
+        console.print(f"    [dim]│ {rich_escape(line)}[/dim]", soft_wrap=True)
+
+
+def _render_restarts(run_id: str, restarts: RunRestarts, *, every_failure: bool) -> None:
+    """The run's restart count and the failures behind it, latest first: the last few with the
+    end of the latest one's log, or with --restarts every one with its own."""
+    if restarts.count == 0 and not restarts.failures:
+        return
+    console.print(
+        f"\n[bold]Restarted {restarts.count} time{'' if restarts.count == 1 else 's'}[/bold]"
+    )
+    failures = list(reversed(restarts.failures))
+    shown = failures if every_failure else failures[:RESTARTS_SHOWN]
+    for failure in shown:
+        at = failure.failed_at.strftime("%Y-%m-%d %H:%M")
+        console.print(f"  [dim]{at}[/dim]  {rich_escape(_describe_failure(failure))}")
+        if every_failure and failure.exit_message:
+            _print_log_tail(failure.exit_message)
+    if every_failure:
+        return
+    if len(failures) > len(shown):
+        console.print(
+            f"  [dim]… {len(failures) - len(shown)} more "
+            f"(prime train get {run_id} --restarts)[/dim]"
+        )
+    latest = failures[0] if failures else None
+    if latest is not None and latest.exit_message:
+        console.print(f"  Last failure's log ({rich_escape(f'{latest.role} {latest.index}')}):")
+        _print_log_tail(latest.exit_message, LOG_TAIL_LINES)
+
+
 def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
@@ -1688,12 +1744,19 @@ def list_runs(
 def get_run(
     run_id: str = typer.Argument(..., help="Run ID to get details for"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    restarts: bool = typer.Option(
+        False,
+        "--restarts",
+        help="List every failure behind the run's restarts, each with the end of its log",
+    ),
 ) -> None:
     """Get details of a specific run.
 
     Example:
 
         prime train get <run_id>
+
+        prime train get <run_id> --restarts
 
         prime train get <run_id> -o json
     """
@@ -1750,6 +1813,9 @@ def get_run(
 
         if run.failure_analysis:
             _render_failure_analysis(run.failure_analysis)
+
+        if run.restarts:
+            _render_restarts(run_id, run.restarts, every_failure=restarts)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")

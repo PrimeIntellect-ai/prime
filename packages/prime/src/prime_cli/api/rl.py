@@ -8,6 +8,30 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from prime_cli.core import APIClient, APIError
 
 
+class RunFailure(BaseModel):
+    """A failed job behind a dedicated run's restart."""
+
+    role: str = Field(..., description="The failed job: trainer, inference, ...")
+    index: int = Field(0, description="Which of the role's jobs, from 0")
+    # FAILED: the job failed on its own. DISRUPTED: the cluster took one of
+    # its pods away (eviction, preemption, a lost node).
+    kind: str = Field(..., description="FAILED or DISRUPTED")
+    failed_at: datetime = Field(..., alias="failedAt")
+    exit_code: Optional[int] = Field(None, alias="exitCode")
+    exit_reason: Optional[str] = Field(None, alias="exitReason")
+    # The end of the failed container's log, at most 1 KiB.
+    exit_message: Optional[str] = Field(None, alias="exitMessage")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class RunRestarts(BaseModel):
+    """How many times a dedicated run restarted, and the job failures behind it, oldest first."""
+
+    count: int
+    failures: List[RunFailure] = Field(default_factory=list)
+
+
 class RLRun(BaseModel):
     """Hosted Training run."""
 
@@ -78,6 +102,8 @@ class RLRun(BaseModel):
     # Automated failure classification (only set for terminal FAILED runs).
     # Stored as a dict to stay forward-compatible if the API adds new fields.
     failure_analysis: Optional[Dict[str, Any]] = Field(None, alias="failureAnalysis")
+    # Dedicated runs only; null until the cluster reported a restart count.
+    restarts: Optional[RunRestarts] = Field(None, description="Restarts and their job failures")
 
     # Full-FT source overlay: the prime-rl commit the pods run on top of the
     # image when the run was dispatched with `--ref` / `--pr`. None for runs

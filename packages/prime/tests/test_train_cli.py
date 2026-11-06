@@ -968,6 +968,111 @@ def test_train_get_prints_a_shared_runs_cluster(monkeypatch) -> None:
     assert "Cluster: oes1yd0lubfsku6iekofnoau" in result.output
 
 
+def _run_with_restarts(monkeypatch, restarts):
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate(
+        {
+            "id": "restarted-run",
+            "userId": "user-1",
+            "status": "RUNNING",
+            "kind": "DEDICATED_FULL_FT",
+            "createdAt": "2026-11-06T17:00:00Z",
+            "updatedAt": "2026-11-06T17:00:00Z",
+            "restarts": restarts,
+        }
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+
+def _failure(minute, role="trainer", kind="FAILED", **exit_fields):
+    return {
+        "role": role,
+        "index": 0,
+        "kind": kind,
+        "failedAt": f"2026-11-06T17:{minute:02d}:00",
+        **exit_fields,
+    }
+
+
+RESTARTS = {
+    "count": 4,
+    "failures": [
+        _failure(1, exitCode=3, exitReason="Error", exitMessage="old traceback"),
+        _failure(2, role="inference", kind="DISRUPTED"),
+        _failure(3, role="orchestrator", exitCode=137, exitReason="OOMKilled"),
+        _failure(
+            4,
+            exitCode=1,
+            exitReason="Error",
+            exitMessage="\n".join(f"line {i}" for i in range(15)) + "\nRuntimeError: boom\n",
+        ),
+    ],
+}
+
+
+def test_train_get_lists_the_latest_restarts_and_the_last_failures_log(monkeypatch) -> None:
+    _run_with_restarts(monkeypatch, RESTARTS)
+
+    result = runner.invoke(app, ["train", "get", "restarted-run"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Restarted 4 times" in out
+    latest = [
+        "trainer 0 failed (exit 1)",
+        "orchestrator 0 was OOM-killed (exit 137)",
+        "inference 0 was taken away by the cluster",
+    ]
+    assert [out.index(line) for line in latest] == sorted(out.index(line) for line in latest)
+    assert "trainer 0 failed (exit 3)" not in out
+    assert "… 1 more (prime train get restarted-run --restarts)" in out
+    assert "│ RuntimeError: boom" in out
+    assert "│ line 6\n" in out and "│ line 5\n" not in out
+    assert "old traceback" not in out
+
+
+def test_train_get_restarts_lists_every_failure_with_its_log(monkeypatch) -> None:
+    _run_with_restarts(monkeypatch, RESTARTS)
+
+    result = runner.invoke(app, ["train", "get", "restarted-run", "--restarts"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "trainer 0 failed (exit 3)" in result.output
+    assert "│ old traceback" in result.output
+    assert "│ line 0" in result.output
+    assert "more (prime train get" not in result.output
+
+
+def test_train_get_shows_no_restarts_for_a_run_without_any(monkeypatch) -> None:
+    for restarts in (None, {"count": 0, "failures": []}):
+        _run_with_restarts(monkeypatch, restarts)
+
+        result = runner.invoke(app, ["train", "get", "restarted-run"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert "Restarted" not in result.output
+
+
+def test_train_get_json_keeps_the_restarts(monkeypatch) -> None:
+    _run_with_restarts(monkeypatch, RESTARTS)
+
+    result = runner.invoke(app, ["train", "get", "restarted-run", "-o", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    restarts = json.loads(result.output)["run"]["restarts"]
+    assert restarts["count"] == 4
+    assert [f["role"] for f in restarts["failures"]] == [
+        "trainer",
+        "inference",
+        "orchestrator",
+        "trainer",
+    ]
+    assert restarts["failures"][2]["exit_reason"] == "OOMKilled"
+
+
 # --- on-demand billed launch output -----------------------------------------
 #
 # The backend derives placement server-side, so the CLI echoes what the

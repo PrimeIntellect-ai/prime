@@ -805,6 +805,12 @@ def checkpoint_list(
 ) -> None:
     """List checkpoints of one sandbox, or of your whole account (incl. deleted sandboxes)."""
     validate_output_format(output, console)
+    if checkpoint_id and (not sandbox_id or state or older_than):
+        console.print(
+            "[red]Error:[/red] --checkpoint-id needs a sandbox ID and no --state/--older-than; "
+            "use 'prime sandbox checkpoint get ID' to look one up."
+        )
+        raise typer.Exit(1)
     client = SandboxClient(APIClient())
     try:
         if sandbox_id and not (state or older_than):

@@ -2545,7 +2545,7 @@ class SandboxClient:
         With ttl_seconds the platform deletes the checkpoint that long after the request.
         """
         path = f"/sandbox/{sandbox_id}/checkpoints"
-        if ttl_seconds:
+        if ttl_seconds is not None:
             response = self.client.request("POST", path, json={"ttl_seconds": ttl_seconds})
         else:
             response = self.client.request("POST", path)
@@ -2562,6 +2562,7 @@ class SandboxClient:
 
         Includes checkpoints of deleted sandboxes.
         """
+        team_id = team_id if team_id is not None else self.client.config.team_id
         params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
         results: List[SandboxCheckpoint] = []
         while True:
@@ -2583,6 +2584,7 @@ class SandboxClient:
         Each deletion behaves like delete_checkpoint; the active tip of a running
         sandbox is kept and reported as CONFLICT.
         """
+        team_id = team_id if team_id is not None else self.client.config.team_id
         params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
         total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
         while True:
@@ -4314,7 +4316,7 @@ class AsyncSandboxClient:
         With ttl_seconds the platform deletes the checkpoint that long after the request.
         """
         path = f"/sandbox/{sandbox_id}/checkpoints"
-        if ttl_seconds:
+        if ttl_seconds is not None:
             response = await self.client.request("POST", path, json={"ttl_seconds": ttl_seconds})
         else:
             response = await self.client.request("POST", path)
@@ -4328,6 +4330,7 @@ class AsyncSandboxClient:
         created_before: Optional[datetime] = None,
     ) -> List[SandboxCheckpoint]:
         """List every rootfs checkpoint of your account (or team_id), oldest first."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
         params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
         results: List[SandboxCheckpoint] = []
         while True:
@@ -4345,6 +4348,7 @@ class AsyncSandboxClient:
         created_before: Optional[datetime] = None,
     ) -> DeleteSandboxCheckpointsResponse:
         """Delete every matching durable or failed checkpoint, with per-checkpoint errors."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
         params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
         total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
         while True:

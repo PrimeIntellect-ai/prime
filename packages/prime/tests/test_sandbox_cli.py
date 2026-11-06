@@ -1867,3 +1867,16 @@ def test_sandbox_network_inject_header_conflicts_with_policy_file_host(
     output = _flat(strip_ansi(result.output))
     assert result.exit_code == 1
     assert "also set in --network-policy" in output
+
+
+def test_checkpoint_list_rejects_checkpoint_id_without_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    for args in (
+        ["--checkpoint-id", "c1"],
+        ["sandbox-1", "--checkpoint-id", "c1", "--state", "DURABLE"],
+    ):
+        result = runner.invoke(app, ["sandbox", "checkpoint", "list", *args])
+        assert result.exit_code == 1, result.output
+        assert "--checkpoint-id needs a sandbox ID" in result.output

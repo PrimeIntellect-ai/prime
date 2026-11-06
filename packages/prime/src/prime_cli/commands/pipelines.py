@@ -1,4 +1,4 @@
-"""`prime pipelines`: run a pipeline (a Flow graph) on the platform, and fetch what it made."""
+"""`prime pipelines`: run a pipeline (a graph of agent stages) and fetch what it made."""
 
 import json
 import os
@@ -17,7 +17,7 @@ from ..core import Config
 from ..utils import PlainTyper, get_console, output_data_as_json, validate_output_format
 
 app = PlainTyper(
-    help="Run a pipeline (a Flow graph) on the platform, and fetch what it made.",
+    help="Run a pipeline (a graph of agent stages) on the platform, and fetch what it made.",
     no_args_is_help=True,
 )
 console = get_console()

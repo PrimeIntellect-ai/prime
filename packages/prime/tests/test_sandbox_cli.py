@@ -32,8 +32,11 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
         updated_at=datetime.now(timezone.utc),
     )
 
-    def create(self: Any, sandbox_id: str) -> SandboxCheckpoint:
+    ttls: list[Any] = []
+
+    def create(self: Any, sandbox_id: str, ttl_seconds: Any = None) -> SandboxCheckpoint:
         assert sandbox_id == "sandbox-1"
+        ttls.append(ttl_seconds)
         return checkpoint
 
     listed: list[tuple[str, Any]] = []
@@ -53,6 +56,9 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert created.exit_code == 0, created.output
     assert "checkpoint-1" in created.output
     assert "prime sandbox checkpoint list sandbox-1" in created.output
+    with_ttl = runner.invoke(app, ["sandbox", "checkpoint", "create", "sandbox-1", "--ttl", "7d"])
+    assert with_ttl.exit_code == 0, with_ttl.output
+    assert ttls == [None, 7 * 86400]
 
     table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
     assert table.exit_code == 0, table.output

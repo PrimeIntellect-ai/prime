@@ -825,11 +825,14 @@ def checkpoint_list(
     if not results:
         console.print("No checkpoints found.")
         return
+    # One sandbox: show lineage (Parent); account-wide: which sandbox it came from.
+    # Expires only when some checkpoint has a TTL, to keep the table narrow.
+    show_expiry = any(c.expires_at for c in results)
     table = build_table(
         f"Checkpoints: {escape(sandbox_id or 'all sandboxes')}",
         [
             ("ID", "cyan"),
-            ("Sandbox", "white"),
+            ("Parent" if sandbox_id else "Sandbox", "white"),
             ("State", "white"),
             ("Depth", "white"),
             # Size is the quota measure (occupied bytes); Stored is the
@@ -837,20 +840,21 @@ def checkpoint_list(
             ("Size", "white"),
             ("Stored", "white"),
             ("Age", "white"),
-            ("Expires", "white"),
+            *([("Expires", "white")] if show_expiry else []),
             ("Error", "red"),
         ],
     )
     for c in results:
+        expiry = [c.expires_at.strftime("%Y-%m-%d %H:%M UTC") if c.expires_at else "-"]
         table.add_row(
             escape(c.id),
-            escape(c.sandbox_id),
+            escape((c.parent_id or "-") if sandbox_id else c.sandbox_id),
             escape(c.state),
             str(c.depth),
             f"{c.occupied_bytes / 1024**2:.1f} MiB",
             f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
             human_age(c.created_at),
-            c.expires_at.strftime("%Y-%m-%d %H:%M UTC") if c.expires_at else "-",
+            *(expiry if show_expiry else []),
             escape(c.error or ""),
         )
     console.print(table)

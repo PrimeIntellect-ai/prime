@@ -150,6 +150,11 @@ def supervised_online_eval(model, data):
             "Hosted online evals need an [inference] table: the eval scores the "
             "weights the trainer broadcasts to the run's own inference."
         )
+    if "eval" not in model.model_fields:
+        raise ValueError(
+            "This prime-rl build has no online evals for this mode: pick a newer image "
+            "with --image-tag, or drop the [eval] block."
+        )
     evaluation = model_class(model.model_fields["eval"].annotation, "model_fields")
 
     class EvalWithoutSources(evaluation):
@@ -165,6 +170,7 @@ def supervised_online_eval(model, data):
     if group is not None:
         sources = group.inherit_group_defaults({**data["eval"], "source": sources})["source"]
     sources = TypeAdapter(Any).dump_python(sources, mode="json")
+    reject_unsupported_online_eval_settings(config)
 
     multi = config.deployment.type == "multi_node"
     trainer = config.model_dump(
@@ -181,14 +187,35 @@ def supervised_online_eval(model, data):
         log={"level": config.log.level, "json_logging": config.log.json_logging},
         weight_broadcast=config.weight_broadcast
         and config.weight_broadcast.model_dump(mode="json"),
-        monitors=eval_monitors(config),
     )
+    if "monitors" in type(config.eval).model_fields:
+        evals["monitors"] = eval_monitors(config)
     inference = config.inference.model_dump(
         mode="json", exclude={"deployment", "slurm", "output_dir", "dry_run"}
     )
     if multi:
         inference["router"] = None
     return config, {"trainer": trainer, "orchestrator": evals, "inference": inference}
+
+
+def reject_unsupported_online_eval_settings(config):
+    if config.clean:
+        raise ValueError("clean = true is unsupported for hosted runs: start a new run instead.")
+    inference_deployment = getattr(config.inference, "deployment", None)
+    if getattr(inference_deployment, "type", None) == "disaggregated":
+        raise ValueError(
+            'inference.deployment type = "disaggregated" is unsupported for hosted runs.'
+        )
+    deployment = config.deployment
+    if deployment.type == "multi_node":
+        missing = not getattr(deployment, "num_infer_nodes", None)
+    else:
+        missing = not getattr(deployment, "num_infer_gpus", None)
+    if missing:
+        raise ValueError(
+            "Hosted online evals need inference GPUs: set deployment.num_infer_gpus "
+            "(or num_infer_nodes for multi-node runs)."
+        )
 
 
 def eval_monitors(config):
@@ -245,37 +272,36 @@ def normalize(request):
         )
     from prime_rl.utils import config as serialization
 
-    model = config_class(request["mode"])
+    mode = request["mode"]
+    model = config_class(mode)
     # Schema launchers normally provide SLURM settings.
     if (data.get("deployment") or {}).get("type") == "multi_node" and "slurm" not in data:
         data["slurm"] = {}
-    online_eval = (
-        request["mode"] != "rl"
-        and request.get("online_eval_components")
-        and isinstance(data.get("eval"), dict)
-    )
-    if online_eval:
+    # Platforms that run supervised online evals take them as components;
+    # older ones validate the deferred blocks themselves.
+    components_supported = mode != "rl" and request.get("online_eval_components")
+    if components_supported and isinstance(data.get("eval"), dict):
         config, components = supervised_online_eval(model, data)
-        return {
-            "contract_version": 4,
-            "mode": request["mode"],
-            "schema_commit": request["schema_commit"],
-            "deployment": config.deployment.model_dump(mode="json"),
-            "components": components,
-        }
-    if request["mode"] == "rl":
-        deferred = defer_environments(data.get("orchestrator") or {})
-    elif request.get("online_eval_components"):
-        deferred = {}
-    else:
+    elif components_supported:
+        stray = [key for key in ("inference", "weight_broadcast") if data.get(key) is not None]
+        if stray:
+            raise ValueError(
+                f"{' and '.join(f'[{key}]' for key in stray)} only "
+                f"{'apply' if len(stray) > 1 else 'applies'} to online evals: add an "
+                f"[eval] block, or remove {'them' if len(stray) > 1 else 'it'}."
+            )
+        config = model.model_validate(data)
+        components = {"trainer": config.model_dump(mode="json")}
+    elif mode != "rl":
         deferred = {key: data.pop(key) for key in request["sft_online_eval_keys"] if key in data}
-    config = model.model_validate(data)
-    if request["mode"] == "rl":
-        reject_unsupported_hosted_settings(config)
-    check_deferred_settings(model, data, deferred, request["mode"])
-    if request["mode"] != "rl":
+        config = model.model_validate(data)
+        check_deferred_settings(model, data, deferred, mode)
         components = {"trainer": config.model_dump(mode="json") | deferred}
     else:
+        deferred = defer_environments(data.get("orchestrator") or {})
+        config = model.model_validate(data)
+        reject_unsupported_hosted_settings(config)
+        check_deferred_settings(model, data, deferred, mode)
         dump = getattr(serialization, "dump_rl_components", None)
         if dump is not None:
             components = dump(config)
@@ -294,7 +320,7 @@ def normalize(request):
         restore_environments(components["orchestrator"], deferred)
     return {
         "contract_version": 4,
-        "mode": request["mode"],
+        "mode": mode,
         "schema_commit": request["schema_commit"],
         "deployment": config.deployment.model_dump(mode="json"),
         "components": components,

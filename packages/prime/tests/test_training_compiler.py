@@ -211,6 +211,7 @@ def _supervised_eval_schema(shared_monitors):
     class Deployment(Strict):
         type: str = "single_node"
         num_infer_gpus: int = 1
+        num_infer_nodes: int | None = None
 
     class Model(Strict):
         name: str = "owner/model"
@@ -239,9 +240,12 @@ def _supervised_eval_schema(shared_monitors):
     class WeightBroadcast(Strict):
         type: str = "filesystem"
 
+    class InferenceDeployment(Strict):
+        type: str = "single_node"
+
     class Inference(Strict):
         vllm: dict = {}
-        deployment: dict | None = None
+        deployment: InferenceDeployment | None = None
         output_dir: str | None = None
         router: dict | None = {"policy": "sticky"}
 
@@ -335,8 +339,8 @@ def test_supervised_online_evals_compile_to_trainer_eval_and_inference(
         "router": {"policy": "sticky"},
     }
 
-    config["deployment"] = {"type": "multi_node"}
-    components = worker.normalize({**request, "config": config})["components"]
+    multi_node = {**config, "deployment": {"type": "multi_node", "num_infer_nodes": 1}}
+    components = worker.normalize({**request, "config": multi_node})["components"]
     assert not {"deployment", "slurm", "dry_run", "clean"} & components["trainer"].keys()
     assert components["inference"]["router"] is None
 
@@ -348,6 +352,70 @@ def test_supervised_online_evals_compile_to_trainer_eval_and_inference(
         worker.normalize({**request, "config": {**config, "eval": {"interval": 5}}})
     with pytest.raises(ValueError, match=r"need an \[inference\] table"):
         worker.normalize({**request, "config": {"eval": config["eval"]}})
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"clean": True}, "clean = true is unsupported"),
+        (
+            {"inference": {"vllm": {}, "deployment": {"type": "disaggregated"}}},
+            "disaggregated",
+        ),
+        ({"deployment": {"num_infer_gpus": 0}}, "need inference GPUs"),
+        ({"deployment": {"type": "multi_node"}}, "need inference GPUs"),
+    ],
+)
+def test_unsupported_hosted_online_eval_settings_are_rejected_locally(fake_schema, change, message):
+    from prime_cli.utils import training_schema_worker as worker
+
+    sys.modules["prime_rl.configs.sft"].SFTConfig = _supervised_eval_schema(True)
+    config = {
+        "eval": {"interval": 5, "source": [{"env": {"id": "a"}}]},
+        "inference": {"vllm": {}},
+        **change,
+    }
+    request = {"mode": "sft", "schema_commit": "a" * 40, "online_eval_components": True}
+    with pytest.raises(ValueError, match=message):
+        worker.normalize({**request, "config": config})
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"weight_broadcast": {"type": "nccl"}}, r"\[weight_broadcast\] only applies"),
+        (
+            {"inference": {}, "weight_broadcast": {"type": "nccl"}},
+            r"\[inference\] and \[weight_broadcast\] only apply",
+        ),
+    ],
+)
+def test_trainer_only_supervised_runs_take_no_online_eval_blocks(fake_schema, config, message):
+    from prime_cli.utils import training_schema_worker as worker
+
+    sys.modules["prime_rl.configs.sft"].SFTConfig = _supervised_eval_schema(True)
+    request = {"mode": "sft", "schema_commit": "a" * 40, "online_eval_components": True}
+    with pytest.raises(ValueError, match=message):
+        worker.normalize({**request, "config": config})
+    artifact = worker.normalize({**request, "config": {}})
+    assert set(artifact["components"]) == {"trainer"}
+
+
+def test_online_evals_on_a_schema_without_them_name_the_fix(fake_schema):
+    from prime_cli.utils import training_schema_worker as worker
+    from pydantic import BaseModel
+
+    class Deployment(BaseModel):
+        type: str = "single_node"
+
+    class SFTWithoutOnlineEvals(BaseModel):
+        deployment: Deployment = Deployment()
+
+    sys.modules["prime_rl.configs.sft"].SFTConfig = SFTWithoutOnlineEvals
+    config = {"eval": {"source": [{"env": {"id": "a"}}]}, "inference": {}}
+    request = {"mode": "sft", "schema_commit": "a" * 40, "online_eval_components": True}
+    with pytest.raises(ValueError, match="no online evals"):
+        worker.normalize({**request, "config": config})
 
 
 def test_pretrain_compiles_trainer_only_with_the_pretrain_schema(fake_schema, monkeypatch):

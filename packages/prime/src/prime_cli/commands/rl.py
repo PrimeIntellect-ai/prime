@@ -44,6 +44,9 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from ..utils.config_snapshot import NOTICE as CONFIG_SNAPSHOT_NOTICE
+from ..utils.config_snapshot import OPT_OUT_FLAG as CONFIG_SNAPSHOT_OPT_OUT_FLAG
+from ..utils.config_snapshot import build_config_snapshot
 from ..utils.env_vars import EnvParseError, collect_env_vars
 from ..utils.formatters import format_file_size, strip_ansi
 from ..utils.prompt import confirm_or_skip
@@ -554,6 +557,7 @@ def _dispatch_dedicated_run(
     source_ref: Optional[str] = None,
     source_pr: Optional[int] = None,
     resume_from: Optional[str] = None,
+    upload_config: bool = True,
 ) -> None:
     """Hand off to /api/v1/training/runs (prime-rl on a registered
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
@@ -671,6 +675,9 @@ def _dispatch_dedicated_run(
         source_ref=resolved_source_ref,
         resume_from=resume_from,
     )
+    snapshot_warning: Optional[str] = None
+    if upload_config:
+        payload["configSnapshot"], snapshot_warning = build_config_snapshot([config_path])
 
     api_client = APIClient()
     client = HostedTrainingClient(api_client)
@@ -720,6 +727,12 @@ def _dispatch_dedicated_run(
             )
             if unavailable is not None:
                 console.print(f"[dim]{rich_escape(str(unavailable))}[/dim]")
+
+    # Skipped for --output json, which must emit nothing but the JSON payload.
+    if upload_config and output != "json":
+        console.print(f"[dim]{rich_escape(CONFIG_SNAPSHOT_NOTICE)}[/dim]")
+        if snapshot_warning:
+            console.print(f"[yellow]{rich_escape(snapshot_warning)}[/yellow]")
 
     # Surface the image + source pins before the confirmation so a typo'd
     # ref is caught at the prompt, not by a failed dispatch. Skipped for
@@ -1240,6 +1253,15 @@ def create_run(
             "uses the paused run's volume; --volume, if given, must name it."
         ),
     ),
+    no_config_upload: bool = typer.Option(
+        False,
+        CONFIG_SNAPSHOT_OPT_OUT_FLAG,
+        help=(
+            "Don't send the config file and this command to the platform. By "
+            "default they are shown, with secret values in the command "
+            "replaced, to you and your team on the run's Config tab."
+        ),
+    ),
 ) -> None:
     """Launch a Hosted Training run from a config file.
 
@@ -1316,6 +1338,7 @@ def create_run(
         source_ref=ref,
         source_pr=pr,
         resume_from=resume_from,
+        upload_config=not no_config_upload,
     )
 
 

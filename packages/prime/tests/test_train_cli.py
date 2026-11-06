@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from prime_cli.core import APIError
 from prime_cli.main import app
+from prime_cli.utils.config_snapshot import NOTICE as CONFIG_SNAPSHOT_NOTICE
 from typer.testing import CliRunner
 
 pytestmark = pytest.mark.usefixtures("stub_local_schema_validation")
@@ -551,6 +552,7 @@ def test_train_resume_from_a_pausing_run_shows_the_detail(monkeypatch, tmp_path:
     assert result.exit_code == 1, result.output
     assert result.output.splitlines() == [
         "✓ Run config validation succeeded",
+        CONFIG_SNAPSHOT_NOTICE,
         f"Error: {detail}",
         "Tip: a run resumes once `prime train get paused-1` shows PAUSED",
     ]
@@ -603,7 +605,8 @@ def test_train_volume_size_flag_and_toml_key_set_the_created_size(
     result = _run_volume(tmp_path, toml_extra='volume_size = "2Ti"\n')
     assert result.exit_code == 0, result.output
     assert creates == [("ckpts", "2Ti")]
-    assert "volume_size" not in str(dispatched[0])
+    # The raw file in configSnapshot keeps it, as the user wrote it.
+    assert "volume_size" not in str({**dispatched[0], "configSnapshot": None})
 
 
 def test_train_volume_size_is_ignored_for_an_existing_volume(monkeypatch, tmp_path: Path) -> None:

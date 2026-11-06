@@ -11,6 +11,7 @@ from typing import Any, Optional
 import typer
 from click.core import ParameterSource
 from prime_evals import EvalsAPIError, EvalsClient, InvalidEvaluationError
+from rich.markup import escape as rich_escape
 from rich.progress import Progress
 from rich.syntax import Syntax
 from rich.table import Table
@@ -24,6 +25,9 @@ from ..utils import (
     json_output_help,
     output_data_as_json,
 )
+from ..utils.config_snapshot import NOTICE as CONFIG_SNAPSHOT_NOTICE
+from ..utils.config_snapshot import OPT_OUT_FLAG as CONFIG_SNAPSHOT_OPT_OUT_FLAG
+from ..utils.config_snapshot import build_config_snapshot
 from ..utils.display import get_eval_viewer_url
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.eval_config import (
@@ -132,6 +136,8 @@ Hosted options:
   --allow-tunnel-access           Allow tunnel creation and management
   --custom-secrets JSON           Custom secrets for the runner
   --eval-name TEXT                Name for the evaluation
+  --no-config-upload              Don't show the config file and command on the
+                                  evaluation's Config tab
 
 Related: prime eval logs EVAL_ID [-f], prime eval stop EVAL_ID
 """
@@ -568,19 +574,27 @@ def _build_hosted_eval_config(config: HostedEvalConfig) -> dict[str, Any]:
 
 
 def _create_hosted_evaluations(
-    config: HostedEvalConfig, environment_ids: Optional[list[str]] = None
+    config: HostedEvalConfig,
+    environment_ids: Optional[list[str]] = None,
+    config_snapshot: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     api_client = APIClient()
+    evals_client = EvalsClient(api_client)
+
+    extra: dict[str, Any] = {}
+    if config_snapshot is not None and _create_hosted_accepts_config_snapshot(evals_client):
+        extra["config_snapshot"] = config_snapshot
 
     # team_id is not passed explicitly: the SDK falls back to the injected
     # client's config.team_id, same source as before the refactor.
-    created = EvalsClient(api_client).create_hosted_evaluation(
+    created = evals_client.create_hosted_evaluation(
         # Explicit empty list stays empty; only None falls back to the config's
         # single environment.
         environment_ids if environment_ids is not None else [config.environment_id],
         config.inference_model,
         _build_hosted_eval_config(config),
         name=config.name or None,
+        **extra,
     )
     evaluation_id = created.get("evaluation_id")
     evaluation_ids = created.get("evaluation_ids")
@@ -589,6 +603,18 @@ def _create_hosted_evaluations(
         raise APIError(f"Failed to get evaluation ID from response: {created}")
 
     return created
+
+
+def _create_hosted_accepts_config_snapshot(client: EvalsClient) -> bool:
+    """Released prime-evals before config snapshots take no such argument."""
+    try:
+        parameters = inspect.signature(client.create_hosted_evaluation).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "config_snapshot" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _print_eval_status(eval_data: dict[str, Any]) -> None:
@@ -1438,6 +1464,15 @@ def run_eval_cmd(
         "--eval-name",
         help="Custom name for the hosted evaluation",
     ),
+    no_config_upload: bool = typer.Option(
+        False,
+        CONFIG_SNAPSHOT_OPT_OUT_FLAG,
+        help=(
+            "Don't send the eval config file and this command to the platform. "
+            "By default they are shown, with secret values in the command "
+            "replaced, to you and your team on the evaluation's Config tab."
+        ),
+    ),
 ) -> None:
     """Run a hosted evaluation on the platform."""
     passthrough_args = list(ctx.args)
@@ -1470,6 +1505,7 @@ def run_eval_cmd(
             "--allow-tunnel-access": allow_tunnel_access,
             "--custom-secrets": custom_secrets is not None,
             "--eval-name": eval_name is not None,
+            CONFIG_SNAPSHOT_OPT_OUT_FLAG: no_config_upload,
         }
         used_hosted_only_args = [flag for flag, used in hosted_only_args.items() if used]
         if used_hosted_only_args:
@@ -1731,6 +1767,15 @@ def run_eval_cmd(
             console.print(f"[red]Error:[/red] {exc}")
             raise typer.Exit(1) from exc
 
+        config_snapshot: Optional[dict[str, Any]] = None
+        if not no_config_upload:
+            config_snapshot, snapshot_warning = build_config_snapshot(
+                [environment] if _is_config_target(environment) else []
+            )
+            console.print(f"[dim]{rich_escape(CONFIG_SNAPSHOT_NOTICE)}[/dim]")
+            if snapshot_warning:
+                console.print(f"[yellow]{rich_escape(snapshot_warning)}[/yellow]")
+
         all_platform_slugs: list[str] = []
         all_evaluation_ids: list[str] = []
         try:
@@ -1764,6 +1809,7 @@ def run_eval_cmd(
                 result = _create_hosted_evaluations(
                     hosted_config,
                     environment_ids=group["environment_ids"],
+                    config_snapshot=config_snapshot,
                 )
                 all_platform_slugs.extend(group["platform_slugs"])
                 all_evaluation_ids.extend(result.get("evaluation_ids") or [result["evaluation_id"]])

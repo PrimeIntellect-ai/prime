@@ -21,6 +21,8 @@ from prime_cli.main import app
 from prime_cli.volume_gateway import GatewayError, relay
 from typer.testing import CliRunner
 
+_real_identity_agent = volumes._identity_agent  # conftest stubs it
+
 
 def _no_route(*a, **kw):
     """An older backend: no POST …/transfer route, so get/put use a session."""
@@ -2226,3 +2228,41 @@ def test_root_put_entries_are_bounded_before_the_route(monkeypatch, tmp_path):
     assert result.exit_code == 2, result.output
     assert "Path too long" in result.output
     assert routes == [] and s3.objects == {}
+
+
+def test_identity_agent_from_user_ssh_config(monkeypatch):
+    """`ssh -G` prints the IdentityAgent the user's ~/.ssh/config sets, which
+    `-F` would otherwise drop (1Password keeps only a .pub on disk)."""
+    sock = "/Users/j/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+    out = f"user j\nidentityagent {sock}\nidentitiesonly no\n"
+    monkeypatch.setattr(
+        volumes.subprocess, "run", lambda cmd, **kw: SimpleNamespace(returncode=0, stdout=out)
+    )
+    assert _real_identity_agent("h") == sock
+    monkeypatch.setattr(
+        volumes.subprocess,
+        "run",
+        lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="user j\n"),
+    )
+    assert _real_identity_agent("h") is None
+
+
+def test_ssh_carries_agent_and_hints_on_auth_failure(tmp_path, monkeypatch, _session_dir):
+    key = tmp_path / "1password_prime.pub"
+    key.write_text("ssh-ed25519 AAAA")
+    monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
+    monkeypatch.setattr(volumes, "_identity_agent", lambda host: "/tmp/a%b/agent.sock")
+    session = SimpleNamespace(
+        id="s1", status="RUNNING", read_only=False, ssh_connection="prime@host.ts.net -p 22"
+    )
+    client = SimpleNamespace(create_volume_session=lambda *a, **kw: session)
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "t1"))
+    monkeypatch.setattr(
+        volumes.subprocess, "run", lambda cmd, **kw: SimpleNamespace(returncode=255)
+    )
+    result = CliRunner().invoke(
+        app, ["volumes", "ssh", "data"], env={"PRIME_DISABLE_VERSION_CHECK": "1", "COLUMNS": "400"}
+    )
+    assert result.exit_code == 255
+    assert 'IdentityAgent "/tmp/a%%b/agent.sock"' in (_session_dir / "config").read_text()
+    assert "primary SSH key" in result.output and "ssh agent must hold" in result.output

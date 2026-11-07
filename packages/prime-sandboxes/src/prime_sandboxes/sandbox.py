@@ -53,7 +53,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
+from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC, raise_if_cancelled
 from .core import APIClient, APIError, AsyncAPIClient
 from .core.client import _RateLimitAwareWait
 from .exceptions import (
@@ -5010,6 +5010,7 @@ class AsyncSandboxClient:
                 )
                 return
             except ConnectError as error:
+                raise_if_cancelled(error)
                 if error.code == Code.UNAUTHENTICATED and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -5088,6 +5089,7 @@ class AsyncSandboxClient:
                     exit_code=exit_code,
                 )
             except ConnectError as e:
+                raise_if_cancelled(e)
                 # Only re-auth before any stream event.
                 if (
                     e.code == Code.UNAUTHENTICATED

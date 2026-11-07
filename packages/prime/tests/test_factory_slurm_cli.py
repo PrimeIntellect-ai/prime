@@ -388,3 +388,453 @@ def test_slurm_add_member_non_json_success_body_is_clean_error(
     assert "malformed response body" in output
     assert "ValueError" not in result.output
     assert "Traceback" not in result.output
+
+
+def test_slurm_create_validates_nodes_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch)
+
+    # Missing --nodes
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test-cluster"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code != 0, result.output
+    assert "--nodes" in output.lower() or "missing" in output.lower()
+
+
+def test_slurm_create_validates_positive_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "0"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "positive" in output
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "-1"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "positive" in output
+
+
+def test_slurm_create_with_default_platform_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    created_response = {
+        "id": "job-456",
+        "primeClusterId": "pc-1",
+        "status": "PENDING",
+        "createdAt": "2026-10-29T18:00:00Z",
+    }
+
+    class _CreateClient:
+        def __init__(self):
+            self.post_calls = []
+
+        def post(self, endpoint, json=None, timeout=None):
+            self.post_calls.append({"endpoint": endpoint, "json": json})
+            if "/deploy" in endpoint:
+                return created_response
+            return {}
+
+        def get(self, endpoint, params=None, timeout=None):
+            # Mock whoami
+            if "/user/whoami" in endpoint:
+                return {"data": {"id": "user-123", "slug": "alice", "email": "alice@example.com"}}
+            return _clusters_payload([])
+
+    client = _CreateClient()
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: client)
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    # Mock SSH key reading
+    def mock_read_ssh_keys(key_file=None):
+        return ["ssh-ed25519 AAAA alice-key"]
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm._read_ssh_keys", mock_read_ssh_keys)
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "new-cluster", "--nodes", "2", "--yes"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "new-cluster" in output and "created" in output
+    assert "job-456" in output
+    assert len(client.post_calls) == 1
+    assert "/slurm-clusters/team-123/deploy" in client.post_calls[0]["endpoint"]
+    body = client.post_calls[0]["json"]
+    assert body["primeClusterId"] == "pc-1"
+    assert body["slurmClusterName"] == "new-cluster"
+    assert body["numNodes"] == 2
+    assert "members" in body
+    assert len(body["members"]) == 1
+    assert body["members"][0]["username"] == "alice"
+    assert body["members"][0]["sshAuthorizedKeys"] == ["ssh-ed25519 AAAA alice-key"]
+    assert body["members"][0]["sudo"] is False
+    assert body["members"][0]["linkedUserId"] == "user-123"
+    assert body["containersEnabled"] is False
+
+
+def test_slurm_create_with_multiple_members_separate_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that each member gets their own SSH keys, not shared keys."""
+    created_response = {
+        "id": "job-789",
+        "primeClusterId": "pc-2",
+        "status": "PENDING",
+        "createdAt": "2026-10-29T18:00:00Z",
+    }
+
+    class _CreateClient:
+        def __init__(self):
+            self.post_calls = []
+
+        def post(self, endpoint, json=None, timeout=None):
+            self.post_calls.append({"endpoint": endpoint, "json": json})
+            if "/deploy" in endpoint:
+                return created_response
+            return {}
+
+        def get(self, endpoint, params=None, timeout=None):
+            if "/user/whoami" in endpoint:
+                return {"data": {"id": "user-123", "slug": "alice", "email": "alice@example.com"}}
+            return _clusters_payload([])
+
+    client = _CreateClient()
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: client)
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    # Mock SSH key reading - return different keys per file
+    def mock_read_ssh_keys(key_file=None):
+        if key_file == "~/.ssh/alice.pub":
+            return ["ssh-ed25519 AAAA alice-key"]
+        elif key_file == "~/.ssh/bob.pub":
+            return ["ssh-ed25519 BBBB bob-key"]
+        else:
+            return ["ssh-ed25519 AAAA default-key"]
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm._read_ssh_keys", mock_read_ssh_keys)
+
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "slurm",
+            "create",
+            "pc-2",
+            "--name",
+            "multi-cluster",
+            "--nodes",
+            "4",
+            "--member",
+            "alice:~/.ssh/alice.pub",
+            "--member",
+            "bob:~/.ssh/bob.pub",
+            "--sudo",
+            "--yes",
+        ],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "multi-cluster" in output
+    assert len(client.post_calls) == 1
+    body = client.post_calls[0]["json"]
+    assert body["numNodes"] == 4
+    assert len(body["members"]) == 2
+
+    # Verify alice (platform user) has her own key and sudo
+    alice_member = next(m for m in body["members"] if m["username"] == "alice")
+    assert alice_member["sshAuthorizedKeys"] == ["ssh-ed25519 AAAA alice-key"]
+    assert alice_member["sudo"] is True  # Platform user gets sudo
+    assert alice_member["linkedUserId"] == "user-123"
+
+    # Verify bob has his own separate key and no sudo
+    bob_member = next(m for m in body["members"] if m["username"] == "bob")
+    assert bob_member["sshAuthorizedKeys"] == ["ssh-ed25519 BBBB bob-key"]
+    assert bob_member["sudo"] is False
+    assert "linkedUserId" not in bob_member
+
+
+def test_slurm_create_bare_member_requires_platform_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that bare --member (without :KEYFILE) only works for platform user."""
+    created_response = {
+        "id": "job-456",
+        "primeClusterId": "pc-1",
+        "status": "PENDING",
+        "createdAt": "2026-10-29T18:00:00Z",
+    }
+
+    class _CreateClient:
+        def __init__(self):
+            self.post_calls = []
+
+        def post(self, endpoint, json=None, timeout=None):
+            self.post_calls.append({"endpoint": endpoint, "json": json})
+            if "/deploy" in endpoint:
+                return created_response
+            return {}
+
+        def get(self, endpoint, params=None, timeout=None):
+            if "/user/whoami" in endpoint:
+                return {"data": {"id": "user-123", "slug": "alice", "email": "alice@example.com"}}
+            return _clusters_payload([])
+
+    client = _CreateClient()
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: client)
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    # Mock SSH key reading
+    def mock_read_ssh_keys(key_file=None):
+        return ["ssh-ed25519 AAAA test-key"]
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm._read_ssh_keys", mock_read_ssh_keys)
+
+    # Should fail for non-platform user
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "1", "--member", "bob"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "bob" in output and "requires a key file" in output.lower()
+
+    # Should work for platform user
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "slurm",
+            "create",
+            "pc-1",
+            "--name",
+            "test",
+            "--nodes",
+            "1",
+            "--member",
+            "alice",
+            "--yes",
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_slurm_create_confirms_and_cancels(monkeypatch: pytest.MonkeyPatch) -> None:
+    dummy = _install(monkeypatch)
+
+    def mock_get_platform_user():
+        return {"id": "user-123", "username": "testuser"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.factory_slurm._get_platform_user", mock_get_platform_user
+    )
+
+    # Mock SSH key reading
+    def mock_read_ssh_keys(key_file=None):
+        return ["ssh-ed25519 AAAA test-key"]
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm._read_ssh_keys", mock_read_ssh_keys)
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "2"],
+        env=TEST_ENV,
+        input="n\n",
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "Deployment cancelled" in output
+    assert len(dummy.post_calls) == 0
+
+
+def test_slurm_create_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    created_response = {
+        "id": "job-999",
+        "primeClusterId": "pc-1",
+        "status": "PENDING",
+        "createdAt": "2026-10-29T18:00:00Z",
+    }
+
+    class _CreateClient:
+        def post(self, endpoint, json=None, timeout=None):
+            if "/deploy" in endpoint:
+                return created_response
+            return {}
+
+        def get(self, endpoint, params=None, timeout=None):
+            if "/user/whoami" in endpoint:
+                return {"data": {"id": "user-123", "slug": "testuser", "email": "test@example.com"}}
+            return _clusters_payload([])
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: _CreateClient())
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    # Mock SSH key reading
+    def mock_read_ssh_keys(key_file=None):
+        return ["ssh-ed25519 AAAA test-key"]
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm._read_ssh_keys", mock_read_ssh_keys)
+
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "slurm",
+            "create",
+            "pc-1",
+            "--name",
+            "json-cluster",
+            "--nodes",
+            "1",
+            "--yes",
+            "--json",
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.stdout)
+    assert parsed["id"] == "job-999"
+    assert parsed["primeClusterId"] == "pc-1"
+    assert parsed["status"] == "PENDING"
+
+
+def test_slurm_create_malformed_response_is_clean_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BadPostClient:
+        def post(self, endpoint, json=None, timeout=None):
+            if "/deploy" in endpoint:
+                return {"unexpected": "shape"}  # Missing 'id'
+            return {}
+
+        def get(self, endpoint, params=None, timeout=None):
+            if "/user/whoami" in endpoint:
+                return {"data": {"id": "user-123", "slug": "testuser", "email": "test@example.com"}}
+            return {"data": []}
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: _BadPostClient())
+    monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig("team-123"))
+    monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
+
+    # Mock SSH key reading
+    def mock_read_ssh_keys(key_file=None):
+        return ["ssh-ed25519 AAAA test-key"]
+
+    monkeypatch.setattr("prime_cli.commands.factory_slurm._read_ssh_keys", mock_read_ssh_keys)
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "1", "--yes"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "malformed response body" in output
+    assert "ValidationError" not in result.output
+
+
+def test_slurm_create_validates_username(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch)
+
+    def mock_get_platform_user():
+        return {"id": "user-123", "username": "alice"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.factory_slurm._get_platform_user", mock_get_platform_user
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.factory_slurm._read_ssh_keys", lambda key_file=None: ["key"]
+    )
+
+    # Invalid: starts with number (provide keyfile to get past member parsing)
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "slurm",
+            "create",
+            "pc-1",
+            "--name",
+            "test",
+            "--nodes",
+            "1",
+            "--member",
+            "1user:~/.ssh/key.pub",
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1, result.output
+    assert "Invalid username" in strip_ansi(result.output)
+
+    # Invalid: uppercase (provide keyfile to get past member parsing)
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "slurm",
+            "create",
+            "pc-1",
+            "--name",
+            "test",
+            "--nodes",
+            "1",
+            "--member",
+            "Alice:~/.ssh/key.pub",
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1, result.output
+    assert "Invalid username" in strip_ansi(result.output)
+
+    # Invalid: too short (provide keyfile to get past member parsing)
+    result = runner.invoke(
+        app,
+        [
+            "factory",
+            "slurm",
+            "create",
+            "pc-1",
+            "--name",
+            "test",
+            "--nodes",
+            "1",
+            "--member",
+            "a:~/.ssh/key.pub",
+        ],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 1, result.output
+    assert "Invalid username" in strip_ansi(result.output)
+
+
+def test_slurm_create_no_ssh_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch)
+
+    def mock_get_platform_user():
+        return {"id": "user-123", "username": "testuser"}
+
+    monkeypatch.setattr(
+        "prime_cli.commands.factory_slurm._get_platform_user", mock_get_platform_user
+    )
+    monkeypatch.setattr("prime_cli.commands.factory_slurm._read_ssh_keys", lambda key_file=None: [])
+
+    result = runner.invoke(
+        app,
+        ["factory", "slurm", "create", "pc-1", "--name", "test", "--nodes", "1"],
+        env=TEST_ENV,
+    )
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1, result.output
+    assert "No SSH keys found" in output

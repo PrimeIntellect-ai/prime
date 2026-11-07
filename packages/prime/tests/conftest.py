@@ -18,3 +18,11 @@ def stub_local_schema_validation(monkeypatch):
         "prime_cli.utils.training_compiler.compile_locally",
         lambda config, preparation: {"mode": preparation["mode"], "schema_commit": "a" * 40},
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_user_identity_agent(monkeypatch):
+    """Keep the user's real ~/.ssh/config (ssh -G) out of volume ssh tests."""
+    from prime_cli.commands import volumes
+
+    monkeypatch.setattr(volumes, "_identity_agent", lambda host: None)

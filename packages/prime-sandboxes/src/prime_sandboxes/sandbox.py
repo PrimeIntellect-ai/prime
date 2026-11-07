@@ -45,8 +45,6 @@ from pyqwest import Client as HTTPClient
 from pyqwest import HTTPTransport, HTTPVersion, SyncHTTPTransport
 from pyqwest import SyncClient as SyncHTTPClient
 from tenacity import (
-    retry,
-    retry_if_exception,
     stop_after_attempt,
     stop_after_delay,
     wait_exponential,
@@ -55,7 +53,7 @@ from tenacity import (
 
 from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
 from .core import APIClient, APIError, AsyncAPIClient
-from .core.client import _RateLimitAwareWait
+from .core.client import is_retryable, retry_transient
 from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
@@ -108,20 +106,8 @@ from .rpc_command_session import (
     build_command_session_send_signal_request,
     build_command_session_start_request,
     collect_command_session_start_event,
-    is_transient_control_fault,
 )
 from .volumes import AsyncVolumes, Volumes
-
-# Connection-level errors: request never reached the server, so retry is safe
-# for any HTTP method (including non-idempotent POSTs).
-# Note: ReadTimeout / ReadError are NOT in this tuple because they occur after
-# the server has (at least partially) started responding — meaning the request
-# was already processed and a retry would duplicate side effects on POST.
-GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
-    httpx.RemoteProtocolError,  # Server disconnected unexpectedly
-    httpx.ConnectError,  # Connection refused/failed
-    httpx.PoolTimeout,  # No connection available in pool
-)
 
 # sandboxd kills a live process when its Connect-Timeout-Ms expires. A process
 # with no timeout is bounded only by the sandbox lifetime, but connectrpc-python
@@ -481,26 +467,6 @@ def _network_update_payload(
         payload["rules"] = {host: rule.model_dump() for host, rule in canonical_rules.items()}
     return payload
 
-
-# Response-read failures: the server may have already processed the request
-# (TCP connection dropped mid-response body). Only safe to retry on idempotent
-# methods (GET/HEAD/PUT/DELETE), where a duplicate request is a no-op.
-# ReadTimeout is STILL excluded even for idempotent methods — we can't
-# distinguish "server hanging" from "server mid-processing", and retrying a
-# hung request compounds load on an already-stressed server instead of
-# recovering. ReadError (TCP reset / connection drop during read) is different:
-# the connection is definitively gone, so retrying doesn't pile on.
-GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS = GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS + (
-    httpx.ReadError,  # TCP connection broken while reading response
-)
-
-READ_FILE_RETRYABLE_EXCEPTIONS = GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS + (
-    httpx.ConnectTimeout,  # Timed out before the request reached the gateway
-    httpx.ReadTimeout,  # Timed out waiting for an idempotent read response
-)
-
-# Retryable HTTP 5xx status codes (e.g. Cloudflare 524 timeout, server errors)
-RETRYABLE_5XX_STATUSES = frozenset({500, 502, 503, 504, 524})
 
 # Max retries for transient 409 errors
 MAX_409_RETRIES = 4
@@ -1635,22 +1601,6 @@ def _creation_timeout_seconds(max_attempts: int) -> float:
     return float(_LEGACY_FAST_POLLS + (max_attempts - _LEGACY_FAST_POLLS) * 2)
 
 
-def _is_retryable_gateway_error(exc: BaseException) -> bool:
-    """Check if an exception is retryable for idempotent gateway requests."""
-    if isinstance(exc, GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS):
-        return True
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
-        return True
-    if (
-        isinstance(exc, httpx.HTTPStatusError)
-        and exc.response.status_code in RETRYABLE_5XX_STATUSES
-    ):
-        if _is_gateway_sandbox_not_found(exc.response):
-            return False
-        return True
-    return False
-
-
 def _exception_chain(exc: BaseException) -> List[BaseException]:
     """Return an exception and its explicit causes without looping."""
     chain: List[BaseException] = []
@@ -1712,16 +1662,11 @@ def _is_retryable_reachability_error(exc: BaseException) -> bool:
     for error in chain:
         if isinstance(error, CommandTimeoutError):
             return True
-        if isinstance(error, ConnectError):
-            return error.code in {Code.ABORTED, Code.DEADLINE_EXCEEDED, Code.UNAVAILABLE}
-        if isinstance(error, httpx.HTTPStatusError):
-            status = error.response.status_code
-            return status in {408, 409} or status in RETRYABLE_5XX_STATUSES
-        if isinstance(
-            error,
-            GATEWAY_IDEMPOTENT_RETRYABLE_EXCEPTIONS + (httpx.ConnectTimeout, httpx.ReadTimeout),
-        ):
+        # A gateway 409 while the route converges is retried here, unlike in is_retryable.
+        if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 409:
             return True
+        if isinstance(error, (httpx.HTTPError, ConnectError)):
+            return is_retryable(error, idempotent=True)
     return False
 
 
@@ -1744,84 +1689,35 @@ def _reachability_timeout_error(
     )
 
 
-def _is_retryable_read_file_error(exc: BaseException) -> bool:
-    """Check if an exception is retryable for read-file gateway requests."""
-    if isinstance(exc, READ_FILE_RETRYABLE_EXCEPTIONS):
-        return True
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        if status == 429:
-            return True
-        if status == 408 or status in RETRYABLE_5XX_STATUSES:
-            if _is_gateway_sandbox_not_found(exc.response):
-                return False
-            return True
-    return False
-
-
-def _is_retryable_gateway_post_error(exc: BaseException) -> bool:
-    return isinstance(exc, GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS) or (
-        isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429
-    )
+def _raise_for_retryable_status(response: httpx.Response, *, idempotent: bool) -> None:
+    """Raise inside a retry policy only for statuses it retries; callers handle the rest."""
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        if is_retryable(error, idempotent=idempotent):
+            raise
 
 
 _GATEWAY_RATE_LIMIT_DELAYS = (10.0, 30.0, 40.0)
 
 
-# Retry decorator for idempotent gateway requests (connection errors, ReadError,
-# and retryable HTTP responses). Safe for GET/HEAD/PUT/DELETE since duplicates are no-ops.
-_gateway_retry = retry(
-    retry=retry_if_exception(_is_retryable_gateway_error),
-    stop=stop_after_attempt(4),
-    wait=_RateLimitAwareWait(
-        wait_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
-    ),
-    reraise=True,
-)
-
-# Retry decorator for non-idempotent gateway requests. ReadError and 5xx imply
-# the server may have processed the request, so retrying risks duplicate side effects.
-_gateway_post_retry = retry(
-    retry=retry_if_exception(_is_retryable_gateway_post_error),
-    stop=stop_after_attempt(4),
-    wait=_RateLimitAwareWait(
-        wait_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
-    ),
-    reraise=True,
-)
-
-# Retry decorator for read-file requests. read_file is idempotent and often used
-# as a polling primitive, so transient read/connect/pool timeouts should not fail
-# the operation on the first missed gateway response.
-_read_file_retry = retry(
-    retry=retry_if_exception(_is_retryable_read_file_error),
-    stop=stop_after_attempt(4),
-    wait=_RateLimitAwareWait(
-        wait_random_exponential(multiplier=1, min=1, max=30), _GATEWAY_RATE_LIMIT_DELAYS
-    ),
-    reraise=True,
-)
-
-
-def _is_transient_exec_error(exc: BaseException) -> bool:
-    """A command RPC link fault (gateway 502/503, dropped body), not a command outcome."""
-    cause = exc.__cause__
-    return (
-        isinstance(exc, APIError)
-        and isinstance(cause, ConnectError)
-        and is_transient_control_fault(cause)
+def _gateway_retry_policy(idempotent: bool, wait: Any, stop: Any = None) -> Any:
+    return retry_transient(
+        idempotent=idempotent,
+        stop=stop or stop_after_attempt(4),
+        wait=wait,
+        rate_limit_delays=_GATEWAY_RATE_LIMIT_DELAYS,
     )
 
 
-# Retry for idempotent exec calls only: background-job status reads and the
-# mkdir-guarded launch. A day-long rollout polls thousands of times, so one gateway
-# or node-ingress blip must not end it. Timeouts and sandbox-gone errors are not
-# APIErrors caused by a transient ConnectError and are never retried here.
-_transient_exec_retry = retry(
-    retry=retry_if_exception(_is_transient_exec_error),
-    stop=stop_after_delay(120),
-    wait=wait_random_exponential(multiplier=1, min=1, max=15),
-    reraise=True,
+_gateway_retry = _gateway_retry_policy(True, wait_exponential(multiplier=1, min=1, max=30))
+_gateway_post_retry = _gateway_retry_policy(False, wait_exponential(multiplier=1, min=1, max=30))
+_read_file_retry = _gateway_retry_policy(True, wait_random_exponential(multiplier=1, min=1, max=30))
+# Exec calls that are safe to repeat: background-job status reads and the
+# mkdir-guarded launch. A day-long rollout polls thousands of times, so one
+# gateway or node-ingress blip must not end it.
+_transient_exec_retry = _gateway_retry_policy(
+    True, wait_random_exponential(multiplier=1, min=1, max=15), stop_after_delay(120)
 )
 
 
@@ -2356,8 +2252,7 @@ class SandboxClient:
         """Make a POST request to the gateway with safe pre-processing retries."""
         with httpx.Client(timeout=timeout) as client:
             response = client.post(url, json=json, files=files, params=params, headers=headers)
-        if response.status_code == 429:
-            response.raise_for_status()
+        _raise_for_retryable_status(response, idempotent=False)
         return response
 
     @staticmethod
@@ -2371,8 +2266,7 @@ class SandboxClient:
         """Make a GET request to the gateway with retry on transient errors."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
-            response.raise_for_status()
+        _raise_for_retryable_status(response, idempotent=True)
         return response
 
     @staticmethod
@@ -2386,8 +2280,7 @@ class SandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         with httpx.Client(timeout=timeout) as client:
             response = client.get(url, params=params, headers=headers)
-        if response.status_code in {408, 429} or response.status_code in RETRYABLE_5XX_STATUSES:
-            response.raise_for_status()
+        _raise_for_retryable_status(response, idempotent=True)
         return response
 
     def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
@@ -2440,10 +2333,7 @@ class SandboxClient:
 
     def _should_retry_upload_error(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
         """Check if a transient error (408/5xx) on an idempotent upload should be retried."""
-        status = error.response.status_code
-        if status != 408 and status not in RETRYABLE_5XX_STATUSES:
-            return False
-        if _is_gateway_sandbox_not_found(error.response):
+        if not is_retryable(error, idempotent=True):
             return False
         if attempt < MAX_409_RETRIES - 1:
             time.sleep(RETRY_409_BASE_DELAY * (2**attempt))
@@ -4127,8 +4017,7 @@ class AsyncSandboxClient:
         response = await gateway_client.post(
             url, json=json, files=files, params=params, headers=headers, timeout=timeout
         )
-        if response.status_code == 429:
-            response.raise_for_status()
+        _raise_for_retryable_status(response, idempotent=False)
         return response
 
     @_gateway_retry
@@ -4142,8 +4031,7 @@ class AsyncSandboxClient:
         """Make a GET request to the gateway with retry on transient errors."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code == 429 or response.status_code in RETRYABLE_5XX_STATUSES:
-            response.raise_for_status()
+        _raise_for_retryable_status(response, idempotent=True)
         return response
 
     @_read_file_retry
@@ -4157,8 +4045,7 @@ class AsyncSandboxClient:
         """Make a read-file GET request to the gateway with read-timeout retries."""
         gateway_client = self._get_gateway_client()
         response = await gateway_client.get(url, params=params, headers=headers, timeout=timeout)
-        if response.status_code in {408, 429} or response.status_code in RETRYABLE_5XX_STATUSES:
-            response.raise_for_status()
+        _raise_for_retryable_status(response, idempotent=True)
         return response
 
     async def _is_sandbox_reachable(self, sandbox_id: str, timeout: int = 10) -> bool:
@@ -4211,10 +4098,7 @@ class AsyncSandboxClient:
 
     async def _should_retry_upload_error(self, error: httpx.HTTPStatusError, attempt: int) -> bool:
         """Check if a transient 408/5xx on an idempotent upload should be retried (async)."""
-        status = error.response.status_code
-        if status != 408 and status not in RETRYABLE_5XX_STATUSES:
-            return False
-        if _is_gateway_sandbox_not_found(error.response):
+        if not is_retryable(error, idempotent=True):
             return False
         if attempt < MAX_409_RETRIES - 1:
             await asyncio.sleep(RETRY_409_BASE_DELAY * (2**attempt))
@@ -5016,7 +4900,9 @@ class AsyncSandboxClient:
                     reauthed = True
                     continue
                 failures += 1
-                if failures < _PROCESS_CONTROL_RPC_ATTEMPTS and is_transient_control_fault(error):
+                if failures < _PROCESS_CONTROL_RPC_ATTEMPTS and is_retryable(
+                    error, idempotent=True
+                ):
                     await asyncio.sleep(_PROCESS_CONTROL_RETRY_INITIAL_DELAY * 2 ** (failures - 1))
                     continue
                 raise APIError(

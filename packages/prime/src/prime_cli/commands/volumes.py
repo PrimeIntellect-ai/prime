@@ -241,6 +241,43 @@ def _proxy_command(gateway: tuple[str, str], sni: str) -> str:
     return command.replace("%", "%%")
 
 
+def _identity_agent(host: str) -> str | None:
+    """The IdentityAgent the user's own ssh config sets for `host`, or None.
+    `-F` skips ~/.ssh/config, so an agent configured there (1Password,
+    Secretive) would be lost: ssh would fall back to SSH_AUTH_SOCK, find no
+    private key for a `.pub` IdentityFile and fail with publickey."""
+    try:
+        out = subprocess.run(
+            ["ssh", "-G", host],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        name, _, value = line.partition(" ")
+        if name == "identityagent" and value:
+            return value
+    return None
+
+
+def _key_hint(key: str) -> str:
+    """What to check when ssh fails before the session's shell starts."""
+    hint = (
+        f"If ssh said 'Permission denied (publickey)': {key} must match your primary "
+        "SSH key in the Platform dashboard (Dashboard -> Tokens -> SSH Keys)."
+    )
+    if key.endswith(".pub"):
+        hint += (
+            " It is a public key file, so an ssh agent must hold its private key: "
+            "set IdentityAgent in ~/.ssh/config (the 1Password agent socket, for "
+            "example) or export SSH_AUTH_SOCK."
+        )
+    return hint
+
+
 def _write_ssh_config(
     session, alias: str, host: str, user: str, port: str, key: str, gateway=None
 ) -> Path:
@@ -270,6 +307,8 @@ def _write_ssh_config(
         f'  IdentityFile "{Path(key).as_posix()}"',
         "  IdentitiesOnly yes",
     ]
+    if agent := _identity_agent(host):
+        lines.append(f'  IdentityAgent "{agent.replace("%", "%%")}"')
     if gateway:
         lines.append(f"  ProxyCommand {_proxy_command(gateway, alias)}")
     if getattr(session, "host_public_key", None):
@@ -514,6 +553,8 @@ def ssh(
         "The session stops after 30 minutes idle. Stop it now with: "
         f"prime volumes stop {escape(name)} {session.id}"
     )
+    if code == 255:  # ssh's own failure (auth, network), not the remote shell's
+        console.print(_key_hint(_shell_path(Path(key), "~")), markup=False)
     if code:
         raise typer.Exit(code)
 
@@ -590,6 +631,11 @@ def _transfer_failed(alias: str, code: int, via_gateway: bool) -> None:
     else:
         reach = f"that you are on the tailnet (host {alias} must resolve)"
     console.print(f"[red]Transfer failed.[/red] Check {reach} and the path exists.")
+    if code == 255:
+        console.print(
+            "ssh itself failed: also check that your SSH key (prime config "
+            "set-ssh-key-path) matches your primary key in Dashboard -> Tokens -> SSH Keys."
+        )
     raise typer.Exit(code)
 
 

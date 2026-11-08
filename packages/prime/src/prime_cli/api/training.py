@@ -72,9 +72,17 @@ class HostedTrainingRunResponse(BaseModel):
 
 
 class AvailableGpuTypesResponse(BaseModel):
-    """Response from GET /v1/training/available-gpu-types."""
+    """Response from GET /v1/training/available-gpu-types.
+
+    `gpu_types` spans both placement paths, because dispatch derives the
+    path per GPU type: reserved capacity for the types the caller owns,
+    the billed shared pool for everything else. `on_demand_gpu_types` is
+    the subset that is billed per GPU-hour, and is empty against a
+    backend predating the field — annotate, never filter on it.
+    """
 
     gpu_types: List[str] = Field(default_factory=list, alias="gpuTypes")
+    on_demand_gpu_types: List[str] = Field(default_factory=list, alias="onDemandGpuTypes")
 
     model_config = ConfigDict(populate_by_name=True)
 

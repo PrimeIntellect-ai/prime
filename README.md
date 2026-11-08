@@ -149,7 +149,8 @@ Build and evaluate environments with [verifiers](https://github.com/PrimeIntelle
 # List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
+# Launch a prime-rl config on a dedicated cluster; its top-level `mode`
+# ("rl", "sft" or "pretrain") picks the run kind
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs

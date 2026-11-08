@@ -115,7 +115,8 @@ Build and evaluate environments with [verifiers](https://github.com/PrimeIntelle
 # List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
+# Launch a prime-rl config on a dedicated cluster; its top-level `mode`
+# ("rl", "sft" or "pretrain") picks the run kind
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
@@ -414,13 +415,13 @@ prime pods ssh <pod-id>
 
 ## Local dedicated-training validation (experimental)
 
-Validate a dedicated RL or SFT config against the schema of the runtime selected
+Validate a dedicated RL, SFT or pretrain config against the schema of the runtime selected
 by Platform, including its default image:
 
 ```bash
 prime train validate rl.toml
 prime train validate rl.toml --ref your-branch
-prime train validate sft.toml --sft --artifact-out normalized.json
+prime train validate sft.toml --artifact-out normalized.json
 ```
 
 The CLI needs `uv` to cache a CPU-only schema environment. An existing matching
@@ -438,7 +439,7 @@ adaptation and rendering. Environment plugins and dispatch policy remain deferre
 Validation creates no run. `--artifact-out` can save the normalized config for
 inspection.
 
-Dedicated submissions (`prime train rl.toml` or `prime train sft.toml --sft`)
+Dedicated submissions (`prime train rl.toml`)
 perform local validation automatically before creating a run or volume. Platform
 checks the runtime pins and deployment policy, applies hosted settings, and
 renders the deployment internally. Queued runs keep the same pinned runtime and

@@ -1,7 +1,7 @@
 """SFT dispatch tests for `prime train` (dedicated training path).
 
 Covers the SFT handoff:
-  - detection: `[data]` + no `[trainer]`/`[orchestrator]` -> SFT, `--sft` flag
+  - routing: the config's top-level `mode`, else the deprecated shape guess
   - payload building: `mode: "sft"` on the /training/runs request; RL
     payloads stay mode-free
 
@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 import toml
 from prime_cli.api.training import build_payload_from_toml
-from prime_cli.commands.rl import _looks_like_sft, _training_mode
+from prime_cli.commands.rl import _guess_training_mode, _training_mode
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -64,33 +64,49 @@ def _capture_post(monkeypatch) -> dict[str, Any]:
     return captured
 
 
-# --- detection -------------------------------------------------------------
-
-
-def test_sft_detection_requires_data_without_rl_blocks() -> None:
-    assert _looks_like_sft({"data": {"name": "d"}}) is True
-    assert _looks_like_sft({"data": {}, "deployment": {}}) is True
-    # [trainer]/[orchestrator] mean the RL schema
-    assert _looks_like_sft({"data": {}, "trainer": {}}) is False
-    assert _looks_like_sft({"data": {}, "orchestrator": {}}) is False
-    # no [data] means not SFT (LoRA/RL configs never carry one)
-    assert _looks_like_sft({"trainer": {}, "orchestrator": {}}) is False
-    assert _looks_like_sft({}) is False
+# --- routing -----------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("cfg", "sft", "mode"),
+    ("cfg", "mode"),
     [
-        ({}, True, "sft"),
-        ({"trainer": {}}, True, "sft"),  # flag forces; server validates
-        ({"data": {}}, False, "sft"),
-        ({}, False, "rl"),
-        ({"data": {"type": "datatrove", "paths": ["shards"]}}, False, "pretrain"),
-        ({"data": {"type": "datatrove", "paths": ["shards"]}}, True, "pretrain"),
+        ({"data": {"name": "d"}}, "sft"),
+        ({"data": {}, "deployment": {}}, "sft"),
+        # [trainer]/[orchestrator] mean the RL schema
+        ({"data": {}, "trainer": {}}, "rl"),
+        ({"data": {}, "orchestrator": {}}, "rl"),
+        ({"trainer": {}, "orchestrator": {}}, "rl"),
+        ({}, "rl"),
+        # token shards are pretrain, with or without prime-rl's default type
+        ({"data": {"paths": ["shards"]}}, "pretrain"),
+        ({"data": {"type": "datatrove", "paths": ["shards"]}}, "pretrain"),
+        ({"data": {"type": "sft", "paths": ["shards"]}}, "sft"),
     ],
 )
-def test_training_mode_follows_the_config_shape(cfg, sft, mode) -> None:
-    assert _training_mode(cfg, sft=sft) == mode
+def test_guess_training_mode_follows_the_config_shape(cfg, mode) -> None:
+    assert _guess_training_mode(cfg) == mode
+
+
+@pytest.mark.parametrize("mode", ["rl", "sft", "pretrain"])
+def test_training_mode_reads_the_config_mode_over_its_shape(mode) -> None:
+    # The SFT shape with each mode: `mode` wins and no guess runs.
+    assert _training_mode({"mode": mode, "data": {"name": "d"}}, "c.toml") == mode
+
+
+def test_training_mode_without_mode_warns_and_guesses(capsys) -> None:
+    assert _training_mode({"data": {"paths": ["shards"]}}, "c.toml") == "pretrain"
+    out = " ".join(capsys.readouterr().out.split())
+    assert "c.toml has no top-level `mode`" in out
+    assert 'Add `mode = "pretrain"`' in out
+
+
+@pytest.mark.parametrize(
+    ("mode", "error"),
+    [("eval", "is an eval config"), ("dpo", "must be one of rl, sft, pretrain"), (1, "got 1")],
+)
+def test_training_mode_rejects_other_modes(mode, error) -> None:
+    with pytest.raises(ValueError, match=error):
+        _training_mode({"mode": mode}, "c.toml")
 
 
 # --- payload building --------------------------------------------------------
@@ -125,14 +141,21 @@ def test_train_sft_toml_auto_dispatches_with_sft_mode(tmp_path: Path, monkeypatc
     assert "Dispatched" in result.output
 
 
-def test_train_sft_flag_dispatches_valid_sft_config(tmp_path: Path, monkeypatch) -> None:
-    config_path = _write_config(tmp_path, _sft_config())
+@pytest.mark.parametrize("mode", ["sft", "pretrain"])
+def test_train_dispatches_the_config_mode_without_the_key(
+    tmp_path: Path, monkeypatch, mode: str
+) -> None:
+    # The request carries the mode; builds predating prime-rl's `mode` field
+    # reject it inside the config.
+    config_path = _write_config(tmp_path, f'mode = "{mode}"\n' + _sft_config())
     captured = _capture_post(monkeypatch)
 
-    result = runner.invoke(app, ["train", config_path, "--sft", "--yes"], env=TEST_ENV)
+    result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert captured["json"]["mode"] == "sft"
+    assert captured["json"]["mode"] == mode
+    assert "mode" not in captured["json"]["config"]
+    assert "no top-level `mode`" not in result.output
 
 
 def test_train_sft_json_output_keeps_run_id_parseable(tmp_path: Path, monkeypatch) -> None:
@@ -148,23 +171,15 @@ def test_train_sft_json_output_keeps_run_id_parseable(tmp_path: Path, monkeypatc
     assert data["run"]["runId"] == "run-1"
 
 
-def test_train_rejects_fft_flag_on_sft_config(tmp_path: Path, monkeypatch) -> None:
-    _capture_post(monkeypatch)
-    config_path = _write_config(tmp_path, _sft_config())
+def test_train_rejects_eval_config_before_post(tmp_path: Path, monkeypatch) -> None:
+    captured = _capture_post(monkeypatch)
+    config_path = _write_config(tmp_path, 'mode = "eval"\n' + _sft_config())
 
-    result = runner.invoke(app, ["train", config_path, "--fft", "--yes"], env=TEST_ENV)
-
-    assert result.exit_code == 1
-    assert "Use --sft instead" in " ".join(result.output.split())
-
-
-def test_train_rejects_sft_and_fft_flags_together(tmp_path: Path) -> None:
-    config_path = _write_config(tmp_path, _sft_config())
-
-    result = runner.invoke(app, ["train", config_path, "--sft", "--fft", "--yes"], env=TEST_ENV)
+    result = runner.invoke(app, ["train", config_path, "--yes"], env=TEST_ENV)
 
     assert result.exit_code == 1
-    assert "mutually exclusive" in result.output
+    assert "is an eval config" in " ".join(result.output.split())
+    assert captured == {}
 
 
 def test_train_fft_dispatch_stays_mode_free(tmp_path: Path, monkeypatch) -> None:

@@ -351,33 +351,45 @@ def _looks_like_lora(cfg: Dict[str, Any]) -> bool:
     return isinstance(cfg.get("model"), str) or isinstance(cfg.get("env"), list)
 
 
-def _looks_like_sft(cfg: Dict[str, Any]) -> bool:
-    """True iff the mega-TOML carries the prime-rl SFT schema shape: a
-    `[data]` block (required by SFTConfig, absent from the RL schema) and
-    no `[trainer]`/`[orchestrator]` blocks (required by the RL schema,
-    absent from SFTConfig). The two prime-rl TOML schemas are disjoint on
-    these keys, so the sniff is unambiguous without parsing the file with
-    either schema.
-    """
-    return "data" in cfg and "trainer" not in cfg and "orchestrator" not in cfg
+_TRAINING_MODES = ("rl", "sft", "pretrain")
 
 
-def _looks_like_pretrain(cfg: Dict[str, Any]) -> bool:
-    """True iff the config reads datatrove token shards, which only prime-rl's
-    PretrainConfig accepts. Pretrain configs also have the SFT shape, so this
-    sniff runs first."""
+def _guess_training_mode(cfg: Dict[str, Any]) -> str:
+    """Deprecated fallback for configs without a top-level `mode`: pretrain
+    when `[data]` reads token shards (`paths`, with `type` unset or
+    "datatrove"), SFT when there is a `[data]` block and no
+    `[trainer]`/`[orchestrator]`, else RL."""
     data = cfg.get("data")
-    return isinstance(data, dict) and data.get("type") == "datatrove"
-
-
-def _training_mode(cfg: Dict[str, Any], *, sft: bool) -> str:
-    """The prime-rl schema the config follows: pretrain for datatrove data, SFT
-    if `--sft` was passed or the config has the SFT shape, else RL."""
-    if _looks_like_pretrain(cfg):
+    if isinstance(data, dict) and "paths" in data and data.get("type", "datatrove") == "datatrove":
         return "pretrain"
-    if sft or _looks_like_sft(cfg):
+    if "data" in cfg and "trainer" not in cfg and "orchestrator" not in cfg:
         return "sft"
     return "rl"
+
+
+def _training_mode(cfg: Dict[str, Any], config_path: Any, out: Any = console) -> str:
+    """The prime-rl schema the config follows, from its top-level `mode`
+    (prime-rl's own run-kind field). Configs without one are still guessed
+    from their shape, with a warning."""
+    mode = cfg.get("mode")
+    if mode == "eval":
+        raise ValueError(
+            f'{config_path} is an eval config (`mode = "eval"`); '
+            "prime train runs rl, sft and pretrain configs."
+        )
+    if mode is not None and mode not in _TRAINING_MODES:
+        raise ValueError(
+            f"mode in {config_path} must be one of {', '.join(_TRAINING_MODES)}, got {mode!r}."
+        )
+    if mode is not None:
+        return mode
+    guessed = _guess_training_mode(cfg)
+    out.print(
+        f"[yellow]Warning:[/yellow] {config_path} has no top-level `mode`; "
+        f'running it as {guessed}. Add `mode = "{guessed}"` to the config: '
+        "configs without a mode will stop being accepted."
+    )
+    return guessed
 
 
 def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> None:
@@ -475,7 +487,9 @@ def _collect_secrets(env: Optional[List[str]], env_files: List[str]) -> Dict[str
 # phantom paths. `image_tag` is similarly chart-level — the backend
 # parses it off the request body, not the embedded prime-rl config.
 # `type` is stripped here too rather than left for the backend's
-# legacy CLI-metadata cleanup to silently absorb.
+# legacy CLI-metadata cleanup to silently absorb. `mode` travels as the
+# request's own `mode` field instead: prime-rl builds older than its
+# `mode` field reject the key as an extra input.
 _CLI_ONLY_KEYS = frozenset(
     {
         "env_file",
@@ -486,6 +500,7 @@ _CLI_ONLY_KEYS = frozenset(
         "volume_size",
         "source_ref",
         "type",
+        "mode",
     }
 )
 
@@ -1015,7 +1030,6 @@ def validate_training_config(
         dir_okay=False,
         help="Reuse an existing schema interpreter; its commit must match the hosted runtime.",
     ),
-    sft: bool = typer.Option(False, "--sft", help="Validate a dedicated SFT config."),
     image_tag: Optional[str] = typer.Option(None, "--image-tag"),
     ref: Optional[str] = typer.Option(
         None,
@@ -1033,7 +1047,7 @@ def validate_training_config(
     artifact_out: Optional[Path] = typer.Option(None, "--artifact-out"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Validate dedicated RL/SFT config locally against the selected hosted runtime.
+    """Validate a dedicated RL, SFT or pretrain config locally against the selected hosted runtime.
 
     Experimental: creates no training run. Environment plugins and platform
     dispatch policy are checked when submitting a run.
@@ -1062,7 +1076,7 @@ def validate_training_config(
                 "submit with --volume (or set top-level `volume`)."
             )
         config = _schema_input(_hosted_config(raw, notices))
-        mode = _training_mode(raw, sft=sft)
+        mode = _training_mode(raw, config_path, notices)
         payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
         if selected_image:
             payload["imageTag"] = selected_image
@@ -1199,39 +1213,6 @@ def create_run(
             "and already-merged PRs are not supported."
         ),
     ),
-    full_finetune: bool = typer.Option(
-        False,
-        "--full-finetune",
-        "--fft",
-        hidden=True,
-        help=(
-            "Deprecated: every RL config now runs as a full fine-tune on a "
-            "dedicated cluster, so this flag is a no-op."
-        ),
-    ),
-    sft: bool = typer.Option(
-        False,
-        "--sft",
-        help=(
-            "Dispatch this config as a supervised fine-tune on the dedicated "
-            "training path. Usually unnecessary — an SFT config (a [data] "
-            "block and no [trainer]/[orchestrator]) is auto-detected. "
-            "Hosted SFT is trainer-only: [eval], [inference], and "
-            "[weight_broadcast] blocks are rejected. Datasets are local "
-            "files on a named volume (pass --volume): the run mounts that "
-            "volume read-only at /volume, so data.name points at a path "
-            "on it (e.g. /volume/datasets/<name> or the relative "
-            '"datasets/<name>" — the platform resolves it); outputs land '
-            "under runs/<runId>/ on the same volume. Get datasets there "
-            "yourself with `prime volumes ssh <volume> --read-write` and "
-            "the huggingface CLI inside that session (hf download <repo> "
-            "--repo-type dataset --local-dir datasets/<name>): materialize "
-            "HF load_dataset-readable files (Parquet/JSON, not "
-            "save_to_disk) into the volume's datasets/ directory, then "
-            "verify with a fresh-process load_dataset check. Without "
-            "--volume, only fake datasets work."
-        ),
-    ),
     resume_from: Optional[str] = typer.Option(
         None,
         "--resume-from",
@@ -1246,20 +1227,13 @@ def create_run(
     Example:
 
         prime train rl.toml
-        prime train sft.toml --sft
-        prime train sft.toml --sft --volume research
+        prime train sft.toml --volume research
+        prime train pretrain.toml --volume research
+
+    The config's top-level `mode` ("rl", "sft" or "pretrain") picks the run kind.
     """
     validate_output_format(output, console)
 
-    # Mutually exclusive run kinds: accepting both would silently resolve
-    # to whichever branch is checked first. --full-finetune/--fft is
-    # otherwise a no-op now that every RL run is dedicated.
-    if sft and full_finetune:
-        console.print(
-            "[red]Error:[/red] --sft and --full-finetune/--fft are mutually "
-            "exclusive — pick the run kind matching the config."
-        )
-        raise typer.Exit(1)
     if ref is not None and pr is not None:
         console.print("[red]Error:[/red] --ref and --pr are mutually exclusive.")
         raise typer.Exit(1)
@@ -1280,20 +1254,13 @@ def create_run(
 
     # Dispatch routing (see `_training_mode`). Unset [deployment] sizing
     # falls through to prime-rl's own default, same as a local run.
-    mode: Optional[str] = _training_mode(raw_cfg, sft=sft)
-    if mode == "sft" and full_finetune:
-        console.print(
-            f"[red]Error:[/red] {config_path} looks like an SFT config "
-            "(a \\[data] block, no \\[trainer]/\\[orchestrator]) but "
-            "--full-finetune/--fft was passed. Use --sft instead."
+    try:
+        mode: Optional[str] = _training_mode(
+            raw_cfg, config_path, get_console(stderr=True) if output == "json" else console
         )
-        raise typer.Exit(1)
-    if mode == "pretrain" and full_finetune:
-        console.print(
-            f"[red]Error:[/red] {config_path} is a pretrain config (datatrove "
-            "\\[data]) but --full-finetune/--fft was passed. Remove it."
-        )
-        raise typer.Exit(1)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
+        raise typer.Exit(1) from exc
     # On SFT and pretrain the volume is also the dataset contract: it is
     # mounted read-only at /volume, so `data.name` (SFT) or `data.paths`
     # (pretrain shards) must point at paths on the volume; the platform

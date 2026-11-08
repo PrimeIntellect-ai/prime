@@ -1506,9 +1506,12 @@ def list_gpus(
 ) -> None:
     """List GPU types you can dispatch a full-FT run on.
 
-    Uses the active team from `prime config` when set, otherwise your
-    personal allocations. Pass any value to `prime train run
-    --gpu-type <value>` to steer dispatch.
+    Reserved types (your team's or your own allocations) plus the types
+    sold on-demand, which is what dispatch accepts: placement picks
+    reserved capacity for the types you already hold and the billed
+    shared pool for the rest. Uses the active team from `prime config`
+    when set, otherwise your personal allocations. Pass any value to
+    `prime train run --gpu-type <value>` to steer dispatch.
     """
     validate_output_format(output, console)
 
@@ -1522,7 +1525,13 @@ def list_gpus(
         raise typer.Exit(1)
 
     if output == "json":
-        output_data_as_json({"gpuTypes": response.gpu_types}, console)
+        output_data_as_json(
+            {
+                "gpuTypes": response.gpu_types,
+                "onDemandGpuTypes": response.on_demand_gpu_types,
+            },
+            console,
+        )
         return
 
     if not response.gpu_types:
@@ -1531,9 +1540,15 @@ def list_gpus(
         )
         return
 
+    # A flat list hid the one difference that costs money, so the
+    # on-demand ones are marked. `prime train models` carries the rates.
+    on_demand = set(response.on_demand_gpu_types)
     console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
     for gpu_type in response.gpu_types:
-        console.print(f"  [cyan]{gpu_type}[/cyan]")
+        suffix = "  [dim](on-demand, billed per GPU-hour)[/dim]" if gpu_type in on_demand else ""
+        console.print(f"  [cyan]{gpu_type}[/cyan]{suffix}")
+    if on_demand:
+        console.print("[dim]Rates: `prime train models`[/dim]")
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:

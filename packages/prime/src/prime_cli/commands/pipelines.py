@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, NoReturn, Optional
 from urllib.parse import quote
 
 import httpx
@@ -23,7 +23,7 @@ app = PlainTyper(
 console = get_console()
 
 
-def _fail(error: Exception) -> None:
+def _fail(error: Exception) -> NoReturn:
     console.print(f"[red]Error:[/red] {escape(str(error))}")
     raise typer.Exit(1)
 
@@ -121,6 +121,8 @@ def status(
         console.print(
             f"[yellow]Waiting on you[/yellow] at {escape(where)}: {escape(card['question'])}"
         )
+    if state.get("cards"):
+        console.print(f"Answer with: prime pipelines cards {found['id']}")
     if cost := (state.get("cost") or {}).get("usd"):
         console.print(f"Cost so far: ${cost:.2f}")
     for out in found.get("outputs") or []:
@@ -184,3 +186,161 @@ def stop(run_id: str = typer.Argument(..., help="The run's id.")) -> None:
     except APIError as error:
         _fail(error)
     _summary(stopped)
+
+
+def _run(run_id: str) -> dict[str, Any]:
+    try:
+        return APIClient().get(f"/pipelines/runs/{quote(run_id, safe='')}")
+    except APIError as error:
+        _fail(error)
+
+
+def _control(run_id: str, control: dict[str, Any]) -> int:
+    """Queue a control for the run; its seq."""
+    try:
+        queued = APIClient().post(
+            f"/pipelines/runs/{quote(run_id, safe='')}/control", json={"control": control}
+        )
+    except APIError as error:
+        _fail(error)
+    return int(queued["seq"])
+
+
+def _kind(card: dict[str, Any]) -> str:
+    """As the canvas reads a card: options to choose from, items to keep, or a question."""
+    if card.get("options"):
+        return "choice"
+    return "review" if card.get("items") else "question"
+
+
+@app.command("cards")
+def cards(
+    run_id: str = typer.Argument(..., help="The run's id."),
+    output: str = typer.Option("table", "--output", "-o", help="table or json"),
+) -> None:
+    """The cards a run is waiting on you to answer, and how to answer each."""
+    validate_output_format(output, console)
+    state = _run(run_id).get("state") or {}
+    waiting = state.get("cards") or []
+    skipped = state.get("skipped_controls") or []
+    if output == "json":
+        output_data_as_json({"cards": waiting, "skipped_controls": skipped}, console)
+        return
+    for control in skipped:
+        console.print(
+            f"[red]Not applied[/red] (control {control['seq']}): {escape(control['error'])}"
+        )
+    if not waiting:
+        console.print("Nothing is waiting on you.")
+        return
+    for card in waiting:
+        kind = _kind(card)
+        console.print(
+            f"[bold]{escape(card['node'])}[/bold] (job {escape(card['job'])}), {kind}: "
+            f"{escape(card['question'])}"
+        )
+        if card.get("reason"):
+            console.print(f"  {escape(card['reason'])}")
+        if kind == "choice":
+            console.print(f"  Options: {escape(', '.join(card['options']))}")
+        for item in card.get("items") if kind == "review" else []:
+            console.print(f"  - {escape(item)}")
+        where = f"{run_id} --node {card['node']} --job {card['job']}"
+        how = {
+            "choice": "--choice OPTION",
+            "review": "--keep ITEM ... | --drop ITEM ... | --keep-all",
+            "question": "--note TEXT",
+        }[kind]
+        console.print(f"  Answer: prime pipelines reply {escape(where)} {escape(how)}")
+
+
+def _card(waiting: list[dict[str, Any]], node: Optional[str], job: Optional[str]) -> dict[str, Any]:
+    """The one waiting card at `node` and `job`; either may be left out while only one matches."""
+    matches = [
+        card
+        for card in waiting
+        if (node is None or card["node"] == node) and (job is None or card["job"] == job)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        _fail(ValueError("no waiting card matches; see prime pipelines cards"))
+    listed = ", ".join(f"--node {c['node']} --job {c['job']}" for c in matches)
+    _fail(ValueError(f"{len(matches)} cards match; name one with {listed}"))
+
+
+@app.command("reply")
+def reply(
+    run_id: str = typer.Argument(..., help="The run's id."),
+    node: Optional[str] = typer.Option(
+        None, "--node", help="The card's node (needed when several cards wait)."
+    ),
+    job: Optional[str] = typer.Option(
+        None, "--job", help="The card's job (needed when a node has several cards)."
+    ),
+    choice: Optional[str] = typer.Option(None, "--choice", help="One of the card's options."),
+    keep: List[str] = typer.Option(
+        [], "--keep", help="On a review, an item to keep; the rest are dropped. Repeat for more."
+    ),
+    drop: List[str] = typer.Option(
+        [], "--drop", help="On a review, an item to drop; the rest are kept. Repeat for more."
+    ),
+    keep_all: bool = typer.Option(False, "--keep-all", help="On a review, keep every item."),
+    note: str = typer.Option(
+        "", "--note", help="A note for the next step; the answer itself on a question."
+    ),
+) -> None:
+    """Answer a card the run is waiting on, as the canvas does."""
+    card = _card((_run(run_id).get("state") or {}).get("cards") or [], node, job)
+    kind = _kind(card)
+    answer: dict[str, Any] = {"note": note}
+    if kind != "choice" and choice is not None:
+        _fail(ValueError(f"this card is a {kind}; it has no options to choose from"))
+    if kind != "review" and (keep or drop or keep_all):
+        _fail(ValueError(f"this card is a {kind}; it has no items to keep"))
+    if kind == "choice":
+        if choice not in card["options"]:
+            _fail(ValueError(f"choose one of: {', '.join(card['options'])}"))
+        answer["choice"] = choice
+    elif kind == "review":
+        if sum((bool(keep), bool(drop), keep_all)) != 1:
+            _fail(ValueError("say what to keep with one of --keep, --drop or --keep-all"))
+        unknown = [item for item in (*keep, *drop) if item not in card["items"]]
+        if unknown:
+            _fail(ValueError(f"not an item of this card: {', '.join(unknown)}"))
+        if keep_all:
+            keep = list(card["items"])
+        elif drop:
+            keep = [item for item in card["items"] if item not in drop]
+        answer["keep"] = [item for item in card["items"] if item in keep]
+    elif not note.strip():
+        _fail(ValueError("answer the question with --note"))
+    seq = _control(
+        run_id, {"type": "reply", "job": card["job"], "node": card["node"], "reply": answer}
+    )
+    kept = f", keeping {len(answer['keep'])} of {len(card['items'])}" if kind == "review" else ""
+    console.print(
+        f"Sent (control {seq}){escape(kept)}. The run picks it up in a few seconds; "
+        f"if it can't, prime pipelines cards {escape(run_id)} says why."
+    )
+
+
+@app.command("refresh")
+def refresh(
+    run_id: str = typer.Argument(..., help="The run's id."),
+    node: str = typer.Argument(..., help="A live node of the run's graph."),
+) -> None:
+    """Fetch a live node again: the run relaunches, rerunning it and whatever its new output
+    reaches."""
+    seq = _control(run_id, {"type": "refresh", "node": node})
+    console.print(
+        f"Sent (control {seq}). The run drains and relaunches with {escape(node)} fetched again."
+    )
+
+
+@app.command("drain")
+def drain(run_id: str = typer.Argument(..., help="The run's id.")) -> None:
+    """Wind a run down: it starts no new work, waits for what's running, then ends. Stop ends it
+    at once."""
+    seq = _control(run_id, {"type": "drain"})
+    console.print(f"Sent (control {seq}). The run ends once what's running finishes.")

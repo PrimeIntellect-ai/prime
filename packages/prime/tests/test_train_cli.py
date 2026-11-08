@@ -26,8 +26,6 @@ def test_train_help_promotes_config_run_path() -> None:
     assert "request" in result.output
     # Retired with shared LoRA training: both only knew the LoRA schema.
     assert not re.search(r"^│\s+(init|configs)\s", result.output, re.M)
-    # --fft is a deprecated no-op: still parsed, no longer advertised.
-    assert "--full-finetune" not in result.output
 
 
 def test_rl_alias_is_hidden_from_root_help() -> None:
@@ -90,28 +88,27 @@ def test_train_rejects_lora_config_without_dispatch(monkeypatch, tmp_path: Path)
     cfg = tmp_path / "rl.toml"
     for body in (_LORA_CONFIG, 'model = "Qwen/Qwen3-0.6B"\n'):
         cfg.write_text(body)
-        for args in ([], ["--fft"]):
-            result = runner.invoke(app, ["train", str(cfg), *args, "-y"], env=TEST_ENV)
-            assert result.exit_code == 1, (body, args)
-            assert "shared LoRA training config" in result.output
-            assert "prime-rl" in result.output
+        result = runner.invoke(app, ["train", str(cfg), "-y"], env=TEST_ENV)
+        assert result.exit_code == 1, body
+        assert "shared LoRA training config" in result.output
+        assert "prime-rl" in result.output
     assert captured == []
 
 
 def test_train_rl_config_dispatches_without_deployment_block(monkeypatch, tmp_path: Path) -> None:
     """The same prime-rl config runs locally and hosted: an unset
-    [deployment] falls through to prime-rl's own default sizing, with or
-    without the now no-op --fft flag."""
+    [deployment] falls through to prime-rl's own default sizing."""
     captured = _capture_fft_dispatch(monkeypatch)
     cfg = tmp_path / "rl.toml"
-    cfg.write_text('max_steps = 20\n\n[model]\nname = "Qwen/Qwen3-0.6B"\n\n[orchestrator]\n')
-    for args in ([], ["--fft"], ["--full-finetune"]):
-        result = runner.invoke(app, ["train", str(cfg), *args, "-y", "-o", "json"], env=TEST_ENV)
-        assert result.exit_code == 0, (args, result.output)
-        assert json.loads(result.output)["run"]["runId"] == "r1"
-    assert len(captured) == 3
-    assert all("deployment" not in p["config"] for p in captured)
-    assert all(p.get("mode") in (None, "rl") for p in captured)
+    cfg.write_text(
+        'mode = "rl"\nmax_steps = 20\n\n[model]\nname = "Qwen/Qwen3-0.6B"\n\n[orchestrator]\n'
+    )
+    result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["run"]["runId"] == "r1"
+    assert len(captured) == 1
+    assert "deployment" not in captured[0]["config"]
+    assert "mode" not in captured[0]
 
 
 def test_train_reports_missing_and_invalid_config(monkeypatch, tmp_path: Path) -> None:
@@ -429,6 +426,7 @@ def test_train_resume(monkeypatch, response, exit_code, expected_output) -> None
 
 
 _FFT_BODY = (
+    'mode = "rl"\n\n'
     '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
 )
 
@@ -769,12 +767,10 @@ def test_train_source_overlay_reaches_the_sft_payload(monkeypatch, tmp_path: Pat
     sft = '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[data]\nname = "/volume/datasets/x"\n'
     cfg.write_text(sft)
     result = runner.invoke(
-        app, ["train", str(cfg), "--sft", "--ref", "feat/x", "-y", "-o", "json"], env=TEST_ENV
+        app, ["train", str(cfg), "--ref", "feat/x", "-y", "-o", "json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    result = runner.invoke(
-        app, ["train", str(cfg), "--sft", "--pr", "42", "-y", "-o", "json"], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y", "-o", "json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert [(p["mode"], p["sourceRef"]) for p in captured] == [("sft", "feat/x"), ("sft", sha)]
 

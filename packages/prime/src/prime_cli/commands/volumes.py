@@ -36,7 +36,7 @@ from rich.text import Text
 
 from prime_cli import volume_objects
 from prime_cli.api.training import HostedTrainingClient, VolumeTransfer
-from prime_cli.core import APIClient, APIError, Config, NotFoundError
+from prime_cli.core import APIClient, APIError, APITimeoutError, Config, NotFoundError
 from prime_cli.volume_gateway import GatewayError, relay
 
 from ..utils import (
@@ -105,6 +105,13 @@ def create(
         volume = client.create_volume(name, size, team_id=team_id, cluster=cluster, warm=warm)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
+        if isinstance(e, APITimeoutError) or "already exists" in str(e):
+            # A create the CLI gave up on still finishes server-side, so a
+            # retry then reports the name as taken (ENG-7624).
+            console.print(
+                "A create that timed out may still have gone through: "
+                f"run `prime volumes list` to check for {name!r} before retrying."
+            )
         raise typer.Exit(1)
     if output == "json":
         output_data_as_json(volume.model_dump(by_alias=True), console)

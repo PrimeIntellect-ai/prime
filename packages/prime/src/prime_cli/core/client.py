@@ -220,9 +220,10 @@ class APIClient:
         endpoint: str,
         json: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[Union[float, httpx.Timeout]] = None,
     ) -> Dict[str, Any]:
-        """Make a PATCH request to the API"""
-        return self.request("PATCH", endpoint, json=json, params=params)
+        """Make a PATCH request to the API (timeout: per-request override)"""
+        return self.request("PATCH", endpoint, json=json, params=params, timeout=timeout)
 
     def delete(
         self,

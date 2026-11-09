@@ -322,3 +322,48 @@ def test_volumes_list_preserves_literal_creator_text(monkeypatch, args, over, sh
     assert result.exit_code == 0, _text(result)
     assert shown in _text(result)
     assert "\\[" not in _text(result)
+
+
+def test_volume_create_and_expand_wait_past_the_default_timeout(monkeypatch):
+    """ENG-7624: create/expand take 40-60s on prod for a busy team wallet;
+    the 30s default gave up while the volume was still being created."""
+    import httpx
+    from prime_cli.api.training import VOLUME_WRITE_TIMEOUT
+    from prime_cli.core import APIClient
+
+    seen = []
+    wire = {"name": "v", "size": "1Gi", "status": "RUNNING", "clusterId": "", "pvcName": ""}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.extensions["timeout"]["read"]))
+        return httpx.Response(200, json=wire)
+
+    monkeypatch.setenv("PRIME_API_KEY", "test-key")
+    api = APIClient()
+    api.client = httpx.Client(transport=httpx.MockTransport(handler), timeout=30.0)
+    client = HostedTrainingClient(api)
+    client.create_volume("v", "1Gi", team_id="team1")
+    client.expand_volume("v", "2Gi", team_id="team1")
+    assert seen == [("POST", VOLUME_WRITE_TIMEOUT.read), ("PATCH", VOLUME_WRITE_TIMEOUT.read)]
+    assert VOLUME_WRITE_TIMEOUT.read > 60
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Request timed out: The read operation timed out",
+        "HTTP 400: volume 'v' already exists",
+    ],
+)
+def test_create_timeout_or_taken_name_points_at_list(monkeypatch, error):
+    from prime_cli.core import APITimeoutError
+
+    exc = APITimeoutError(error) if "timed out" in error else APIError(error)
+
+    def create_volume(*_a, **_kw):
+        raise exc
+
+    _client(monkeypatch, create_volume=create_volume)
+    result = _run("create", "v", "--size", "1Gi")
+    assert result.exit_code == 1
+    assert "prime volumes list" in _text(result)

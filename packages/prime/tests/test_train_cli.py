@@ -964,6 +964,34 @@ def test_train_get_prints_a_shared_runs_cluster(monkeypatch) -> None:
     assert "Cluster: oes1yd0lubfsku6iekofnoau" in result.output
 
 
+@pytest.mark.parametrize(
+    "resumed_from, expected",
+    [
+        ({"runId": "parent-run", "step": 120}, "Resumed from: run parent-run @ step 120"),
+        ({"dir": "/data/ckpts/step_50"}, "Resumed from: /data/ckpts/step_50"),
+        (None, None),
+    ],
+)
+def test_train_get_prints_resumed_from(monkeypatch, resumed_from, expected) -> None:
+    from prime_cli.api.rl import RLRun
+
+    payload = _fake_run_payload("RUNNING")
+    if resumed_from is not None:
+        payload["resumedFrom"] = resumed_from
+    run = RLRun.model_validate(payload)
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-1"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    if expected:
+        assert expected in result.output
+    else:
+        assert "Resumed from" not in result.output
+
+
 def _run_with_restarts(monkeypatch, restarts):
     from prime_cli.api.rl import RLRun
 

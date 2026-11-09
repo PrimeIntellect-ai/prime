@@ -32,6 +32,16 @@ class RunRestarts(BaseModel):
     failures: List[RunFailure] = Field(default_factory=list)
 
 
+class ResumedFrom(BaseModel):
+    """Where a run resumed from: a run's checkpoint step, or a raw directory."""
+
+    run_id: Optional[str] = Field(None, alias="runId")
+    step: Optional[int] = None
+    dir: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class RLRun(BaseModel):
     """Hosted Training run."""
 
@@ -109,6 +119,9 @@ class RLRun(BaseModel):
     # image when the run was dispatched with `--ref` / `--pr`. None for runs
     # that use the image's baked source.
     source_commit: Optional[str] = Field(None, alias="sourceCommit")
+
+    # Only set on the run-detail read; None for runs that did not resume.
+    resumed_from: Optional[ResumedFrom] = Field(None, alias="resumedFrom")
 
     model_config = ConfigDict(populate_by_name=True)
 

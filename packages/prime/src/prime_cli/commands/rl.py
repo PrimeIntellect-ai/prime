@@ -1785,6 +1785,13 @@ def get_run(
             console.print(f"  Team: {run.team_id}")
         if run.source_commit:
             console.print(f"  Source Commit: {run.source_commit}")
+        resumed = run.resumed_from
+        if resumed and resumed.run_id:
+            console.print(
+                f"  Resumed from: run {rich_escape(resumed.run_id)} @ step {resumed.step}"
+            )
+        elif resumed and resumed.dir:
+            console.print(f"  Resumed from: {rich_escape(resumed.dir)}")
         console.print(f"  Created: [dim]{formatted['created_at']}[/dim]")
         if run.started_at:
             console.print(f"  Started: [dim]{run.started_at.strftime('%Y-%m-%d %H:%M')}[/dim]")

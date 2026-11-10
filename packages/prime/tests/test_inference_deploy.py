@@ -435,6 +435,86 @@ def test_checkpoint_is_rendered_as_prose_not_a_dict(monkeypatch: pytest.MonkeyPa
     assert "{'runId'" not in out
 
 
+def test_deployments_list_renders_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = FakeAPI(
+        gets=[
+            {
+                "data": [
+                    _deployment(
+                        "RUNNING", replicas=2, gpusPerReplica=2, maxReplicas=4, scaleState="idle"
+                    ),
+                    _deployment(
+                        "PENDING",
+                        id="dep_2",
+                        deploymentName="other",
+                        isOnDemand=False,
+                        replicas=1,
+                        maxReplicas=4,
+                        scaleState="applying",
+                    ),
+                ]
+            }
+        ]
+    )
+    api.install(monkeypatch)
+
+    result, out = _run("inference", "deployments", "list", "--team", "team_1")
+
+    assert result.exit_code == 0, out
+    assert api.calls == [("GET", "/inference/deployments", {"teamId": "team_1"})]
+    row1 = next(ln for ln in out.splitlines() if "dep_1" in ln)
+    assert "2/4" in row1 and "on-demand" in row1
+    row2 = next(ln for ln in out.splitlines() if "dep_2" in ln)
+    # A scale still settling is shown, so the target does not read as achieved.
+    assert "applying" in row2 and "team" in row2
+
+
+def test_deployments_list_without_team_is_personal(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = FakeAPI(gets=[{"data": []}])
+    api.install(monkeypatch)
+
+    result, out = _run("inference", "deployments", "list")
+
+    assert result.exit_code == 0, out
+    # No teamId param: the API scopes a teamless call to the caller.
+    assert api.calls == [("GET", "/inference/deployments", None)]
+    assert "No inference deployments" in out
+
+
+def test_deployments_list_json_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"data": [_deployment("RUNNING", replicas=1)]}
+    FakeAPI(gets=[payload]).install(monkeypatch)
+
+    result, out = _run("inference", "deployments", "list", "-o", "json")
+
+    assert result.exit_code == 0, out
+    assert json.loads(result.stdout) == payload
+
+
+def test_scale_posts_replicas_and_reports_the_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = FakeAPI(post=_deployment("RUNNING", replicas=3, maxReplicas=4, scaleState="applying"))
+    api.install(monkeypatch)
+
+    result, out = _run("inference", "deployments", "scale", "dep_1", "--replicas", "3")
+
+    assert result.exit_code == 0, out
+    assert api.calls == [("POST", "/inference/deployments/dep_1/scale", {"replicas": 3})]
+    assert "3/4" in out and "applying" in out
+    assert "Scaling to 3" in " ".join(out.split())
+
+
+def test_scale_rejects_a_replica_count_the_api_will_not_take(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeAPI()
+    api.install(monkeypatch)
+
+    result, _out = _run("inference", "deployments", "scale", "dep_1", "--replicas", "99")
+
+    assert result.exit_code == 2
+    assert api.calls == []
+
+
 def test_api_error_detail_is_shown_without_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
     request = httpx.Request("POST", "https://api.primeintellect.ai/api/v1/inference/x")
     response = httpx.Response(409, json={"detail": "Run has no team"}, request=request)

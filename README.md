@@ -175,6 +175,10 @@ prime inference deploy <model-catalog-id> --name my-endpoint --replicas 1 --wait
 # Deploy a training checkpoint, then check a deployment's status and endpoint
 prime inference deploy-checkpoint <run-id> --step <N> --wait
 prime inference deployments get <deployment-id>
+
+# List your deployments (--team for a team's), and change a replica count
+prime inference deployments list [--team <team-id>]
+prime inference deployments scale <deployment-id> --replicas 2
 ```
 
 ### GPU Resources

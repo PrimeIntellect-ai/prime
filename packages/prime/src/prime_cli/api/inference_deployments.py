@@ -92,6 +92,12 @@ class InferenceDeployment(BaseModel):
     endpoint_url: Optional[str] = Field(None, alias="endpointUrl")
     checkpoint: Optional[CheckpointRef] = None
     is_on_demand: Optional[bool] = Field(None, alias="isOnDemand")
+    # Manual-scaling read model. `replicas` is the desired count, not the Ready
+    # one; `scale_state` tracks a pending change (idle/applying/blocked).
+    replicas: Optional[int] = None
+    gpus_per_replica: Optional[int] = Field(None, alias="gpusPerReplica")
+    max_replicas: Optional[int] = Field(None, alias="maxReplicas")
+    scale_state: Optional[str] = Field(None, alias="scaleState")
     created_at: Optional[str] = Field(None, alias="createdAt")
     dashboard_url: Optional[str] = Field(None, alias="dashboardUrl")
 
@@ -133,3 +139,13 @@ class InferenceDeploymentsClient:
 
     def get_deployment(self, deployment_id: str) -> Dict[str, Any]:
         return self.client.get(f"/inference/deployments/{deployment_id}")
+
+    def list_deployments(self, team_id: Optional[str] = None) -> Dict[str, Any]:
+        """The team's deployments, or without `team_id` the caller's personal ones."""
+        params = {"teamId": team_id} if team_id else None
+        return self.client.get("/inference/deployments", params=params)
+
+    def scale_deployment(self, deployment_id: str, replicas: int) -> Dict[str, Any]:
+        return self.client.post(
+            f"/inference/deployments/{deployment_id}/scale", json={"replicas": replicas}
+        )

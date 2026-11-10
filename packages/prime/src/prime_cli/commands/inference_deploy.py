@@ -59,7 +59,8 @@ _STATUS_COLORS = {
 
 DEPLOYMENT_JSON_HELP = json_output_help(
     "InferenceDeployment: {id, deploymentName, status, statusPhase?, errorMessage?, "
-    "servedModelAlias, endpointUrl?, checkpoint?, isOnDemand, createdAt, dashboardUrl}",
+    "servedModelAlias, endpointUrl?, checkpoint?, isOnDemand, replicas?, gpusPerReplica?, "
+    "maxReplicas?, scaleState?, createdAt, dashboardUrl}",
 )
 CATALOG_JSON_HELP = json_output_help(
     "InferenceCatalogResponse: {models[] = {id, slug, repo, revision?, displayName, quant?, "
@@ -111,6 +112,23 @@ def _model_gpus_cell(
     return f"{model.min_gpus}x {model.gpu_product or 'any'}"
 
 
+def _replicas_cell(deployment: InferenceDeployment) -> str:
+    """Desired replicas, with the cap and any scale still settling.
+
+    `replicas` is the desired count the control plane is working toward, not
+    the number currently Ready, so a non-idle scaleState is worth showing
+    beside it rather than letting the number read as already achieved.
+    """
+    out = str(deployment.replicas)
+    if deployment.max_replicas:
+        out += f"/{deployment.max_replicas}"
+    if deployment.gpus_per_replica:
+        out += f" ({deployment.gpus_per_replica} GPU/replica)"
+    if deployment.scale_state and deployment.scale_state != "idle":
+        out += f" — {deployment.scale_state}"
+    return out
+
+
 def _print_deployment(deployment: InferenceDeployment) -> None:
     color = _STATUS_COLORS.get(deployment.status, "yellow")
     status = deployment.status
@@ -126,6 +144,8 @@ def _print_deployment(deployment: InferenceDeployment) -> None:
         console.print(f"  Checkpoint: {rich_escape(str(deployment.checkpoint))}")
     if deployment.is_on_demand is not None:
         console.print(f"  Capacity: {'on-demand' if deployment.is_on_demand else 'team cluster'}")
+    if deployment.replicas is not None:
+        console.print(f"  Replicas: {rich_escape(_replicas_cell(deployment))}")
     if deployment.endpoint_url:
         console.print(f"  Endpoint: [cyan]{rich_escape(deployment.endpoint_url)}[/cyan]")
     if deployment.created_at:
@@ -385,6 +405,91 @@ def deploy_checkpoint_command(
 
 
 deployments_app = PlainTyper(help="Inspect inference deployments", no_args_is_help=True)
+
+DEPLOYMENTS_JSON_HELP = json_output_help(
+    "{data[] = InferenceDeployment} — see `prime inference deployments get` for a row's fields",
+)
+
+
+@deployments_app.command("list", epilog=DEPLOYMENTS_JSON_HELP)
+def list_deployments(
+    team: Optional[str] = typer.Option(
+        None, "--team", "-t", help="Team ID (default: your personal deployments)"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List running inference deployments.
+
+    Without --team this is your personal deployments; the account context is
+    not applied, because the API scopes a teamless call to the caller.
+    """
+    validate_output_format(output, console)
+    try:
+        raw = _client().list_deployments(team)
+    except APIError as e:
+        _fail(_err_console(output), str(e))
+
+    if output == "json":
+        output_data_as_json(raw, console)
+        return
+
+    rows = [InferenceDeployment.model_validate(r) for r in raw.get("data", [])]
+    if not rows:
+        console.print("[yellow]No inference deployments.[/yellow]")
+        return
+
+    table = Table(title="Inference Deployments")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Name")
+    table.add_column("Model")
+    table.add_column("Status")
+    table.add_column("Replicas")
+    table.add_column("Capacity")
+    for d in rows:
+        status = d.status + (f" ({d.status_phase})" if d.status_phase else "")
+        table.add_row(
+            _cell(d.id),
+            _cell(d.deployment_name),
+            _cell(d.served_model_alias),
+            Text(status, style=_STATUS_COLORS.get(d.status, "yellow")),
+            _cell(_replicas_cell(d) if d.replicas is not None else None),
+            _cell(None if d.is_on_demand is None else ("on-demand" if d.is_on_demand else "team")),
+        )
+    console.print(table)
+
+
+@deployments_app.command("scale", epilog=DEPLOYMENT_JSON_HELP)
+def scale_deployment(
+    deployment_id: str = typer.Argument(..., help="Deployment ID"),
+    replicas: int = typer.Option(
+        ..., "--replicas", "-r", min=1, max=32, help="Desired replica count"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Set a running deployment's replica count.
+
+    Scaling up reserves and bills the added GPUs. The API accepts the intent
+    and applies it in the background, so the replica count printed back is the
+    target, not what is Ready yet.
+
+    Example:
+
+        prime inference deployments scale <deployment-id> --replicas 2
+    """
+    validate_output_format(output, console)
+    err = _err_console(output)
+    try:
+        raw = _client().scale_deployment(deployment_id, replicas)
+    except APIError as e:
+        _fail(err, str(e))
+    if output == "json":
+        output_data_as_json(raw, console)
+        return
+    _print_deployment(InferenceDeployment.model_validate(raw))
+    console.print(
+        f"\n[dim]Scaling to {replicas}; track it with "
+        f"`prime inference deployments get {deployment_id}`.[/dim]"
+    )
 
 
 @deployments_app.command("get", epilog=DEPLOYMENT_JSON_HELP)

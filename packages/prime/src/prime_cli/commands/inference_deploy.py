@@ -173,14 +173,19 @@ def _wait_for_deployment(
             last_status = current
         if deployment.status == "RUNNING" or deployment.status in _TERMINAL_STATUSES:
             return deployment, raw
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             _fail(
                 err,
                 f"Timed out after {timeout}s waiting for deployment {deployment.id} "
                 f"(status: {deployment.status}). Check it later with "
                 f"`prime inference deployments get {deployment.id}`.",
             )
-        time.sleep(_POLL_INTERVAL_SECONDS)
+        # Never sleep past the deadline: a --timeout under one poll interval
+        # would otherwise overshoot by the whole interval before the last read.
+        # The read that follows is still allowed to finish, so the loop reports
+        # a deployment that did come up rather than a timeout it just missed.
+        time.sleep(min(_POLL_INTERVAL_SECONDS, remaining))
         # The deployment outlives this command, so a blip on one read must not
         # be reported as a failed deploy. Ride out a few, then give up with the
         # last error rather than waiting out the whole timeout on a dead API.

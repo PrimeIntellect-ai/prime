@@ -393,6 +393,24 @@ def test_wait_times_out_with_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "prime inference deployments get dep_1" in flat
 
 
+def test_wait_never_sleeps_past_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A --timeout shorter than one poll interval must not sleep a full interval."""
+    slept: List[float] = []
+    monkeypatch.setattr(inference_deploy.time, "sleep", slept.append)
+    FakeAPI(post=_deployment("PENDING"), gets=[_deployment("PENDING")] * 3).install(monkeypatch)
+    # install() re-stubs sleep, so claim it back afterwards.
+    monkeypatch.setattr(inference_deploy.time, "sleep", slept.append)
+    clock = itertools.count(0.0, 0.25)
+    monkeypatch.setattr(inference_deploy.time, "monotonic", lambda: next(clock))
+
+    result, out = _run("inference", "deploy", "cat_qwen", "--wait", "--timeout", "1")
+
+    assert result.exit_code == 1
+    assert "Timed out after 1s" in " ".join(out.split())
+    assert slept, "expected at least one poll sleep"
+    assert max(slept) <= 1.0, f"slept past the 1s deadline: {slept}"
+
+
 def test_train_deploy_alias_posts_checkpoint_deploy(monkeypatch: pytest.MonkeyPatch) -> None:
     api = FakeAPI(post=_deployment("RUNNING", checkpoint={"runId": "run_1", "step": 100}))
     api.install(monkeypatch)

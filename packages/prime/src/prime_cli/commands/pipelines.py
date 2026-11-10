@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import tempfile
 from pathlib import Path
 from typing import Any, List, NoReturn, Optional
@@ -279,7 +280,8 @@ def cards(
             console.print(f"  Options: {escape(', '.join(card['options']))}")
         for item in card.get("items") if kind == "review" else []:
             console.print(f"  - {escape(item)}")
-        where = f"{run_id} --node {card['node']} --job {card['job']}"
+        # Quoted for a shell: the command is there to be copied, and the names in it are the run's.
+        where = shlex.join([run_id, "--node", card["node"], "--job", card["job"]])
         how = {
             "choice": "--choice OPTION",
             "review": "--keep ITEM ... | --drop ITEM ... | --keep-all",

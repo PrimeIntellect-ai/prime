@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 
 import pytest
 from prime_cli.main import app
+from prime_cli.utils import strip_ansi
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -143,7 +144,8 @@ def test_run_names_the_option_for_an_agreement_the_platform_asks_for(
 def test_run_help_says_what_each_agreement_is(api: Dict[str, Any]) -> None:
     result = runner.invoke(app, ["pipelines", "run", "--help"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
-    text = " ".join(result.output.replace("│", " ").split())
+    # CI renders help in colour, which splits an option's name with escape codes.
+    text = " ".join(strip_ansi(result.output).replace("│", " ").split())
     for expected in ("--allow-host", "--read-personal-traces", "--run-code"):
         assert expected in text
     assert "can use your key and the secrets you pass" in text

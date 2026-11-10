@@ -77,6 +77,55 @@ def test_restore_create_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "disk_size_gb" not in payload
 
 
+def test_restore_memory_requires_checkpoint() -> None:
+    with pytest.raises(ValueError, match="restore_memory requires checkpoint_id"):
+        CreateSandboxRequest(name="fork", docker_image="python:3.11-slim", restore_memory=True)
+
+
+def test_memory_restore_payload_takes_the_paused_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    payloads = []
+
+    def request(method: str, path: str, **kwargs: object) -> dict:
+        payloads.append(kwargs["json"])
+        return sandbox_response()
+
+    monkeypatch.setattr(client.client, "request", request)
+    client.create(CreateSandboxRequest(name="fork", checkpoint_id="pause-1", restore_memory=True))
+    client.create(
+        CreateSandboxRequest(name="fork", checkpoint_id="pause-1", restore_memory=True, cpu_cores=2)
+    )
+    client.create(CreateSandboxRequest(name="cold", checkpoint_id="pause-1"))
+
+    fork, explicit, cold = payloads
+    assert fork["restore_memory"] is True
+    # The defaults would conflict with a paused sandbox of another shape.
+    for field in ("cpu_cores", "memory_gb", "gpu_count", "gpu_type"):
+        assert field not in fork
+    assert explicit["cpu_cores"] == 2
+    assert "memory_gb" not in explicit
+    assert "restore_memory" not in cold
+    assert cold["cpu_cores"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_async_memory_restore_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with AsyncSandboxClient(api_key="test-key") as client:
+        payloads = []
+
+        async def request(method: str, path: str, **kwargs: object) -> dict:
+            payloads.append(kwargs["json"])
+            return sandbox_response()
+
+        monkeypatch.setattr(client.client, "request", request)
+        await client.create(
+            CreateSandboxRequest(name="fork", checkpoint_id="pause-1", restore_memory=True)
+        )
+
+    assert payloads[0]["restore_memory"] is True
+    assert "cpu_cores" not in payloads[0]
+
+
 @pytest.mark.asyncio
 async def test_async_restore_create_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     async with AsyncSandboxClient(api_key="test-key") as client:
@@ -554,11 +603,13 @@ def test_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def request(method: str, path: str) -> dict:
         calls.append((method, path))
-        return sandbox_response()
+        return {**sandbox_response(), "checkpointId": "pause-1"}
 
     monkeypatch.setattr(client.client, "request", request)
-    client.pause("sandbox-1")
+    paused = client.pause("sandbox-1")
     client.resume("sandbox-1")
+
+    assert paused.checkpoint_id == "pause-1"
 
     assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]
 
@@ -570,11 +621,13 @@ async def test_async_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) 
 
         async def request(method: str, path: str) -> dict:
             calls.append((method, path))
-            return sandbox_response()
+            return {**sandbox_response(), "checkpointId": "pause-1"}
 
         monkeypatch.setattr(client.client, "request", request)
-        await client.pause("sandbox-1")
+        paused = await client.pause("sandbox-1")
         await client.resume("sandbox-1")
+
+    assert paused.checkpoint_id == "pause-1"
 
     assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]
 

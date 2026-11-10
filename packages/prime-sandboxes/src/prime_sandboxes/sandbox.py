@@ -87,6 +87,7 @@ from .models import (
     LanNetworkMember,
     LanRule,
     LocalhostForward,
+    PausedSandbox,
     ReadFileResponse,
     Sandbox,
     SandboxCheckpoint,
@@ -144,6 +145,20 @@ _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
 # The platform retries a failed LAN push from its scheduled status sweep.
 _LAN_SYNC_TIMEOUT_SECONDS = 120.0
 _LAN_SYNC_POLL_SECONDS = 2.0
+
+
+# A memory restore continues the paused guest, so its shape comes from the paused
+# sandbox; the server refuses these fields when they differ from it.
+_MEMORY_RESTORE_SHAPE = ("cpu_cores", "memory_gb", "gpu_count", "gpu_type")
+
+
+def _omit_unset_memory_shape(request: CreateSandboxRequest, payload: Dict[str, Any]) -> None:
+    """Drop the shape defaults a memory restore must take from the paused sandbox,
+    keeping only the fields the caller set explicitly."""
+    if request.restore_memory:
+        for field in _MEMORY_RESTORE_SHAPE:
+            if field not in request.model_fields_set:
+                payload.pop(field, None)
 
 
 def _lan_rules_payload(rules: List[LanRule]) -> List[Dict[str, Any]]:
@@ -2470,6 +2485,7 @@ class SandboxClient:
         payload = request.model_dump(
             by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
         )
+        _omit_unset_memory_shape(request, payload)
         # VM is the only runtime; send it explicitly so the created runtime
         # never depends on server-side defaults changing underneath the SDK.
         payload["vm"] = True
@@ -2529,10 +2545,13 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
 
-    def pause(self, sandbox_id: str) -> Sandbox:
-        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously."""
+    def pause(self, sandbox_id: str) -> PausedSandbox:
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously.
+
+        The result carries the pause's ``checkpoint_id``: ``resume`` continues the
+        sandbox, and ``create`` with that checkpoint and ``restore_memory=True`` forks it."""
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/pause")
-        return Sandbox.model_validate(response)
+        return PausedSandbox.model_validate(response)
 
     def resume(self, sandbox_id: str) -> Sandbox:
         """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
@@ -4241,6 +4260,7 @@ class AsyncSandboxClient:
         payload = request.model_dump(
             by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
         )
+        _omit_unset_memory_shape(request, payload)
         # VM is the only runtime; send it explicitly so the created runtime
         # never depends on server-side defaults changing underneath the SDK.
         payload["vm"] = True
@@ -4298,10 +4318,13 @@ class AsyncSandboxClient:
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
 
-    async def pause(self, sandbox_id: str) -> Sandbox:
-        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously."""
+    async def pause(self, sandbox_id: str) -> PausedSandbox:
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously.
+
+        The result carries the pause's ``checkpoint_id``: ``resume`` continues the
+        sandbox, and ``create`` with that checkpoint and ``restore_memory=True`` forks it."""
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/pause")
-        return Sandbox.model_validate(response)
+        return PausedSandbox.model_validate(response)
 
     async def resume(self, sandbox_id: str) -> Sandbox:
         """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""

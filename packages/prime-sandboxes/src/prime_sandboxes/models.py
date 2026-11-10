@@ -481,6 +481,15 @@ class Sandbox(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class PausedSandbox(Sandbox):
+    """A sandbox whose pause was accepted, with the checkpoint the pause froze.
+
+    ``resume`` continues this sandbox. Creating a sandbox with this
+    ``checkpoint_id`` and ``restore_memory=True`` forks it, as often as needed."""
+
+    checkpoint_id: str = Field(alias="checkpointId")
+
+
 class SandboxListResponse(BaseModel):
     """Sandbox list response model"""
 
@@ -629,6 +638,10 @@ class CreateSandboxRequest(BaseModel):
     name: str
     docker_image: Optional[str] = None
     checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    # With checkpoint_id: True restores a pause checkpoint's memory, so the new
+    # sandbox continues from the paused state with the paused sandbox's shape,
+    # environment and secrets. None or False cold boots from the checkpoint's disk.
+    restore_memory: Optional[bool] = None
     # None lets the server default to amd64; checkpoint restores must omit it.
     arch: Optional[Literal["amd64", "arm64"]] = None
     start_command: Optional[StartCommand] = None
@@ -660,6 +673,8 @@ class CreateSandboxRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_restore_source(self) -> "CreateSandboxRequest":
+        if self.restore_memory is not None and not self.checkpoint_id:
+            raise ValueError("restore_memory requires checkpoint_id")
         if self.checkpoint_id:
             if self.docker_image or self.disk_size_gb is not None:
                 raise ValueError("omit docker_image and disk_size_gb when restoring a checkpoint")

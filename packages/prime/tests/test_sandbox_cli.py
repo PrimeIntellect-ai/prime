@@ -156,6 +156,30 @@ def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch
     assert "restored-1" in result.output
 
 
+def test_restore_command_memory_forks_with_the_paused_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: list[Any] = []
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        captured.append(request)
+        return SimpleNamespace(id="forked-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+    forked = runner.invoke(app, ["sandbox", "checkpoint", "restore", "pause-1", "--memory", "-y"])
+    cold = runner.invoke(app, ["sandbox", "checkpoint", "restore", "pause-1", "-y"])
+
+    assert forked.exit_code == 0, forked.output
+    assert cold.exit_code == 0, cold.output
+    memory, disk = captured
+    assert memory.restore_memory is True
+    assert "cpu_cores" not in memory.model_fields_set
+    assert "memory_gb" not in memory.model_fields_set
+    assert disk.restore_memory is None
+    assert disk.cpu_cores == 1.0
+
+
 def test_fork_checkpoints_waits_and_restores(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
     calls: list[Any] = []
@@ -1410,7 +1434,7 @@ def test_pause_and_resume_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def pause(self: Any, sandbox_id: str) -> SimpleNamespace:
         calls.append(("pause", sandbox_id))
-        return SimpleNamespace(status="RUNNING")
+        return SimpleNamespace(status="RUNNING", checkpoint_id="pause-1")
 
     def resume(self: Any, sandbox_id: str) -> SimpleNamespace:
         calls.append(("resume", sandbox_id))
@@ -1422,6 +1446,7 @@ def test_pause_and_resume_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     paused = runner.invoke(app, ["sandbox", "pause", "sandbox-1"])
     assert paused.exit_code == 0, paused.output
     assert "becomes PAUSED" in strip_ansi(paused.output)
+    assert "checkpoint restore pause-1 --memory" in " ".join(strip_ansi(paused.output).split())
 
     resumed = runner.invoke(app, ["sandbox", "resume", "sandbox-1"])
     assert resumed.exit_code == 0, resumed.output

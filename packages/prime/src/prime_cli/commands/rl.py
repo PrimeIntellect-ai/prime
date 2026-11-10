@@ -48,6 +48,7 @@ from ..utils.env_vars import EnvParseError, collect_env_vars
 from ..utils.formatters import format_file_size, strip_ansi
 from ..utils.prompt import confirm_or_skip
 from .feedback import submit_feedback
+from .inference_deploy import DEPLOYMENT_JSON_HELP, deploy_checkpoint_command
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
@@ -2783,3 +2784,10 @@ def list_checkpoints(
 # other run-scoped monitoring commands. Implemented in commands/usage.py and
 # also re-exposed as the top-level `prime usage` summary command.
 app.command("usage", rich_help_panel="Monitoring", epilog=RUN_USAGE_JSON_HELP)(run_usage_command)
+
+
+# `prime train deploy` serves a run's checkpoint; same as
+# `prime inference deploy-checkpoint`, kept next to `checkpoints`.
+app.command("deploy", rich_help_panel="Commands", epilog=DEPLOYMENT_JSON_HELP)(
+    deploy_checkpoint_command
+)

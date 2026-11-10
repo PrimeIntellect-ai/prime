@@ -16,6 +16,14 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.formatters import format_price_per_mtok
+from .inference_deploy import (
+    CATALOG_JSON_HELP,
+    DEPLOYMENT_JSON_HELP,
+    catalog_command,
+    deploy_checkpoint_command,
+    deploy_command,
+    deployments_app,
+)
 
 app = PlainTyper(
     help="Run and manage Prime Inference\n\n"
@@ -586,3 +594,9 @@ def evaluate(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
         raise typer.Exit(1)
+
+
+app.command("catalog", epilog=CATALOG_JSON_HELP)(catalog_command)
+app.command("deploy", epilog=DEPLOYMENT_JSON_HELP)(deploy_command)
+app.command("deploy-checkpoint", epilog=DEPLOYMENT_JSON_HELP)(deploy_checkpoint_command)
+app.add_typer(deployments_app, name="deployments")

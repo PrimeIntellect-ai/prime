@@ -158,6 +158,23 @@ prime train list
 prime train logs <run-id> -f
 prime train metrics <run-id>
 prime train checkpoints <run-id>
+
+# Serve a checkpoint as an OpenAI-compatible endpoint
+prime train deploy <run-id> --step <N> --wait
+```
+
+### Inference Deployments
+
+```bash
+# List deployable models and your team's clusters that can serve them
+prime inference catalog
+
+# Deploy a catalog model (on Prime's on-demand pool unless --cluster is set)
+prime inference deploy <model-catalog-id> --name my-endpoint --replicas 1 --wait
+
+# Deploy a training checkpoint, then check a deployment's status and endpoint
+prime inference deploy-checkpoint <run-id> --step <N> --wait
+prime inference deployments get <deployment-id>
 ```
 
 ### GPU Resources

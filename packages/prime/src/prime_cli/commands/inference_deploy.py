@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 import time
-from typing import Any, Dict, NoReturn, Optional, Tuple
+from typing import Any, Dict, List, NoReturn, Optional, Tuple
 
 import typer
 from pydantic import ValidationError
@@ -16,6 +16,8 @@ from rich.text import Text
 
 from ..api.inference_deployments import (
     InferenceCatalog,
+    InferenceCatalogModel,
+    InferenceClusterCapability,
     InferenceDeployment,
     InferenceDeploymentsClient,
 )
@@ -31,18 +33,39 @@ from ..utils import (
 console = get_console()
 
 _DEPLOYMENT_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-_FAILED_STATUSES = {"FAILED", "STOPPED", "TERMINATED", "CANCELLED"}
+# JobStatus values a deployment never leaves; the non-terminal rest of the
+# enum is PENDING, DEPLOYING and RUNNING. Reaching one of these instead of
+# RUNNING means no usable endpoint, so each ends --wait and exits 1. UNKNOWN
+# counts: the backend writes it once it has lost track of the workload, and
+# polling that for another half hour only delays the bad news.
+_TERMINAL_STATUSES = {
+    "FAILED",
+    "STOPPED",
+    "TERMINATING",
+    "TOMBSTONED",
+    "COMPLETED",
+    "UNKNOWN",
+}
 _POLL_INTERVAL_SECONDS = 5.0
-_STATUS_COLORS = {"RUNNING": "green", "FAILED": "red", "PENDING": "yellow"}
+# A deployment left RUNNING keeps billing, so a blip on one poll must not end
+# the wait: give up only after this many consecutive failed reads.
+_MAX_CONSECUTIVE_POLL_ERRORS = 3
+_STATUS_COLORS = {
+    "RUNNING": "green",
+    "FAILED": "red",
+    "PENDING": "yellow",
+    "DEPLOYING": "yellow",
+}
 
 DEPLOYMENT_JSON_HELP = json_output_help(
     "InferenceDeployment: {id, deploymentName, status, statusPhase?, errorMessage?, "
     "servedModelAlias, endpointUrl?, checkpoint?, isOnDemand, createdAt, dashboardUrl}",
 )
 CATALOG_JSON_HELP = json_output_help(
-    "InferenceCatalogResponse: {models[] = {id, slug, repo, revision, displayName, quant?, "
-    "gpuProduct?, minGpus, maxSeqLen?, enabled, metadata}, clusters[] = {primeClusterId, "
-    "name, displayName?, inferenceEnabled, dynamoProfile?, gpuProducts[], gatewayEndpoint?}}",
+    "InferenceCatalogResponse: {models[] = {id, slug, repo, revision?, displayName, quant?, "
+    "engines[] = {gpuProduct, gpus}, gpuProduct?, minGpus, maxSeqLen?, enabled, metadata}, "
+    "clusters[] = {primeClusterId, name, displayName?, inferenceEnabled, dynamoProfile?, "
+    "gpuProducts[], gatewayReady, modelGpus{}}}",
 )
 
 
@@ -64,6 +87,25 @@ def _cell(value: Any) -> Text:
     # Catalog values are upstream data; Text renders them literally so
     # Rich markup inside a name cannot restyle the table.
     return Text("—" if value in (None, "") else str(value))
+
+
+def _model_gpus_cell(
+    model: InferenceCatalogModel, clusters: List[InferenceClusterCapability]
+) -> str:
+    """What the model costs to run, from the caller's own clusters where possible.
+
+    `modelGpus` is the authority: it already accounts for which engine each
+    cluster runs the model with, so it can differ from the model's preferred
+    engine (8x RTX-PRO as declared, 4x H200 on the cluster you actually own).
+    With no team clusters the preferred engine is all there is to report.
+    """
+    per_cluster = {c.model_gpus[model.id] for c in clusters if model.id in c.model_gpus}
+    if per_cluster:
+        counts = "/".join(str(g) for g in sorted(per_cluster))
+        return f"{counts}x on your clusters"
+    if clusters:
+        return "not runnable here"
+    return f"{model.min_gpus}x {model.gpu_product or 'any'}"
 
 
 def _print_deployment(deployment: InferenceDeployment) -> None:
@@ -119,13 +161,14 @@ def _wait_for_deployment(
     deployment = InferenceDeployment.model_validate(raw)
     deadline = time.monotonic() + timeout
     last_status = None
+    poll_errors = 0
     while True:
         phase = f" ({deployment.status_phase})" if deployment.status_phase else ""
         current = deployment.status + phase
         if current != last_status:
             err.print(f"[dim]{rich_escape(deployment.id)}: {rich_escape(current)}[/dim]")
             last_status = current
-        if deployment.status == "RUNNING" or deployment.status in _FAILED_STATUSES:
+        if deployment.status == "RUNNING" or deployment.status in _TERMINAL_STATUSES:
             return deployment, raw
         if time.monotonic() >= deadline:
             _fail(
@@ -135,7 +178,23 @@ def _wait_for_deployment(
                 f"`prime inference deployments get {deployment.id}`.",
             )
         time.sleep(_POLL_INTERVAL_SECONDS)
-        raw = client.get_deployment(deployment.id)
+        # The deployment outlives this command, so a blip on one read must not
+        # be reported as a failed deploy. Ride out a few, then give up with the
+        # last error rather than waiting out the whole timeout on a dead API.
+        try:
+            raw = client.get_deployment(deployment.id)
+        except APIError as e:
+            poll_errors += 1
+            if poll_errors >= _MAX_CONSECUTIVE_POLL_ERRORS:
+                _fail(
+                    err,
+                    f"Lost contact with the API while waiting for deployment "
+                    f"{deployment.id} ({e}). It is still running: check it with "
+                    f"`prime inference deployments get {deployment.id}`.",
+                )
+            err.print(f"[dim]{rich_escape(deployment.id)}: poll failed, retrying[/dim]")
+            continue
+        poll_errors = 0
         deployment = InferenceDeployment.model_validate(raw)
 
 
@@ -162,7 +221,7 @@ def _finish_deploy(
                 "or rerun with --wait.[/dim]"
             )
 
-    if deployment.status in _FAILED_STATUSES:
+    if deployment.status in _TERMINAL_STATUSES:
         raise typer.Exit(1)
 
 
@@ -205,7 +264,7 @@ def catalog_command(
             _cell(m.display_name),
             _cell(m.repo),
             _cell(m.quant),
-            _cell(f"{m.min_gpus}x {m.gpu_product or 'any'}"),
+            _cell(_model_gpus_cell(m, catalog.clusters)),
             _cell(m.max_seq_len),
         )
     console.print(table)
@@ -294,6 +353,8 @@ def deploy_checkpoint_command(
     """Deploy a training run's checkpoint as an OpenAI-compatible endpoint.
 
     Returns the existing deployment if that checkpoint is already served.
+
+    Also available as `prime train deploy`, next to `prime train checkpoints`.
 
     Example:
 

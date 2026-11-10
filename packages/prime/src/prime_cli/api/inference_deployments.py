@@ -7,18 +7,30 @@ from pydantic import BaseModel, ConfigDict, Field
 from prime_cli.core import APIClient
 
 
+class InferenceEngine(BaseModel):
+    """One way to run a model: this many GPUs of this product."""
+
+    gpu_product: str = Field(..., alias="gpuProduct")
+    gpus: int
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class InferenceCatalogModel(BaseModel):
     id: str
     slug: str
     repo: str
-    revision: str
+    # Null for a model pinned to its repo's default branch.
+    revision: Optional[str] = None
     display_name: str = Field(..., alias="displayName")
     quant: Optional[str] = None
-    # Raw nvidia.com/gpu.product label; None means any GPU.
+    # Every GPU product the model runs on, in the operator's preference order.
+    engines: List[InferenceEngine] = Field(default_factory=list)
+    # The preferred engine, flattened by the API for pre-`engines` clients.
     gpu_product: Optional[str] = Field(None, alias="gpuProduct")
     min_gpus: int = Field(1, alias="minGpus")
     max_seq_len: Optional[int] = Field(None, alias="maxSeqLen")
-    enabled: bool
+    enabled: bool = True
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(populate_by_name=True)
@@ -28,22 +40,43 @@ class InferenceClusterCapability(BaseModel):
     prime_cluster_id: str = Field(..., alias="primeClusterId")
     name: str
     display_name: Optional[str] = Field(None, alias="displayName")
-    inference_enabled: bool = Field(..., alias="inferenceEnabled")
+    inference_enabled: bool = Field(False, alias="inferenceEnabled")
     dynamo_profile: Optional[str] = Field(None, alias="dynamoProfile")
     gpu_products: List[str] = Field(default_factory=list, alias="gpuProducts")
-    # Internal tailscale address: only used to derive readiness, never displayed.
-    gateway_endpoint: Optional[str] = Field(None, alias="gatewayEndpoint")
+    # The shared gateway is up. The API reports readiness only; the gateway's
+    # address is tailnet-internal and never leaves the backend.
+    gateway_ready: bool = Field(False, alias="gatewayReady")
+    # Transition shim: before platform#7676 the API sent the address instead of
+    # the bit, so a CLI release reaching users ahead of that rollout would read
+    # every cluster as not ready. Never rendered. Drop once prod has shipped.
+    legacy_gateway_endpoint: Optional[str] = Field(None, alias="gatewayEndpoint")
+    # Catalog model id -> GPUs per replica of the engine this cluster runs it
+    # with. A model absent from the map is one this cluster cannot run.
+    model_gpus: Dict[str, int] = Field(default_factory=dict, alias="modelGpus")
 
     model_config = ConfigDict(populate_by_name=True)
 
     @property
     def ready(self) -> bool:
-        return self.inference_enabled and bool(self.gateway_endpoint)
+        gateway_up = self.gateway_ready or bool(self.legacy_gateway_endpoint)
+        return self.inference_enabled and gateway_up
 
 
 class InferenceCatalog(BaseModel):
     models: List[InferenceCatalogModel]
     clusters: List[InferenceClusterCapability]
+
+
+class CheckpointRef(BaseModel):
+    """The training run checkpoint a deployment serves."""
+
+    run_id: str = Field(..., alias="runId")
+    step: int
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    def __str__(self) -> str:
+        return f"run {self.run_id} @ step {self.step}"
 
 
 class InferenceDeployment(BaseModel):
@@ -57,7 +90,7 @@ class InferenceDeployment(BaseModel):
     served_model_alias: Optional[str] = Field(None, alias="servedModelAlias")
     # OpenAI-compatible base URL; set once the deployment is RUNNING.
     endpoint_url: Optional[str] = Field(None, alias="endpointUrl")
-    checkpoint: Optional[Any] = None
+    checkpoint: Optional[CheckpointRef] = None
     is_on_demand: Optional[bool] = Field(None, alias="isOnDemand")
     created_at: Optional[str] = Field(None, alias="createdAt")
     dashboard_url: Optional[str] = Field(None, alias="dashboardUrl")

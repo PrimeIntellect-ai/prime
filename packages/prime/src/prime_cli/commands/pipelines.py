@@ -38,6 +38,17 @@ def _summary(run: dict[str, Any]) -> None:
         console.print(f"[red]{escape(run['error'])}[/red]")
 
 
+AGREEMENTS = {"read_personal_traces": "--read-personal-traces", "run_code": "--run-code"}
+"""What a team run asks its starter to agree to, as the platform's request names it, and the option
+that agrees."""
+
+
+def _with_options(error: APIError, agreed: set[str]) -> APIError:
+    """The platform's refusal, with the option for an agreement it asks for by its field name."""
+    wanted = [o for name, o in AGREEMENTS.items() if name in str(error) and name not in agreed]
+    return APIError(f"{error} To agree, pass {' and '.join(wanted)}.") if wanted else error
+
+
 @app.command("run")
 def run(
     graph: Path = typer.Argument(
@@ -57,7 +68,26 @@ def run(
     secret: List[str] = typer.Option(
         [],
         "--secret",
-        help="A secret a Custom node names, read from your environment by name. Repeat for more.",
+        help="A secret a Code node names, read from your environment by name. Repeat for more.",
+    ),
+    allow_host: List[str] = typer.Option(
+        [],
+        "--allow-host",
+        help="A host this run's machine may reach besides the platform's, such as api.github.com. "
+        "Repeat for more.",
+    ),
+    read_personal_traces: bool = typer.Option(
+        False,
+        "--read-personal-traces",
+        help="On a team run: agree that Traces inputs set to your personal account read your "
+        "personal traces into outputs the team can see.",
+    ),
+    run_code: bool = typer.Option(
+        False,
+        "--run-code",
+        help="On a team run: agree to run the graph's Code nodes. Their source, which any member "
+        "of the team may have saved, runs on the run's machine, where it can use your key and the "
+        "secrets you pass. Read it first.",
     ),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:
@@ -76,11 +106,15 @@ def run(
         "pipeline_id": pipeline_id,
         "sample": sample,
         "secrets": {name: os.environ[name] for name in secret},
+        "network": {"allow": allow_host},
+        "read_personal_traces": read_personal_traces,
+        "run_code": run_code,
     }
+    agreed = {name for name in AGREEMENTS if body[name]}
     try:
         started = APIClient().post("/pipelines/runs", json=body, timeout=120)
     except APIError as error:
-        _fail(error)
+        _fail(_with_options(error, agreed))
     if output == "json":
         output_data_as_json(started, console)
         return

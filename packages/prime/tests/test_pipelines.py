@@ -79,6 +79,76 @@ def test_run_saves_a_new_version_of_a_named_pipeline(api: Dict[str, Any], tmp_pa
     assert "Pipeline: p1" in result.output
 
 
+def test_run_sends_the_hosts_it_adds_and_what_its_starter_agreed_to(
+    api: Dict[str, Any], tmp_path
+) -> None:
+    graph = tmp_path / "g.json"
+    graph.write_text(json.dumps({"name": "g", "nodes": {}}))
+    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    body = api["post"][1]
+    assert body["network"] == {"allow": []}
+    assert (body["read_personal_traces"], body["run_code"]) == (False, False)
+
+    hosts = ["--allow-host", "api.github.com", "--allow-host", "*.example.com"]
+    result = runner.invoke(
+        app,
+        ["pipelines", "run", str(graph), *hosts, "--read-personal-traces", "--run-code"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    body = api["post"][1]
+    assert body["network"] == {"allow": ["api.github.com", "*.example.com"]}
+    assert (body["read_personal_traces"], body["run_code"]) == (True, True)
+
+
+@pytest.mark.parametrize(
+    ("detail", "passed", "hint"),
+    [
+        (
+            "The Code nodes ['glue'] run code saved in this team's pipeline on the run's "
+            "machine. Read their source, then start the run with run_code to agree.",
+            [],
+            "To agree, pass --run-code.",
+        ),
+        (
+            "The Traces inputs ['mine'] read your personal traces into outputs this team can "
+            "see. Start the run with read_personal_traces to agree.",
+            ["--run-code"],
+            "To agree, pass --read-personal-traces.",
+        ),
+        ("No Code node of the graph names the secrets ['X']", [], None),
+        # Already agreed to: the refusal is about something else, so no option is suggested.
+        ("run_code is not available here", ["--run-code"], None),
+    ],
+)
+def test_run_names_the_option_for_an_agreement_the_platform_asks_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, detail, passed, hint
+) -> None:
+    from prime_cli.client import APIError
+
+    def post(self: Any, endpoint: str, json: Any = None, timeout: Any = None) -> Dict[str, Any]:
+        raise APIError(f"HTTP 422: {detail}")
+
+    monkeypatch.setattr("prime_cli.client.APIClient.post", post)
+    graph = tmp_path / "g.json"
+    graph.write_text("{}")
+    env = {**TEST_ENV, "COLUMNS": "2000"}
+    result = runner.invoke(app, ["pipelines", "run", str(graph), *passed], env=env)
+    assert result.exit_code == 1 and detail in result.output
+    assert ("To agree, pass" in result.output) == (hint is not None)
+    assert hint is None or hint in result.output
+
+
+def test_run_help_says_what_each_agreement_is(api: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "run", "--help"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.output.replace("│", " ").split())
+    for expected in ("--allow-host", "--read-personal-traces", "--run-code"):
+        assert expected in text
+    assert "can use your key and the secrets you pass" in text
+
+
 def test_run_refuses_a_secret_missing_from_the_environment(api: Dict[str, Any], tmp_path) -> None:
     graph = tmp_path / "g.json"
     graph.write_text("{}")

@@ -92,19 +92,22 @@ def _cell(value: Any) -> Text:
 def _model_gpus_cell(
     model: InferenceCatalogModel, clusters: List[InferenceClusterCapability]
 ) -> str:
-    """What the model costs to run, from the caller's own clusters where possible.
+    """What the model costs to run, on the caller's own clusters where it can.
 
-    `modelGpus` is the authority: it already accounts for which engine each
-    cluster runs the model with, so it can differ from the model's preferred
-    engine (8x RTX-PRO as declared, 4x H200 on the cluster you actually own).
-    With no team clusters the preferred engine is all there is to report.
+    `modelGpus` is the authority where it is reported: it accounts for which
+    engine each cluster runs the model with, so it can differ from the model's
+    preferred engine (8x RTX-PRO as declared, 4x H200 on the cluster you own).
+
+    A model no cluster reports still deploys, just to the on-demand pool rather
+    than with --cluster, so it falls back to the preferred engine instead of
+    claiming the model is unavailable. That also covers a response carrying no
+    capability map at all, which is what a backend predating modelGpus looks
+    like: silence there is not a claim that nothing runs.
     """
     per_cluster = {c.model_gpus[model.id] for c in clusters if model.id in c.model_gpus}
     if per_cluster:
         counts = "/".join(str(g) for g in sorted(per_cluster))
         return f"{counts}x on your clusters"
-    if clusters:
-        return "not runnable here"
     return f"{model.min_gpus}x {model.gpu_product or 'any'}"
 
 

@@ -183,9 +183,30 @@ def test_catalog_gpus_come_from_model_gpus_not_the_preferred_engine(
 
     assert result.exit_code == 0, out
     assert "1x on your clusters" in next(ln for ln in out.splitlines() if "cat_qwen" in ln)
-    assert "not runnable here" in next(ln for ln in out.splitlines() if "cat_llama" in ln)
-    # The model's own preferred engine is not what this team would get.
-    assert "2x NVIDIA-H100-80GB-HBM3" not in out
+    # No cluster runs cat_llama; it reports what the on-demand pool would give,
+    # never a claim that the model is unavailable.
+    llama = next(ln for ln in out.splitlines() if "cat_llama" in ln)
+    assert "2x NVIDIA-H100-80GB-HBM3" in llama
+    assert "not runnable" not in out
+
+
+def test_catalog_without_a_capability_map_falls_back_rather_than_claiming_nothing_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clusters carrying no modelGpus say nothing about what runs.
+
+    A backend predating the field looks exactly like this; reading its silence
+    as incapability would mark every model unrunnable while deploy still works.
+    """
+    blind = _catalog_cluster(modelGpus={})
+    FakeAPI(gets=[{"models": [_catalog_model()], "clusters": [blind]}]).install(monkeypatch)
+
+    result, out = _run("inference", "catalog", "--team", "team_1")
+
+    assert result.exit_code == 0, out
+    qwen = next(ln for ln in out.splitlines() if "cat_qwen" in ln)
+    assert "2x NVIDIA-H100-80GB-HBM3" in qwen
+    assert "not runnable" not in out
 
 
 def test_catalog_without_team_clusters_falls_back_to_the_preferred_engine(

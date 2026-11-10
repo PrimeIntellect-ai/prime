@@ -15,6 +15,13 @@ from tenacity.wait import wait_base
 
 from .config import Config
 
+
+def _timeout(timeout: Optional[float]) -> Any:
+    """httpx's timeout for a request: the client's own when the caller names none. Passing
+    timeout=None to httpx disables every timeout, so an unanswered request would wait forever."""
+    return httpx.USE_CLIENT_DEFAULT if timeout is None else timeout
+
+
 # Retry configuration for transient connection errors. POST only retries errors
 # that happen before the server can process the request; retrying ReadError on a
 # non-idempotent POST can duplicate side effects after a committed response-path
@@ -150,7 +157,9 @@ class APIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make idempotent HTTP request with retry on transient failures."""
-        response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = self.client.request(
+            method, url, params=params, json=json, timeout=_timeout(timeout)
+        )
         response.raise_for_status()
         return response
 
@@ -169,7 +178,9 @@ class APIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make non-idempotent request with only pre-processing safe retries."""
-        response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = self.client.request(
+            method, url, params=params, json=json, timeout=_timeout(timeout)
+        )
         if response.status_code == 429:
             response.raise_for_status()
         return response
@@ -189,7 +200,9 @@ class APIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make idempotent POST with retries for ambiguous transient failures."""
-        response = self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = self.client.request(
+            method, url, params=params, json=json, timeout=_timeout(timeout)
+        )
         response.raise_for_status()
         return response
 
@@ -316,7 +329,9 @@ class AsyncAPIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async idempotent HTTP request with retry on transient failures."""
-        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = await self.client.request(
+            method, url, params=params, json=json, timeout=_timeout(timeout)
+        )
         response.raise_for_status()
         return response
 
@@ -335,7 +350,9 @@ class AsyncAPIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async non-idempotent request with only pre-processing safe retries."""
-        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = await self.client.request(
+            method, url, params=params, json=json, timeout=_timeout(timeout)
+        )
         if response.status_code == 429:
             response.raise_for_status()
         return response
@@ -355,7 +372,9 @@ class AsyncAPIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async idempotent POST with retries for ambiguous transient failures."""
-        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = await self.client.request(
+            method, url, params=params, json=json, timeout=_timeout(timeout)
+        )
         response.raise_for_status()
         return response
 

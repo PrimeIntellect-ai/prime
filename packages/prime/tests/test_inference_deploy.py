@@ -243,6 +243,24 @@ def test_catalog_accepts_a_model_with_no_pinned_revision(
     assert "cat_qwen" in out
 
 
+def test_catalog_shows_team_clusters_even_with_no_deployable_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clusters table is the only CLI source of IDs for --cluster.
+
+    A team can own clusters while the catalog offers it no models (every prod
+    team today), and returning early there leaves --cluster undiscoverable.
+    """
+    FakeAPI(gets=[{"models": [], "clusters": [_catalog_cluster()]}]).install(monkeypatch)
+
+    result, out = _run("inference", "catalog", "--team", "team_1")
+
+    assert result.exit_code == 0, out
+    assert "No deployable models" in out
+    assert "Team Clusters" in out
+    assert "pc_1" in out
+
+
 def test_catalog_json_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"models": [_catalog_model()], "clusters": [_catalog_cluster()]}
     FakeAPI(gets=[payload]).install(monkeypatch)

@@ -250,27 +250,32 @@ def catalog_command(
         catalog = InferenceCatalog.model_validate(data)
     except ValidationError as e:
         _fail(err, f"Unexpected catalog response: {e.error_count()} invalid field(s).")
-    if not catalog.models:
+    # An empty model list does not end the command: the clusters table below is
+    # the only place the CLI prints the cluster IDs `--cluster` takes, and a
+    # team can hold clusters while the catalog offers it nothing.
+    # An empty model list does not end the command: the clusters table below is
+    # the only place the CLI prints the cluster IDs `--cluster` takes, and a
+    # team can hold clusters while the catalog offers it nothing.
+    if catalog.models:
+        table = Table(title="Inference Catalog")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Name")
+        table.add_column("Repo")
+        table.add_column("Quant")
+        table.add_column("GPUs")
+        table.add_column("Context", justify="right")
+        for m in catalog.models:
+            table.add_row(
+                _cell(m.id),
+                _cell(m.display_name),
+                _cell(m.repo),
+                _cell(m.quant),
+                _cell(_model_gpus_cell(m, catalog.clusters)),
+                _cell(m.max_seq_len),
+            )
+        console.print(table)
+    else:
         console.print("[yellow]No deployable models in the catalog.[/yellow]")
-        return
-
-    table = Table(title="Inference Catalog")
-    table.add_column("ID", style="cyan", no_wrap=True)
-    table.add_column("Name")
-    table.add_column("Repo")
-    table.add_column("Quant")
-    table.add_column("GPUs")
-    table.add_column("Context", justify="right")
-    for m in catalog.models:
-        table.add_row(
-            _cell(m.id),
-            _cell(m.display_name),
-            _cell(m.repo),
-            _cell(m.quant),
-            _cell(_model_gpus_cell(m, catalog.clusters)),
-            _cell(m.max_seq_len),
-        )
-    console.print(table)
 
     if catalog.clusters:
         cluster_table = Table(title="Team Clusters")
@@ -287,10 +292,11 @@ def catalog_command(
             )
         console.print(cluster_table)
 
-    console.print(
-        "\n[dim]Deploy with `prime inference deploy <ID>`; add --cluster <cluster-id> to "
-        "use a team cluster instead of Prime's on-demand pool.[/dim]"
-    )
+    if catalog.models:
+        console.print(
+            "\n[dim]Deploy with `prime inference deploy <ID>`; add --cluster <cluster-id> to "
+            "use a team cluster instead of Prime's on-demand pool.[/dim]"
+        )
 
 
 def deploy_command(

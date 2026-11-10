@@ -996,21 +996,38 @@ def checkpoint_restore(
     checkpoint_id: str,
     name: Optional[str] = typer.Option(None, help="Name for the new sandbox"),
     team_id: Optional[str] = typer.Option(None, help="Team ID (uses config team_id if omitted)"),
-    cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
-    memory_gb: float = typer.Option(1.0, help="Memory in GB"),
+    cpu_cores: Optional[float] = typer.Option(
+        None, help="Number of CPU cores [default: 1.0; with --memory, the paused sandbox's]"
+    ),
+    memory_gb: Optional[float] = typer.Option(
+        None, help="Memory in GB [default: 1.0; with --memory, the paused sandbox's]"
+    ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
+    memory: bool = typer.Option(
+        False,
+        "--memory",
+        help=(
+            "Restore a pause checkpoint's memory too, forking the paused sandbox: the new "
+            "sandbox continues from the paused state with its shape, environment and secrets"
+        ),
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Create a new sandbox from a durable filesystem checkpoint."""
+    """Create a new sandbox from a checkpoint's disk, or with --memory fork a paused sandbox."""
     sandbox_name = name or f"restore-{checkpoint_id[:8]}"
     try:
+        shape = {
+            field: value
+            for field, value in (("cpu_cores", cpu_cores), ("memory_gb", memory_gb))
+            if value is not None
+        }
         request = CreateSandboxRequest(
             name=sandbox_name,
             checkpoint_id=checkpoint_id,
+            restore_memory=True if memory else None,
             team_id=team_id,
-            cpu_cores=cpu_cores,
-            memory_gb=memory_gb,
             timeout_minutes=timeout_minutes,
+            **shape,
         )
         if not confirm_or_skip(
             f"Create sandbox {sandbox_name} from checkpoint {checkpoint_id}?", yes, default=True
@@ -1991,6 +2008,12 @@ def _request_pause_or_resume(sandbox_id: str, resume: bool) -> None:
         f"(status {escape(sandbox.status)}); it becomes {target} once the node finishes. "
         f"Check with 'prime sandbox get {escape(sandbox_id)}'."
     )
+    checkpoint_id = getattr(sandbox, "checkpoint_id", None)
+    if not resume and checkpoint_id:
+        console.print(
+            f"Pause checkpoint: [cyan]{escape(checkpoint_id)}[/cyan]. Fork it with "
+            f"'prime sandbox checkpoint restore {escape(checkpoint_id)} --memory'."
+        )
 
 
 @app.command(no_args_is_help=True)

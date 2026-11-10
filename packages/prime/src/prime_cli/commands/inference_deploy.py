@@ -5,15 +5,20 @@ from __future__ import annotations
 import re
 import shlex
 import time
-from typing import Any, Dict, List, NoReturn, Optional, Tuple
+from typing import Any, Dict, NoReturn, Optional, Tuple
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.table import Table
 from rich.text import Text
 
-from ..api.inference_deployments import InferenceDeployment, InferenceDeploymentsClient
+from ..api.inference_deployments import (
+    InferenceCatalog,
+    InferenceDeployment,
+    InferenceDeploymentsClient,
+)
 from ..core import APIClient, APIError, Config
 from ..utils import (
     PlainTyper,
@@ -35,8 +40,9 @@ DEPLOYMENT_JSON_HELP = json_output_help(
     "servedModelAlias, endpointUrl?, checkpoint?, isOnDemand, createdAt, dashboardUrl}",
 )
 CATALOG_JSON_HELP = json_output_help(
-    "InferenceCatalogResponse passthrough: the deployable catalog models plus the "
-    "team's clusters that can serve them",
+    "InferenceCatalogResponse: {models[] = {id, slug, repo, revision, displayName, quant?, "
+    "gpuProduct?, minGpus, maxSeqLen?, enabled, metadata}, clusters[] = {primeClusterId, "
+    "name, displayName?, inferenceEnabled, dynamoProfile?, gpuProducts[], gatewayEndpoint?}}",
 )
 
 
@@ -54,34 +60,10 @@ def _client() -> InferenceDeploymentsClient:
     return InferenceDeploymentsClient(APIClient())
 
 
-def _first(item: Dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        value = item.get(key)
-        if value not in (None, ""):
-            return value
-    return None
-
-
-def _list_field(data: Dict[str, Any], *keys: str) -> List[Dict[str, Any]]:
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, list):
-            return [v for v in value if isinstance(v, dict)]
-    return []
-
-
 def _cell(value: Any) -> Text:
     # Catalog values are upstream data; Text renders them literally so
     # Rich markup inside a name cannot restyle the table.
     return Text("—" if value in (None, "") else str(value))
-
-
-def _gpu_cell(item: Dict[str, Any]) -> Text:
-    gpu_type = _first(item, "gpuType", "gpu_type")
-    gpu_count = _first(item, "gpuCount", "gpu_count", "gpusPerReplica")
-    if gpu_type and gpu_count:
-        return _cell(f"{gpu_count}x {gpu_type}")
-    return _cell(gpu_type or gpu_count)
 
 
 def _print_deployment(deployment: InferenceDeployment) -> None:
@@ -202,34 +184,44 @@ def catalog_command(
         output_data_as_json(data, console)
         return
 
-    models = _list_field(data, "models", "catalog", "items", "data")
-    clusters = _list_field(data, "clusters", "primeClusters")
-    if not models:
+    try:
+        catalog = InferenceCatalog.model_validate(data)
+    except ValidationError as e:
+        _fail(err, f"Unexpected catalog response: {e.error_count()} invalid field(s).")
+    if not catalog.models:
         console.print("[yellow]No deployable models in the catalog.[/yellow]")
         return
 
     table = Table(title="Inference Catalog")
     table.add_column("ID", style="cyan", no_wrap=True)
-    table.add_column("Model")
+    table.add_column("Name")
+    table.add_column("Repo")
+    table.add_column("Quant")
     table.add_column("GPUs")
-    for m in models:
+    table.add_column("Context", justify="right")
+    for m in catalog.models:
         table.add_row(
-            _cell(_first(m, "id", "modelCatalogId")),
-            _cell(_first(m, "displayName", "name", "modelName", "huggingFaceId", "model")),
-            _gpu_cell(m),
+            _cell(m.id),
+            _cell(m.display_name),
+            _cell(m.repo),
+            _cell(m.quant),
+            _cell(f"{m.min_gpus}x {m.gpu_product or 'any'}"),
+            _cell(m.max_seq_len),
         )
     console.print(table)
 
-    if clusters:
+    if catalog.clusters:
         cluster_table = Table(title="Team Clusters")
         cluster_table.add_column("ID", style="cyan", no_wrap=True)
         cluster_table.add_column("Name")
-        cluster_table.add_column("GPUs")
-        for c in clusters:
+        cluster_table.add_column("GPU products")
+        cluster_table.add_column("Ready")
+        for c in catalog.clusters:
             cluster_table.add_row(
-                _cell(_first(c, "id", "primeClusterId")),
-                _cell(_first(c, "displayName", "name")),
-                _gpu_cell(c),
+                _cell(c.prime_cluster_id),
+                _cell(c.display_name or c.name),
+                _cell(", ".join(c.gpu_products)),
+                Text("yes", style="green") if c.ready else Text("no", style="dim"),
             )
         console.print(cluster_table)
 

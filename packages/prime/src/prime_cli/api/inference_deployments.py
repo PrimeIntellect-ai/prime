@@ -1,10 +1,49 @@
 """Inference deployment API client (`/api/v1/inference`)."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from prime_cli.core import APIClient
+
+
+class InferenceCatalogModel(BaseModel):
+    id: str
+    slug: str
+    repo: str
+    revision: str
+    display_name: str = Field(..., alias="displayName")
+    quant: Optional[str] = None
+    # Raw nvidia.com/gpu.product label; None means any GPU.
+    gpu_product: Optional[str] = Field(None, alias="gpuProduct")
+    min_gpus: int = Field(1, alias="minGpus")
+    max_seq_len: Optional[int] = Field(None, alias="maxSeqLen")
+    enabled: bool
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class InferenceClusterCapability(BaseModel):
+    prime_cluster_id: str = Field(..., alias="primeClusterId")
+    name: str
+    display_name: Optional[str] = Field(None, alias="displayName")
+    inference_enabled: bool = Field(..., alias="inferenceEnabled")
+    dynamo_profile: Optional[str] = Field(None, alias="dynamoProfile")
+    gpu_products: List[str] = Field(default_factory=list, alias="gpuProducts")
+    # Internal tailscale address: only used to derive readiness, never displayed.
+    gateway_endpoint: Optional[str] = Field(None, alias="gatewayEndpoint")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @property
+    def ready(self) -> bool:
+        return self.inference_enabled and bool(self.gateway_endpoint)
+
+
+class InferenceCatalog(BaseModel):
+    models: List[InferenceCatalogModel]
+    clusters: List[InferenceClusterCapability]
 
 
 class InferenceDeployment(BaseModel):

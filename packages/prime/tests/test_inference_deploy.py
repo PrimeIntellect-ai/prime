@@ -67,14 +67,55 @@ def _run(*args: str):
     return result, strip_ansi(result.output)
 
 
+def _catalog_model(**overrides: Any) -> Dict[str, Any]:
+    model: Dict[str, Any] = {
+        "id": "cat_qwen",
+        "slug": "qwen3-8b",
+        "repo": "Qwen/Qwen3-8B",
+        "revision": "main",
+        "displayName": "Qwen3 8B",
+        "quant": "fp8",
+        "gpuProduct": "NVIDIA-H100-80GB-HBM3",
+        "minGpus": 2,
+        "maxSeqLen": 32768,
+        "enabled": True,
+        "metadata": {},
+    }
+    model.update(overrides)
+    return model
+
+
+def _catalog_cluster(**overrides: Any) -> Dict[str, Any]:
+    cluster: Dict[str, Any] = {
+        "primeClusterId": "pc_1",
+        "name": "team-h200",
+        "displayName": "Team H200",
+        "inferenceEnabled": True,
+        "dynamoProfile": None,
+        "gpuProducts": ["NVIDIA-H200"],
+        "gatewayEndpoint": "http://100.64.0.7:8000",
+    }
+    cluster.update(overrides)
+    return cluster
+
+
 def test_catalog_renders_models_and_clusters(monkeypatch: pytest.MonkeyPatch) -> None:
     api = FakeAPI(
         gets=[
             {
                 "models": [
-                    {"id": "cat_qwen", "displayName": "Qwen3 8B", "gpuType": "H100", "gpuCount": 1}
+                    _catalog_model(),
+                    _catalog_model(id="cat_llama", gpuProduct=None, minGpus=1, quant=None),
                 ],
-                "clusters": [{"id": "pc_1", "name": "team-h200", "gpuType": "H200"}],
+                "clusters": [
+                    _catalog_cluster(),
+                    _catalog_cluster(
+                        primeClusterId="pc_2",
+                        displayName=None,
+                        name="raw-name",
+                        gatewayEndpoint=None,
+                    ),
+                ],
             }
         ]
     )
@@ -84,12 +125,19 @@ def test_catalog_renders_models_and_clusters(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 0, out
     assert api.calls == [("GET", "/inference/catalog", {"teamId": "team_1"})]
-    assert "cat_qwen" in out and "Qwen3 8B" in out and "1x H100" in out
-    assert "pc_1" in out and "team-h200" in out
+    qwen = next(ln for ln in out.splitlines() if "cat_qwen" in ln)
+    for cell in ("Qwen3 8B", "Qwen/Qwen3-8B", "fp8", "2x NVIDIA-H100-80GB-HBM3", "32768"):
+        assert cell in qwen
+    assert "1x any" in next(ln for ln in out.splitlines() if "cat_llama" in ln)
+    assert "yes" in next(ln for ln in out.splitlines() if "pc_1" in ln)
+    # displayName falls back to name; no gatewayEndpoint means not ready.
+    pc_2 = next(ln for ln in out.splitlines() if "pc_2" in ln)
+    assert "raw-name" in pc_2 and "no" in pc_2
+    assert "100.64.0.7" not in out
 
 
 def test_catalog_json_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {"models": [{"id": "cat_qwen", "unknownField": [1, 2]}], "clusters": []}
+    payload = {"models": [_catalog_model()], "clusters": [_catalog_cluster()]}
     FakeAPI(gets=[payload]).install(monkeypatch)
 
     result, out = _run("inference", "catalog", "-o", "json")

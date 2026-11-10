@@ -16,12 +16,14 @@ from ..utils import (
     validate_output_format,
 )
 from ..utils.formatters import format_price_per_mtok
+from .inference_deployments import app as deployments_app
 
 app = PlainTyper(
     help="Run and manage Prime Inference\n\n"
     "Use `prime eval run` for environment evals with Prime Inference.",
     no_args_is_help=True,
 )
+app.add_typer(deployments_app, name="deployments")
 console = get_console()
 
 MODELS_JSON_HELP = json_output_help(

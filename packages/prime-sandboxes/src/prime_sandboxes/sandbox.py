@@ -2508,22 +2508,22 @@ class SandboxClient:
         )
         return self._accept_created(request, response)
 
-    def create_bundle(
+    def create_gang(
         self, requests: List[CreateSandboxRequest], idempotency_key: Optional[str] = None
     ) -> List[Sandbox]:
         """Create up to 12 sandboxes together on one node, all or nothing.
 
         Members must share team, architecture, and GPU type; totals are capped
         at 48 CPU cores, 48 GB memory, 1000 GB disk, and 8 GPUs. Each member
-        boots independently: wait with ``wait_for_bundle``, which deletes the
-        whole bundle if any member fails to start."""
+        boots independently: wait with ``wait_for_gang``, which deletes the
+        whole gang if any member fails to start."""
         payload = {
             "sandboxes": [_create_payload(r, self.client.config.team_id) for r in requests],
             "idempotency_key": idempotency_key or uuid.uuid4().hex,
         }
         response = self.client.request(
             "POST",
-            "/sandbox/bundle",
+            "/sandbox/gang",
             json=payload,
             idempotent_post=True,
         )
@@ -2532,15 +2532,15 @@ class SandboxClient:
             for r, created in zip(requests, response["sandboxes"], strict=True)
         ]
 
-    def wait_for_bundle(
+    def wait_for_gang(
         self,
         sandbox_ids: List[str],
         max_attempts: int = 60,
         image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
-        """Wait until every sandbox of a bundle is running.
+        """Wait until every sandbox of a gang is running.
 
-        A bundle is all or nothing: if any member fails or the wait times out,
+        A gang is all or nothing: if any member fails or the wait times out,
         every member is deleted, including those already running, and the
         error is raised with the cleanup outcome."""
         try:
@@ -2554,10 +2554,10 @@ class SandboxClient:
                 self.bulk_delete(sandbox_ids=sandbox_ids)
             except Exception as cleanup:
                 raise RuntimeError(
-                    f"Bundle did not start ({error}); deleting its sandboxes also failed "
+                    f"Gang did not start ({error}); deleting its sandboxes also failed "
                     f"({cleanup}): delete {sandbox_ids} yourself"
                 ) from error
-            raise RuntimeError(f"Bundle did not start and was deleted: {error}") from error
+            raise RuntimeError(f"Gang did not start and was deleted: {error}") from error
 
     def _accept_created(self, request: CreateSandboxRequest, response: Dict[str, Any]) -> Sandbox:
         sandbox = Sandbox.model_validate(response)
@@ -4326,22 +4326,22 @@ class AsyncSandboxClient:
         )
         return await self._accept_created(request, response)
 
-    async def create_bundle(
+    async def create_gang(
         self, requests: List[CreateSandboxRequest], idempotency_key: Optional[str] = None
     ) -> List[Sandbox]:
         """Create up to 12 sandboxes together on one node, all or nothing.
 
         Members must share team, architecture, and GPU type; totals are capped
         at 48 CPU cores, 48 GB memory, 1000 GB disk, and 8 GPUs. Each member
-        boots independently: wait with ``wait_for_bundle``, which deletes the
-        whole bundle if any member fails to start."""
+        boots independently: wait with ``wait_for_gang``, which deletes the
+        whole gang if any member fails to start."""
         payload = {
             "sandboxes": [_create_payload(r, self.client.config.team_id) for r in requests],
             "idempotency_key": idempotency_key or uuid.uuid4().hex,
         }
         response = await self.client.request(
             "POST",
-            "/sandbox/bundle",
+            "/sandbox/gang",
             json=payload,
             idempotent_post=True,
         )
@@ -4350,15 +4350,15 @@ class AsyncSandboxClient:
             for r, created in zip(requests, response["sandboxes"], strict=True)
         ]
 
-    async def wait_for_bundle(
+    async def wait_for_gang(
         self,
         sandbox_ids: List[str],
         max_attempts: int = 60,
         image_build_timeout_seconds: int = 3000,
     ) -> Dict[str, str]:
-        """Wait until every sandbox of a bundle is running.
+        """Wait until every sandbox of a gang is running.
 
-        A bundle is all or nothing: if any member fails or the wait times out,
+        A gang is all or nothing: if any member fails or the wait times out,
         every member is deleted, including those already running, and the
         error is raised with the cleanup outcome."""
         try:
@@ -4372,10 +4372,10 @@ class AsyncSandboxClient:
                 await self.bulk_delete(sandbox_ids=sandbox_ids)
             except Exception as cleanup:
                 raise RuntimeError(
-                    f"Bundle did not start ({error}); deleting its sandboxes also failed "
+                    f"Gang did not start ({error}); deleting its sandboxes also failed "
                     f"({cleanup}): delete {sandbox_ids} yourself"
                 ) from error
-            raise RuntimeError(f"Bundle did not start and was deleted: {error}") from error
+            raise RuntimeError(f"Gang did not start and was deleted: {error}") from error
 
     async def _accept_created(
         self, request: CreateSandboxRequest, response: Dict[str, Any]

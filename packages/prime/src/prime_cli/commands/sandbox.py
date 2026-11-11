@@ -1209,23 +1209,23 @@ def create(
         "--volume",
         help="Attach a volume as NAME:/mount/path[:ro]. Can be specified multiple times.",
     ),
-    bundle: int = typer.Option(
+    gang: int = typer.Option(
         1,
-        "--bundle",
+        "--gang",
         min=1,
         max=12,
         help=(
             "Create this many identical sandboxes together on one node, all or nothing. "
-            "Bundle totals are capped at 48 CPU cores, 48 GB memory, 1000 GB disk, "
+            "Gang totals are capped at 48 CPU cores, 48 GB memory, 1000 GB disk, "
             "and 8 GPUs."
         ),
     ),
-    bundle_wait: bool = typer.Option(
+    gang_wait: bool = typer.Option(
         True,
         "--wait/--no-wait",
         help=(
-            "With --bundle, wait until every sandbox runs. If any fails or the wait "
-            "times out, delete the whole bundle, including sandboxes already running."
+            "With --gang, wait until every sandbox runs. If any fails or the wait "
+            "times out, delete the whole gang, including sandboxes already running."
         ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
@@ -1427,28 +1427,28 @@ def create(
             obfuscated_secrets = obfuscate_secrets(secrets_vars)
             console.print(f"Secrets: {obfuscated_secrets}")
 
-        if bundle > 1:
-            console.print(f"Bundle: {bundle} sandboxes on one node")
-            if not confirm_or_skip("\nDo you want to create this bundle?", yes, default=True):
+        if gang > 1:
+            console.print(f"Gang: {gang} sandboxes on one node")
+            if not confirm_or_skip("\nDo you want to create this gang?", yes, default=True):
                 console.print("\nSandbox creation cancelled")
                 return
-            requests = [request.model_copy(update={"name": f"{name}-{i}"}) for i in range(bundle)]
-            with console.status("[bold blue]Creating sandbox bundle...", spinner="dots"):
-                sandboxes = sandbox_client.create_bundle(requests)
+            requests = [request.model_copy(update={"name": f"{name}-{i}"}) for i in range(gang)]
+            with console.status("[bold blue]Creating sandbox gang...", spinner="dots"):
+                sandboxes = sandbox_client.create_gang(requests)
             console.print(f"\n[green]Created {len(sandboxes)} sandboxes:[/green]")
             for created in sandboxes:
                 console.print(f"  {created.id}  {created.name}")
-            if not bundle_wait:
+            if not gang_wait:
                 return
             ids = [created.id for created in sandboxes]
             try:
-                waiting = "[bold blue]Waiting for the bundle to start..."
+                waiting = "[bold blue]Waiting for the gang to start..."
                 with console.status(waiting, spinner="dots"):
-                    sandbox_client.wait_for_bundle(ids)
+                    sandbox_client.wait_for_gang(ids)
             except RuntimeError as e:
-                console.print(f"[red]Bundle failed:[/red] {escape(str(e))}")
+                console.print(f"[red]Gang failed:[/red] {escape(str(e))}")
                 raise typer.Exit(1)
-            console.print("[green]Every sandbox in the bundle is running.[/green]")
+            console.print("[green]Every sandbox in the gang is running.[/green]")
             return
 
         if confirm_or_skip("\nDo you want to create this sandbox?", yes, default=True):

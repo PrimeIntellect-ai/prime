@@ -211,10 +211,10 @@ def set_team_id(
                     team_role = team.get("role")
                     break
             else:
-                # The lookup worked and the id isn't in it. Saving anyway is the
-                # expensive failure: dispatch sends team_id as an optional field,
-                # so a team you don't belong to doesn't 400, the run just lands on
-                # your personal account and the first sign is the invoice.
+                # The lookup worked and the id isn't in it. Saving anyway defers
+                # the failure: the backend rejects a non-member team_id with a 403
+                # at dispatch, so every later run fails with an error that points
+                # at nothing the user did in this command. Fail here instead.
                 console.print(f"[red]Error: You are not a member of team '{team_id}'.[/red]")
                 console.print(
                     "[yellow]List the teams you belong to with 'prime teams list'.[/yellow]"

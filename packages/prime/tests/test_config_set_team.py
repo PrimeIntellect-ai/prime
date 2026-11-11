@@ -105,8 +105,8 @@ class TestConfigSetTeamId:
         stranger = "cmupu62cp000irv83cjhqiqwn"
         result = runner.invoke(app, ["config", "set-team-id", stranger], env=TEST_ENV)
 
-        # Saving a team you don't belong to silently bills the personal account
-        # at dispatch, so this has to fail loudly instead of succeeding.
+        # Saving it would defer the failure to a 403 at dispatch, so fail here
+        # instead of reporting success.
         assert result.exit_code == 1, result.output
         assert f"not a member of team '{stranger}'" in result.output
 

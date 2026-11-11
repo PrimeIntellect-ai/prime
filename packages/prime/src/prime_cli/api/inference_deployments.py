@@ -149,3 +149,7 @@ class InferenceDeploymentsClient:
         return self.client.post(
             f"/inference/deployments/{deployment_id}/scale", json={"replicas": replicas}
         )
+
+    def delete_deployment(self, deployment_id: str) -> Dict[str, Any]:
+        """Tear a deployment down; the API returns it in TERMINATING state."""
+        return self.client.delete(f"/inference/deployments/{deployment_id}")

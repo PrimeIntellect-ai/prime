@@ -24,6 +24,7 @@ from ..api.inference_deployments import (
 from ..core import APIClient, APIError, Config
 from ..utils import (
     PlainTyper,
+    confirm_or_skip,
     get_console,
     json_output_help,
     output_data_as_json,
@@ -507,3 +508,38 @@ def get_deployment(
         output_data_as_json(raw, console)
         return
     _print_deployment(InferenceDeployment.model_validate(raw))
+
+
+@deployments_app.command("delete", epilog=DEPLOYMENT_JSON_HELP)
+def delete_deployment(
+    deployment_id: str = typer.Argument(..., help="Deployment ID"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Delete a deployment and release its GPUs.
+
+    Example:
+
+        prime inference deployments delete <deployment-id> --yes
+    """
+    validate_output_format(output, console)
+    err = _err_console(output)
+    if not confirm_or_skip(
+        f"Delete deployment {deployment_id}? Its endpoint stops serving.",
+        yes,
+        err=output == "json",
+    ):
+        err.print("Cancelled.")
+        raise typer.Exit(0)
+    try:
+        raw = _client().delete_deployment(deployment_id)
+    except APIError as e:
+        _fail(err, str(e))
+    if output == "json":
+        output_data_as_json(raw, console)
+        return
+    deployment = InferenceDeployment.model_validate(raw)
+    console.print(
+        f"Deployment {rich_escape(deployment.id)}: "
+        f"[yellow]{rich_escape(deployment.status)}[/yellow]"
+    )

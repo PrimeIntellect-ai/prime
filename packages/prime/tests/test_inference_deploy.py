@@ -41,9 +41,12 @@ def _deployment(status: str, **overrides: Any) -> Dict[str, Any]:
 
 
 class FakeAPI:
-    def __init__(self, gets: Optional[List[Dict[str, Any]]] = None, post: Any = None) -> None:
+    def __init__(
+        self, gets: Optional[List[Dict[str, Any]]] = None, post: Any = None, delete: Any = None
+    ) -> None:
         self.gets = list(gets or [])
         self.post_response = post
+        self.delete_response = delete
         self.calls: List[Tuple[str, str, Any]] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,8 +63,13 @@ class FakeAPI:
                 raise self.post_response
             return self.post_response
 
+        def delete(_self: Any, endpoint: str, params: Any = None) -> Any:
+            self.calls.append(("DELETE", endpoint, params))
+            return self.delete_response
+
         monkeypatch.setattr("prime_cli.core.APIClient.get", get)
         monkeypatch.setattr("prime_cli.core.APIClient.post", post)
+        monkeypatch.setattr("prime_cli.core.APIClient.delete", delete)
         monkeypatch.setattr(inference_deploy.time, "sleep", lambda _s: None)
         monkeypatch.setattr("prime_cli.core.Config.team_id", None, raising=False)
 
@@ -542,3 +550,73 @@ def test_deployments_get_running_prints_endpoint(monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == 0, out
     assert api.calls == [("GET", "/inference/deployments/dep_1", None)]
     assert "Endpoint: https://dep-1.inference.primeintellect.ai/v1" in out
+
+
+def _run_with_input(stdin: str, *args: str):
+    result = CliRunner().invoke(app, list(args), env=TEST_ENV, input=stdin)
+    return result, strip_ansi(result.output)
+
+
+def test_delete_confirms_then_sends_delete_and_prints_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeAPI(delete=_deployment("TERMINATING"))
+    api.install(monkeypatch)
+
+    result, out = _run_with_input("y\n", "inference", "deployments", "delete", "dep_1")
+
+    assert result.exit_code == 0, out
+    assert "Delete deployment dep_1?" in out
+    assert api.calls == [("DELETE", "/inference/deployments/dep_1", None)]
+    assert "dep_1: TERMINATING" in out
+
+
+def test_delete_yes_skips_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = FakeAPI(delete=_deployment("TERMINATING"))
+    api.install(monkeypatch)
+
+    result, out = _run("inference", "deployments", "delete", "dep_1", "-y")
+
+    assert result.exit_code == 0, out
+    assert "Delete deployment" not in out
+    assert api.calls == [("DELETE", "/inference/deployments/dep_1", None)]
+
+
+def test_delete_declined_makes_no_api_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = FakeAPI(delete=_deployment("TERMINATING"))
+    api.install(monkeypatch)
+
+    result, out = _run_with_input("n\n", "inference", "deployments", "delete", "dep_1")
+
+    assert result.exit_code == 0, out
+    assert "Cancelled." in out
+    assert api.calls == []
+
+
+def test_delete_shows_not_found_detail_without_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    url = "https://api.primeintellect.ai/api/v1/inference/deployments/dep_x"
+    request = httpx.Request("DELETE", url)
+    response = httpx.Response(404, json={"detail": "Deployment not found"}, request=request)
+    error = httpx.HTTPStatusError("not found", request=request, response=response)
+
+    def raising_request(_self: Any, method: str, url: str, **_kwargs: Any) -> Any:
+        assert method == "DELETE"
+        raise error
+
+    monkeypatch.setattr(httpx.Client, "request", raising_request)
+
+    result, out = _run("inference", "deployments", "delete", "dep_x", "--yes")
+
+    assert result.exit_code == 1
+    assert "Error: HTTP 404: Deployment not found" in out
+    assert "Traceback" not in out
+
+
+def test_delete_json_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _deployment("TERMINATING")
+    FakeAPI(delete=payload).install(monkeypatch)
+
+    result, out = _run("inference", "deployments", "delete", "dep_1", "-y", "-o", "json")
+
+    assert result.exit_code == 0, out
+    assert json.loads(result.stdout) == payload

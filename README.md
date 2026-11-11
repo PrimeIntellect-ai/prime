@@ -179,6 +179,9 @@ prime inference deployments get <deployment-id>
 # List your deployments (--team for a team's), and change a replica count
 prime inference deployments list [--team <team-id>]
 prime inference deployments scale <deployment-id> --replicas 2
+
+# Delete a deployment (asks for confirmation; --yes skips it)
+prime inference deployments delete <deployment-id>
 ```
 
 ### GPU Resources

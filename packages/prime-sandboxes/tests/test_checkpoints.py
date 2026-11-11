@@ -301,7 +301,8 @@ async def test_wait_for_checkpoint_durable(
     durable = await wait_for_checkpoint(checkpoint_client)
     assert durable.state == "DURABLE"
     assert calls == ["checkpoint-1"] * len(states)
-    assert checkpoint_clock == ([] if len(states) == 1 else [1.0, 1.5])
+    # Non-terminal polls inside the fast window all wait the fast delay.
+    assert checkpoint_clock == ([] if len(states) == 1 else [1.0, 1.0])
 
 
 @pytest.mark.asyncio
@@ -468,6 +469,99 @@ async def test_wait_for_checkpoint_older_server_without_merge_fields(
     assert checkpoint.merge_error is None
     assert calls == ["checkpoint-1"]
     assert checkpoint_clock == []
+
+
+def mock_checkpoint_script(client, monkeypatch, rows):
+    """Serve a scripted list of checkpoint rows; one per poll."""
+    calls = []
+    responses = iter(rows)
+
+    def get(checkpoint_id):
+        calls.append(checkpoint_id)
+        return SandboxCheckpoint.model_validate(next(responses))
+
+    async def async_get(checkpoint_id):
+        return get(checkpoint_id)
+
+    monkeypatch.setattr(
+        client._checkpoint_batcher,
+        "get",
+        async_get if isinstance(client, AsyncSandboxClient) else get,
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_fast_window_expires_to_backoff(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    # Non-terminal polls sleep the fixed fast delay for the first
+    # CHECKPOINT_POLL_FAST_WINDOW seconds, then the backoff law resumes from
+    # a fresh index.
+    rows = [checkpoint_response("PENDING")] * 13 + [checkpoint_response("DURABLE")]
+
+    mock_checkpoint_script(checkpoint_client, monkeypatch, rows)
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.state == "DURABLE"
+    assert checkpoint_clock == [1.0] * 10 + [1.0, 1.5, 2.25]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_merge_rearms_fast_cadence(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    # The merge phase re-arms the fast window even after the upload phase
+    # already fell back to backoff.
+    rows = [checkpoint_response("PENDING")] * 12
+    rows += [
+        checkpoint_response("DURABLE", merge="pending"),
+        checkpoint_response("DURABLE", merge="pending"),
+        checkpoint_response("DURABLE", merge="merged"),
+    ]
+
+    mock_checkpoint_script(checkpoint_client, monkeypatch, rows)
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.merge == "merged"
+    # Upload: ten fast sleeps, then the backoff law takes over.
+    # Merge: one re-armed fast window, no matter how late the merge began.
+    assert checkpoint_clock == [1.0] * 10 + [1.0, 1.5] + [1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_merge_rearms_only_once(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    # Once the re-armed merge window itself expires, later merge-pending polls
+    # fall back to a fresh backoff index instead of re-arming again.
+    rows = [checkpoint_response("PENDING")] * 12
+    rows += [checkpoint_response("DURABLE", merge="pending")] * 11
+    rows += [checkpoint_response("DURABLE", merge="merged")]
+
+    mock_checkpoint_script(checkpoint_client, monkeypatch, rows)
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.merge == "merged"
+    # Twelve upload sleeps (fast window + backoff), ten re-armed fast sleeps,
+    # then a fresh backoff index after the merge window expires.
+    assert checkpoint_clock == [1.0] * 10 + [1.0, 1.5] + [1.0] * 10 + [1.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_backoff_caps_at_max_delay(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    rows = [checkpoint_response("PENDING")] * 29 + [checkpoint_response("DURABLE")]
+
+    mock_checkpoint_script(checkpoint_client, monkeypatch, rows)
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.state == "DURABLE"
+    # Ten fast sleeps, one backoff ramp, then the capped 10s delay.
+    assert checkpoint_clock == (
+        [1.0] * 11 + [1.5, 2.25, 3.375, 5.0625, 7.59375] + [10.0] * 13
+    )
 
 
 async def concurrent_checkpoint_waits(client, checkpoint_ids):

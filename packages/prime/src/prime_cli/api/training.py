@@ -26,6 +26,10 @@ _GITHUB_API = "https://api.github.com"
 # Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
 # Only the read wait grows: an unreachable host still fails in 10s.
 CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+# Volume create/expand run the owner's wallet admission (and, on create, the
+# R2 bucket ensure) before answering: 40-60s on prod for a busy team wallet
+# (ENG-7624), past the 30s default, while the row still lands server-side.
+VOLUME_WRITE_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
 
 class PreparedTrainingRuntime(BaseModel):
@@ -338,7 +342,9 @@ class HostedTrainingClient:
             payload["teamId"] = team_id
         if cluster:
             payload["cluster"] = cluster
-        return Volume.model_validate(self.client.post("/training/volumes", json=payload))
+        return Volume.model_validate(
+            self.client.post("/training/volumes", json=payload, timeout=VOLUME_WRITE_TIMEOUT)
+        )
 
     def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:
         params = {"teamId": team_id} if team_id else None
@@ -349,7 +355,11 @@ class HostedTrainingClient:
         payload: Dict[str, Any] = {"size": size}
         if team_id:
             payload["teamId"] = team_id
-        return Volume.model_validate(self.client.patch(f"/training/volumes/{name}", json=payload))
+        return Volume.model_validate(
+            self.client.patch(
+                f"/training/volumes/{name}", json=payload, timeout=VOLUME_WRITE_TIMEOUT
+            )
+        )
 
     def delete_volume(self, name: str, team_id: Optional[str] = None) -> None:
         params = {"teamId": team_id} if team_id else None

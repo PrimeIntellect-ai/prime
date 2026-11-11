@@ -440,7 +440,7 @@ def test_create_passes_the_cluster_through(monkeypatch):
 def test_client_sends_cluster_only_when_set():
     posted = []
     body = {"name": "v", "status": "PENDING", "clusterId": "c1", "pvcName": "vol-v"}
-    api = SimpleNamespace(post=lambda path, json=None: posted.append(json) or body)
+    api = SimpleNamespace(post=lambda path, json=None, timeout=None: posted.append(json) or body)
     client = HostedTrainingClient(api)
     client.create_volume("v", "1Ti", cluster="gpu-east")
     client.create_volume("v", "1Ti")
@@ -1124,7 +1124,7 @@ def test_client_sends_warm_and_routes_transfers():
         "expiresAt": "2026-10-09T12:00:00Z",
     }
 
-    def post(path, json=None):
+    def post(path, json=None, timeout=None):
         posted.append((path, json))
         return route if path.endswith("/transfer") else volume
 

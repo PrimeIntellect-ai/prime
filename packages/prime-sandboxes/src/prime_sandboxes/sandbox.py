@@ -2299,6 +2299,23 @@ def _next_background_job_poll_delay(current_interval: float) -> float:
     )
 
 
+def _create_payload(
+    request: CreateSandboxRequest, default_team_id: Optional[str]
+) -> Dict[str, Any]:
+    payload = request.model_dump(
+        by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
+    )
+    _omit_unset_memory_shape(request, payload)
+    # VM is the only runtime; send it explicitly so the created runtime
+    # never depends on server-side defaults changing underneath the SDK.
+    payload["vm"] = True
+    # Auto-populate team_id from config if not specified
+    if request.team_id is None and default_team_id is not None:
+        payload["team_id"] = default_team_id
+    payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
+    return payload
+
+
 class SandboxClient:
     """Client for sandbox API operations"""
 
@@ -2482,24 +2499,67 @@ class SandboxClient:
         With ``lan_network_id`` set, the sandbox joins that LAN network once it is
         running, during this client's ``wait_for_creation`` or
         ``bulk_wait_for_creation``."""
-        payload = request.model_dump(
-            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
-        )
-        _omit_unset_memory_shape(request, payload)
-        # VM is the only runtime; send it explicitly so the created runtime
-        # never depends on server-side defaults changing underneath the SDK.
-        payload["vm"] = True
-        # Auto-populate team_id from config if not specified
-        if request.team_id is None and self.client.config.team_id is not None:
-            payload["team_id"] = self.client.config.team_id
-        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
-
+        payload = _create_payload(request, self.client.config.team_id)
         response = self.client.request(
             "POST",
             "/sandbox",
             json=payload,
             idempotent_post=True,
         )
+        return self._accept_created(request, response)
+
+    def create_bundle(
+        self, requests: List[CreateSandboxRequest], idempotency_key: Optional[str] = None
+    ) -> List[Sandbox]:
+        """Create up to 12 sandboxes together on one node, all or nothing.
+
+        Members must share team, architecture, and GPU type; totals are capped
+        at 48 CPU cores, 48 GB memory, 1000 GB disk, and 8 GPUs. Each member
+        boots independently: wait with ``wait_for_bundle``, which deletes the
+        whole bundle if any member fails to start."""
+        payload = {
+            "sandboxes": [_create_payload(r, self.client.config.team_id) for r in requests],
+            "idempotency_key": idempotency_key or uuid.uuid4().hex,
+        }
+        response = self.client.request(
+            "POST",
+            "/sandbox/bundle",
+            json=payload,
+            idempotent_post=True,
+        )
+        return [
+            self._accept_created(r, created)
+            for r, created in zip(requests, response["sandboxes"], strict=True)
+        ]
+
+    def wait_for_bundle(
+        self,
+        sandbox_ids: List[str],
+        max_attempts: int = 60,
+        image_build_timeout_seconds: int = 3000,
+    ) -> Dict[str, str]:
+        """Wait until every sandbox of a bundle is running.
+
+        A bundle is all or nothing: if any member fails or the wait times out,
+        every member is deleted, including those already running, and the
+        error is raised with the cleanup outcome."""
+        try:
+            return self.bulk_wait_for_creation(
+                sandbox_ids,
+                max_attempts=max_attempts,
+                image_build_timeout_seconds=image_build_timeout_seconds,
+            )
+        except Exception as error:
+            try:
+                self.bulk_delete(sandbox_ids=sandbox_ids)
+            except Exception as cleanup:
+                raise RuntimeError(
+                    f"Bundle did not start ({error}); deleting its sandboxes also failed "
+                    f"({cleanup}): delete {sandbox_ids} yourself"
+                ) from error
+            raise RuntimeError(f"Bundle did not start and was deleted: {error}") from error
+
+    def _accept_created(self, request: CreateSandboxRequest, response: Dict[str, Any]) -> Sandbox:
         sandbox = Sandbox.model_validate(response)
         # Seed the auth cache so the first gateway call skips POST /auth.
         if auth := response.get("gatewayAuth"):
@@ -4257,23 +4317,69 @@ class AsyncSandboxClient:
         With ``lan_network_id`` set, the sandbox joins that LAN network once it is
         running, during this client's ``wait_for_creation`` or
         ``bulk_wait_for_creation``."""
-        payload = request.model_dump(
-            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
-        )
-        _omit_unset_memory_shape(request, payload)
-        # VM is the only runtime; send it explicitly so the created runtime
-        # never depends on server-side defaults changing underneath the SDK.
-        payload["vm"] = True
-        if request.team_id is None and self.client.config.team_id is not None:
-            payload["team_id"] = self.client.config.team_id
-        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
-
+        payload = _create_payload(request, self.client.config.team_id)
         response = await self.client.request(
             "POST",
             "/sandbox",
             json=payload,
             idempotent_post=True,
         )
+        return await self._accept_created(request, response)
+
+    async def create_bundle(
+        self, requests: List[CreateSandboxRequest], idempotency_key: Optional[str] = None
+    ) -> List[Sandbox]:
+        """Create up to 12 sandboxes together on one node, all or nothing.
+
+        Members must share team, architecture, and GPU type; totals are capped
+        at 48 CPU cores, 48 GB memory, 1000 GB disk, and 8 GPUs. Each member
+        boots independently: wait with ``wait_for_bundle``, which deletes the
+        whole bundle if any member fails to start."""
+        payload = {
+            "sandboxes": [_create_payload(r, self.client.config.team_id) for r in requests],
+            "idempotency_key": idempotency_key or uuid.uuid4().hex,
+        }
+        response = await self.client.request(
+            "POST",
+            "/sandbox/bundle",
+            json=payload,
+            idempotent_post=True,
+        )
+        return [
+            await self._accept_created(r, created)
+            for r, created in zip(requests, response["sandboxes"], strict=True)
+        ]
+
+    async def wait_for_bundle(
+        self,
+        sandbox_ids: List[str],
+        max_attempts: int = 60,
+        image_build_timeout_seconds: int = 3000,
+    ) -> Dict[str, str]:
+        """Wait until every sandbox of a bundle is running.
+
+        A bundle is all or nothing: if any member fails or the wait times out,
+        every member is deleted, including those already running, and the
+        error is raised with the cleanup outcome."""
+        try:
+            return await self.bulk_wait_for_creation(
+                sandbox_ids,
+                max_attempts=max_attempts,
+                image_build_timeout_seconds=image_build_timeout_seconds,
+            )
+        except Exception as error:
+            try:
+                await self.bulk_delete(sandbox_ids=sandbox_ids)
+            except Exception as cleanup:
+                raise RuntimeError(
+                    f"Bundle did not start ({error}); deleting its sandboxes also failed "
+                    f"({cleanup}): delete {sandbox_ids} yourself"
+                ) from error
+            raise RuntimeError(f"Bundle did not start and was deleted: {error}") from error
+
+    async def _accept_created(
+        self, request: CreateSandboxRequest, response: Dict[str, Any]
+    ) -> Sandbox:
         sandbox = Sandbox.model_validate(response)
         # Seed the auth cache so the first gateway call skips POST /auth.
         if auth := response.get("gatewayAuth"):

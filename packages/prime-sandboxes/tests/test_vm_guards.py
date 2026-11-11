@@ -183,3 +183,76 @@ async def test_async_vm_ssh_session_sends_public_key():
     assert client.client.request.await_args_list[0].kwargs["json"] == {
         "public_key": "ssh-ed25519 key"
     }
+
+
+def test_sync_create_bundle_posts_members_and_seeds_each():
+    client = _make_sync_client()
+    client.client = MagicMock()
+    client.client.config.team_id = "team-1"
+    client.client.request.return_value = {
+        "bundle_id": "b1",
+        "sandboxes": [
+            {**_sandbox_response(), "id": "sbx-a", "gatewayAuth": _auth_payload()},
+            {**_sandbox_response(), "id": "sbx-b"},
+        ],
+    }
+
+    sandboxes = client.create_bundle(
+        [CreateSandboxRequest(name="a", docker_image="img")] * 2, idempotency_key="k"
+    )
+
+    call = client.client.request.call_args
+    assert call.args[1] == "/sandbox/bundle"
+    payload = call.kwargs["json"]
+    assert payload["idempotency_key"] == "k"
+    assert [m["team_id"] for m in payload["sandboxes"]] == ["team-1", "team-1"]
+    assert all(m["vm"] is True for m in payload["sandboxes"])
+    assert [s.id for s in sandboxes] == ["sbx-a", "sbx-b"]
+    assert cast(Any, client)._auth_cache.seeded == {"sbx-a": _auth_payload()}
+
+
+def test_wait_for_bundle_returns_statuses_without_deleting():
+    client = _make_sync_client()
+    cast(Any, client).bulk_wait_for_creation = MagicMock(
+        return_value={"a": "RUNNING", "b": "RUNNING"}
+    )
+    cast(Any, client).bulk_delete = MagicMock()
+
+    assert client.wait_for_bundle(["a", "b"]) == {"a": "RUNNING", "b": "RUNNING"}
+    cast(Any, client).bulk_delete.assert_not_called()
+
+
+def test_wait_for_bundle_deletes_every_member_when_one_fails():
+    client = _make_sync_client()
+    cast(Any, client).bulk_wait_for_creation = MagicMock(
+        side_effect=RuntimeError("Sandboxes failed: [('b', 'ERROR')]")
+    )
+    cast(Any, client).bulk_delete = MagicMock()
+
+    with pytest.raises(RuntimeError, match="did not start and was deleted.*'b', 'ERROR'"):
+        client.wait_for_bundle(["a", "b"])
+    cast(Any, client).bulk_delete.assert_called_once_with(sandbox_ids=["a", "b"])
+
+
+def test_wait_for_bundle_names_sandboxes_left_when_cleanup_fails():
+    client = _make_sync_client()
+    cast(Any, client).bulk_wait_for_creation = MagicMock(
+        side_effect=RuntimeError("Timeout waiting")
+    )
+    cast(Any, client).bulk_delete = MagicMock(side_effect=RuntimeError("503"))
+
+    with pytest.raises(RuntimeError, match=r"also failed \(503\): delete \['a', 'b'\] yourself"):
+        client.wait_for_bundle(["a", "b"])
+
+
+@pytest.mark.asyncio
+async def test_async_wait_for_bundle_deletes_every_member_on_timeout():
+    client = _make_async_client()
+    cast(Any, client).bulk_wait_for_creation = AsyncMock(
+        side_effect=RuntimeError("Timeout waiting")
+    )
+    cast(Any, client).bulk_delete = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="did not start and was deleted"):
+        await client.wait_for_bundle(["a", "b"])
+    cast(Any, client).bulk_delete.assert_awaited_once_with(sandbox_ids=["a", "b"])

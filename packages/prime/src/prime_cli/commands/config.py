@@ -196,17 +196,30 @@ def set_team_id(
 
     team_name = None
     team_role = None
+    lookup_failed = False
     if team_id:
         try:
             client = APIClient()
             teams = fetch_teams(client)
+        except (APIError, Exception):
+            # Can't reach the API: warn and save rather than blocking offline use.
+            lookup_failed = True
+        else:
             for team in teams:
                 if team.get("teamId") == team_id:
                     team_name = team.get("name")
                     team_role = team.get("role")
                     break
-        except (APIError, Exception):
-            pass
+            else:
+                # The lookup worked and the id isn't in it. Saving anyway is the
+                # expensive failure: dispatch sends team_id as an optional field,
+                # so a team you don't belong to doesn't 400, the run just lands on
+                # your personal account and the first sign is the invoice.
+                console.print(f"[red]Error: You are not a member of team '{team_id}'.[/red]")
+                console.print(
+                    "[yellow]List the teams you belong to with 'prime teams list'.[/yellow]"
+                )
+                raise typer.Exit(code=1)
 
     config.set_team(team_id, team_name=team_name, team_role=team_role)
     if team_id:
@@ -214,6 +227,11 @@ def set_team_id(
             console.print(f"[green]Team '{team_name}' ({team_id}) configured successfully![/green]")
         else:
             console.print(f"[green]Team ID '{team_id}' configured successfully![/green]")
+        if lookup_failed:
+            console.print(
+                "[yellow]Warning: couldn't reach the API to confirm you're a member of "
+                "this team. Verify with 'prime teams list' before launching a run.[/yellow]"
+            )
     else:
         console.print("[green]Team ID cleared. Using personal account.[/green]")
 

@@ -308,13 +308,22 @@ def test_volume_grow_requires_size_option(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 
 def _fake_publish(captured: dict[str, Any], checkpoint: Any = None) -> None:
-    def fake_publish(
-        self: Any, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> Any:
-        captured["args"] = (sandbox_id, name, force, wait)
+    def fake_publish(self: Any, sandbox_id: str, name: str, *, wait: bool = True) -> Any:
+        captured["args"] = (sandbox_id, name, wait)
         return checkpoint
 
     return fake_publish
+
+
+def _fake_wait(captured: dict[str, Any], checkpoint: Any = None) -> None:
+    def fake_wait(self: Any, checkpoint_id: str, timeout_seconds: float = 300) -> Any:
+        captured["wait"] = (checkpoint_id, timeout_seconds)
+        return checkpoint
+
+    return fake_wait
+
+
+# --- D2: prime sandbox volumes publish ---
 
 
 def test_volume_publish_waits_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
@@ -322,42 +331,95 @@ def test_volume_publish_waits_by_default(monkeypatch: pytest.MonkeyPatch, tmp_pa
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         "prime_sandboxes.volumes.Volumes.publish",
-        _fake_publish(captured, SimpleNamespace(id="chk-1", state="DURABLE")),
+        _fake_publish(captured, SimpleNamespace(id="chk-1", state="PENDING", merge=None)),
+    )
+    monkeypatch.setattr(
+        "prime_sandboxes.sandbox.SandboxClient.wait_for_checkpoint",
+        _fake_wait(captured, SimpleNamespace(id="chk-1", state="DURABLE", merge=None)),
     )
 
     result = runner.invoke(app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1"])
 
     assert result.exit_code == 0, result.output
     output = strip_ansi(result.output)
-    assert captured["args"] == ("sbx-1", "data", False, True)
+    assert captured["args"] == ("sbx-1", "data", False)
+    assert captured["wait"] == ("chk-1", 300)
     assert "Checkpoint ID: chk-1" in output
     assert "State: DURABLE" in output
     assert "Published volume data" in output
     assert "not yet DURABLE" not in output
 
 
-def test_volume_publish_force_no_wait_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+def test_volume_publish_no_wait_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         "prime_sandboxes.volumes.Volumes.publish",
-        _fake_publish(captured, SimpleNamespace(id="chk-1", state="PENDING")),
+        _fake_publish(captured, SimpleNamespace(id="chk-1", state="PENDING", merge=None)),
     )
 
     result = runner.invoke(
         app,
-        ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1", "--force", "--no-wait"],
+        ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1", "--no-wait"],
     )
 
     assert result.exit_code == 0, result.output
     output = strip_ansi(result.output)
-    assert captured["args"] == ("sbx-1", "data", True, False)
+    assert captured["args"] == ("sbx-1", "data", False)
+    assert "wait" not in captured
     assert "Checkpoint ID: chk-1" in output
     assert "State: PENDING" in output
     # No success claim before DURABLE, plus an honest check command.
     assert "Published volume data" not in output
     assert "not yet DURABLE" in output
     assert "prime sandbox checkpoint get chk-1" in " ".join(output.split())
+
+
+def test_volume_publish_wait_timeout_passthrough(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.publish",
+        _fake_publish(captured, SimpleNamespace(id="chk-1", state="PENDING", merge=None)),
+    )
+    monkeypatch.setattr(
+        "prime_sandboxes.sandbox.SandboxClient.wait_for_checkpoint",
+        _fake_wait(captured, SimpleNamespace(id="chk-1", state="DURABLE", merge=None)),
+    )
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1", "--wait-timeout", "42"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["wait"] == ("chk-1", 42)
+
+
+def test_volume_publish_wait_timeout_rejects_nonpositive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.publish",
+        _fake_publish(captured, SimpleNamespace(id="chk-1", state="PENDING", merge=None)),
+    )
+
+    def invalid_wait(self: Any, checkpoint_id: str, timeout_seconds: float = 300) -> Any:
+        raise ValueError("timeout_seconds must be finite and greater than zero")
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.SandboxClient.wait_for_checkpoint", invalid_wait)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1", "--wait-timeout", "0"],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "must be finite and greater than zero" in strip_ansi(result.output)
 
 
 def test_volume_publish_surfaces_api_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
@@ -372,7 +434,7 @@ def test_volume_publish_surfaces_api_errors(monkeypatch: pytest.MonkeyPatch, tmp
             self: Any,
             sandbox_id: str,
             name: str,
-            force: bool = False,
+            *,
             wait: bool = True,
             message: str = message,
         ) -> Any:
@@ -384,25 +446,21 @@ def test_volume_publish_surfaces_api_errors(monkeypatch: pytest.MonkeyPatch, tmp
         assert message in strip_ansi(result.output)
 
 
-def test_volume_publish_409_even_with_force(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+def test_volume_publish_409_conflict(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
 
-    def conflict(
-        self: Any, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> Any:
-        captured["args"] = (sandbox_id, name, force, wait)
+    def conflict(self: Any, sandbox_id: str, name: str, *, wait: bool = True) -> Any:
+        captured["args"] = (sandbox_id, name, wait)
         raise APIError("HTTP 409: Another sandbox's publish is in flight")
 
     monkeypatch.setattr("prime_sandboxes.volumes.Volumes.publish", conflict)
 
-    result = runner.invoke(
-        app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1", "--force"]
-    )
+    result = runner.invoke(app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1"])
 
     assert result.exit_code == 1, result.output
     output = strip_ansi(result.output)
-    assert captured["args"] == ("sbx-1", "data", True, True)
+    assert captured["args"] == ("sbx-1", "data", False)
     assert "HTTP 409" in output
     assert "Another sandbox" in output
 
@@ -413,19 +471,23 @@ def test_volume_publish_wait_timeout_reports_recovery(
     _configure_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "prime_sandboxes.volumes.Volumes.publish",
-        lambda self, sandbox_id, name, force=True, wait=True: (_ for _ in ()).throw(
-            TimeoutError("Checkpoint chk-1 did not become DURABLE within 300s")
-        ),
+        _fake_publish({}, SimpleNamespace(id="chk-1", state="PENDING", merge="pending")),
     )
+
+    def wait_timeout(self: Any, checkpoint_id: str, timeout_seconds: float = 300) -> Any:
+        raise TimeoutError(
+            "Checkpoint chk-1 did not finish its volume merge within 300s (merge=pending)"
+        )
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.SandboxClient.wait_for_checkpoint", wait_timeout)
 
     result = runner.invoke(app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1"])
 
     assert result.exit_code == 1, result.output
     output = " ".join(strip_ansi(result.output).split())
-    assert "did not become DURABLE within 300s" in output
-    assert "The publish may still complete" in output
-    assert "prime sandbox checkpoint get" in output
-    assert "the id is in the message above" in output
+    assert "did not finish its volume merge within 300s" in output
+    assert "Stopped waiting; the publication may still complete." in output
+    assert "prime sandbox checkpoint get chk-1" in output
 
 
 def test_volume_publish_wait_failed_exits_error(
@@ -434,15 +496,20 @@ def test_volume_publish_wait_failed_exits_error(
     _configure_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "prime_sandboxes.volumes.Volumes.publish",
-        lambda self, sandbox_id, name, force=True, wait=True: (_ for _ in ()).throw(
-            RuntimeError("Checkpoint chk-1 cannot become durable (state=FAILED): no error details")
-        ),
+        _fake_publish({}, SimpleNamespace(id="chk-1", state="PENDING", merge=None)),
     )
+
+    def wait_failed(self: Any, checkpoint_id: str, timeout_seconds: float = 300) -> Any:
+        raise RuntimeError("Checkpoint chk-1's volume merge failed: writer output rejected")
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.SandboxClient.wait_for_checkpoint", wait_failed)
 
     result = runner.invoke(app, ["sandbox", "volumes", "publish", "data", "--sandbox", "sbx-1"])
 
     assert result.exit_code == 1, result.output
-    assert "state=FAILED" in strip_ansi(result.output)
+    output = " ".join(strip_ansi(result.output).split())
+    assert "volume merge failed" in output
+    assert "prime sandbox checkpoint get chk-1" in output
 
 
 def test_volume_publish_requires_sandbox_option(
@@ -619,12 +686,10 @@ def _configure_import_mocks(
         state["deleted"].append(sandbox_id)
         return {}
 
-    def fake_publish(
-        self: Any, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> Any:
+    def fake_publish(self: Any, sandbox_id: str, name: str, wait: bool = True) -> Any:
         state["order"].append("publish")
         state["api_clients"].add(id(self._parent.client))
-        state["publish_calls"].append((sandbox_id, name, force, wait))
+        state["publish_calls"].append((sandbox_id, name, wait))
         return SimpleNamespace(id="chk-1", state="PENDING")
 
     def fake_wait_checkpoint(self: Any, checkpoint_id: str, **kwargs: Any) -> Any:
@@ -723,7 +788,7 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
         "wait_checkpoint",
         "delete",
     ]
-    assert state["publish_calls"] == [("sbx-import-1", "data", False, False)]
+    assert state["publish_calls"] == [("sbx-import-1", "data", False)]
     assert state["checkpoint_waits"] == ["chk-1"]
     # One sandbox client runs the whole flow: one API transport and waiter.
     assert len(state["api_clients"]) == 1
@@ -844,7 +909,7 @@ def test_volume_import_reuses_existing_volume_scope(
     assert "Volume data already exists in this scope" in output
     assert "copying the local directory into its current published contents" in output
     assert "resumes incrementally" not in output
-    assert state["publish_calls"] == [("sbx-import-1", "data", False, False)]
+    assert state["publish_calls"] == [("sbx-import-1", "data", False)]
     assert state["volume_creates"] == [("data", "team-1", None), ("data", "team-1", None)]
     # Same scope carried into the reused importer sandbox.
     assert state["sandbox_request"].team_id == "team-1"
@@ -989,10 +1054,8 @@ def test_volume_import_publish_conflict_retains_importer(
     _configure_cli(monkeypatch, tmp_path)
     state = _configure_import_mocks(monkeypatch, tmp_path)
 
-    def conflict(
-        self: Any, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> Any:
-        state["publish_calls"].append((sandbox_id, name, force, wait))
+    def conflict(self: Any, sandbox_id: str, name: str, wait: bool = True) -> Any:
+        state["publish_calls"].append((sandbox_id, name, wait))
         raise APIError("HTTP 409: Another sandbox's publish is in flight")
 
     monkeypatch.setattr("prime_sandboxes.volumes.Volumes.publish", conflict)
@@ -1022,10 +1085,8 @@ def test_volume_import_retention_hint_carries_team_scope(
     _configure_cli(monkeypatch, tmp_path)
     state = _configure_import_mocks(monkeypatch, tmp_path)
 
-    def conflict(
-        self: Any, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> Any:
-        state["publish_calls"].append((sandbox_id, name, force, wait))
+    def conflict(self: Any, sandbox_id: str, name: str, wait: bool = True) -> Any:
+        state["publish_calls"].append((sandbox_id, name, wait))
         raise APIError("HTTP 409: Another sandbox's publish is in flight")
 
     monkeypatch.setattr("prime_sandboxes.volumes.Volumes.publish", conflict)
@@ -1074,7 +1135,7 @@ def test_volume_import_publish_timeout_retains_importer(
 
     assert result.exit_code == 1, result.output
     output = " ".join(strip_ansi(result.output).split())
-    assert state["publish_calls"] == [("sbx-import-1", "data", False, False)]
+    assert state["publish_calls"] == [("sbx-import-1", "data", False)]
     assert "did not become DURABLE within 300s" in output
     assert "The publish may still complete" in output
     # Unknown publish state: importer kept, both ids disclosed, no

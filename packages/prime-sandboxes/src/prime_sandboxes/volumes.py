@@ -115,22 +115,25 @@ class Volumes:
         )
         return Volume.model_validate(response)
 
-    def publish(
-        self, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> SandboxCheckpoint:
+    def publish(self, sandbox_id: str, name: str, *, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
+        ``wait`` is keyword-only so an old third positional argument (the
+        removed ``force`` flag) raises instead of silently meaning
+        ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
-        (400), or has another sandbox's publish in flight (409); a moved
-        head is 409 unless force is True. With wait=True (the default), the
-        returned checkpoint is the published head once DURABLE; a failed
-        publish raises RuntimeError and an unfinished publish TimeoutError.
+        (400), or has another sandbox's publish in flight (409). With
+        wait=True (the default), the returned checkpoint is the published
+        head once DURABLE; on servers that report volume-merge status the
+        wait also covers the checkpoint's merge, and a failed merge raises
+        RuntimeError with merge_error. A failed publish raises RuntimeError
+        and an unfinished publish TimeoutError.
         """
         response = self._parent.client.request(
             "POST",
             _publish_path(sandbox_id, name),
-            json={"force": force},
+            json={},
         )
         checkpoint = SandboxCheckpoint.model_validate(response)
         if not wait:
@@ -219,22 +222,25 @@ class AsyncVolumes:
         )
         return Volume.model_validate(response)
 
-    async def publish(
-        self, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> SandboxCheckpoint:
+    async def publish(self, sandbox_id: str, name: str, *, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
+        ``wait`` is keyword-only so an old third positional argument (the
+        removed ``force`` flag) raises instead of silently meaning
+        ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
-        (400), or has another sandbox's publish in flight (409); a moved
-        head is 409 unless force is True. With wait=True (the default), the
-        returned checkpoint is the published head once DURABLE; a failed
-        publish raises RuntimeError and an unfinished publish TimeoutError.
+        (400), or has another sandbox's publish in flight (409). With
+        wait=True (the default), the returned checkpoint is the published
+        head once DURABLE; on servers that report volume-merge status the
+        wait also covers the checkpoint's merge, and a failed merge raises
+        RuntimeError with merge_error. A failed publish raises RuntimeError
+        and an unfinished publish TimeoutError.
         """
         response = await self._parent.client.request(
             "POST",
             _publish_path(sandbox_id, name),
-            json={"force": force},
+            json={},
         )
         checkpoint = SandboxCheckpoint.model_validate(response)
         if not wait:

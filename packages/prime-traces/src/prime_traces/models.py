@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 SearchField = Literal["content", "reasoning_content", "tool_calls"]
 # The service classifies a run from its newest trace's upload context.
-RunType = Literal["eval", "train", "unknown"]
+RunType = Literal["eval", "train", "inference", "unknown"]
 
 
 class TraceSearchMatch(BaseModel):

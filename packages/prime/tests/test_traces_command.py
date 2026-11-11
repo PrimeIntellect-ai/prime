@@ -9,6 +9,7 @@ from prime_cli.commands import traces as traces_cmd
 from prime_cli.core import Config
 from prime_cli.core.config import ConfigModel
 from prime_cli.main import app as main_app
+from prime_cli.utils import get_traces_viewer_url
 from prime_traces import (
     APIError,
     Batch,
@@ -425,6 +426,10 @@ def _run_steps(*steps):
     )
 
 
+FRONTEND = "https://app.example"
+VIEWER = f"{FRONTEND}/dashboard/training/viewer"
+
+
 class FakeTracesClient:
     def __init__(self):
         self.calls: dict = {}
@@ -495,6 +500,7 @@ class FakeTracesClient:
 @pytest.fixture()
 def fake_client(monkeypatch):
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_FRONTEND_URL", FRONTEND)
     client = FakeTracesClient()
     monkeypatch.setattr(traces_cmd, "_traces_client", lambda: client)
     # A personal account unless a test says otherwise: no team member lookup.
@@ -2089,3 +2095,202 @@ def test_get_runs_hints_quote_the_run_id_for_the_shell(fake_client):
     output = " ".join(result.output.split())
     assert "--run-id 'run 1;rm' --run-step <step>" in output
     assert "Traces: prime traces list --run-id 'run 1;rm'" in output
+
+
+# ---------------------------------------------------------------------------
+# Viewer links
+# ---------------------------------------------------------------------------
+
+
+def test_viewer_url_links_one_trace():
+    url = get_traces_viewer_url(
+        "682c04aa", episode_id="4da74e0e", trace_id="5f132ad3", frontend_url=FRONTEND + "/"
+    )
+    assert url == (
+        f"{VIEWER}/682c04aa/traces?episodeId=4da74e0e&traceId=5f132ad3&viewerLayout=viewer"
+    )
+
+
+def test_viewer_url_without_episode_links_the_run_page():
+    # The viewer resolves a trace only through its episode.
+    url = get_traces_viewer_url("682c04aa", trace_id="5f132ad3", step=3, frontend_url=FRONTEND)
+    assert url == f"{VIEWER}/682c04aa/traces"
+
+
+def test_viewer_url_carries_the_training_step():
+    url = get_traces_viewer_url("r", episode_id="e", trace_id="t", step=0, frontend_url=FRONTEND)
+    assert url.endswith("?episodeId=e&traceId=t&viewerLayout=viewer&step=0")
+
+
+def test_viewer_url_encodes_path_and_query():
+    url = get_traces_viewer_url(
+        "team/run 1?", episode_id="ep&x=1", trace_id="tr #1", frontend_url=FRONTEND
+    )
+    assert url == (
+        f"{VIEWER}/team%2Frun%201%3F/traces"
+        "?episodeId=ep%26x%3D1&traceId=tr%20%231&viewerLayout=viewer"
+    )
+
+
+def test_viewer_url_defaults_to_the_configured_frontend(monkeypatch):
+    monkeypatch.setenv("PRIME_FRONTEND_URL", "https://staging.example/")
+    assert (
+        get_traces_viewer_url("r") == "https://staging.example/dashboard/training/viewer/r/traces"
+    )
+
+
+def test_viewer_url_prefers_one_the_service_returns(fake_client):
+    served = "https://app.example/somewhere/else"
+    assert traces_cmd._viewer_url(_summary(url=served)) == served
+    assert traces_cmd._viewer_url(_summary(run_id=None, url=served)) == served
+
+
+def test_get_json_and_table_include_the_viewer_link(fake_client, monkeypatch):
+    monkeypatch.setattr(traces_cmd.console, "width", 120)
+    fake_client.get = lambda trace_id: _summary(trace_id=trace_id, episode_id="ep_4c1d", run_step=2)
+    expected = (
+        f"{VIEWER}/run_9f3k2m/traces?episodeId=ep_4c1d&traceId=8d3f1a2b&viewerLayout=viewer&step=2"
+    )
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "-o", "json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["url"] == expected
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b"])
+    assert result.exit_code == 0, result.output
+    assert f"View: {expected}" in result.output
+
+
+def test_get_trace_without_episode_links_its_run(fake_client):
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["url"] == f"{VIEWER}/run_9f3k2m/traces"
+
+
+def test_get_trace_without_run_has_no_viewer_link(fake_client, monkeypatch):
+    monkeypatch.setattr(traces_cmd.console, "width", 120)
+    fake_client.get = lambda trace_id: _summary(trace_id=trace_id, run_id=None, episode_id="ep")
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b", "-o", "json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["url"] is None
+
+    result = runner.invoke(main_app, ["traces", "get", "8d3f1a2b"])
+    assert result.exit_code == 0, result.output
+    assert "No viewer link" in result.output
+    assert "/dashboard/" not in result.output
+
+
+def test_get_episode_and_run_include_viewer_links(fake_client):
+    result = runner.invoke(main_app, ["traces", "get", "ep_4c1d", "--episodes", "-o", "json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["url"] == (
+        f"{VIEWER}/run_9f3k2m/traces?episodeId=ep_4c1d&viewerLayout=viewer"
+    )
+
+    result = runner.invoke(main_app, ["traces", "get", "run_9f3k2m", "--runs", "-o", "json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["url"] == f"{VIEWER}/run_9f3k2m/traces"
+
+
+def test_list_json_carries_a_viewer_link_per_item(fake_client):
+    fake_client.list = lambda **kwargs: TraceListPage(
+        items=[
+            _summary(trace_id="t1", episode_id="e1"),
+            _summary(trace_id="t2"),
+            _summary(trace_id="t3", run_id=None, episode_id="e3"),
+        ],
+        next_cursor=None,
+    )
+
+    result = runner.invoke(main_app, ["traces", "list", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert [item["url"] for item in json.loads(result.output)["items"]] == [
+        f"{VIEWER}/run_9f3k2m/traces?episodeId=e1&traceId=t1&viewerLayout=viewer",
+        f"{VIEWER}/run_9f3k2m/traces",
+        None,
+    ]
+
+
+@pytest.mark.parametrize(
+    "flag, url",
+    [
+        ("--episodes", f"{VIEWER}/run_9f3k2m/traces?episodeId=ep_4c1d&viewerLayout=viewer"),
+        ("--runs", f"{VIEWER}/run_9f3k2m/traces"),
+    ],
+)
+def test_list_episodes_and_runs_json_carry_viewer_links(fake_client, flag, url):
+    result = runner.invoke(main_app, ["traces", "list", flag, "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["items"][0]["url"] == url
+
+
+def test_list_table_points_to_viewer_links_without_a_column(fake_client):
+    result = runner.invoke(main_app, ["traces", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "/dashboard/" not in result.output
+    assert "Viewer links: prime traces get <trace_id>, or -o json" in result.output
+
+
+def _jsonl(path, *documents):
+    path.write_text("".join(json.dumps(d) + "\n" for d in documents))
+    return path
+
+
+def test_upload_links_each_run_named_by_trace_lines(fake_client, tmp_path):
+    traces_file = _jsonl(
+        tmp_path / "traces.jsonl",
+        {"id": "a", "run": {"id": "run_b"}},
+        {"id": "b", "run": {"id": "run_a"}},
+        {"id": "c", "run": {"id": "run_b"}},
+        {"id": "d"},
+    )
+
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file)])
+    assert result.exit_code == 0, result.output
+    assert f"View run run_b: {VIEWER}/run_b/traces" in result.output
+    assert f"View run run_a: {VIEWER}/run_a/traces" in result.output
+    assert result.output.index("run_b:") < result.output.index("run_a:")
+
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file), "-o", "json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["runs"] == [
+        {"run_id": "run_b", "url": f"{VIEWER}/run_b/traces"},
+        {"run_id": "run_a", "url": f"{VIEWER}/run_a/traces"},
+    ]
+
+
+def test_upload_episodes_read_member_runs_then_the_envelope(fake_client, tmp_path):
+    episodes_file = _jsonl(
+        tmp_path / "episodes.jsonl",
+        {"id": "e1", "run": {"id": "outer"}, "traces": [{"run": {"id": "inner"}}, {}]},
+        {"id": "e2", "run": {"id": "only_envelope"}, "traces": []},
+    )
+
+    result = runner.invoke(
+        main_app, ["traces", "upload", str(episodes_file), "--episodes", "-o", "json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [run["run_id"] for run in json.loads(result.output)["runs"]] == [
+        "inner",
+        "outer",
+        "only_envelope",
+    ]
+
+
+def test_upload_without_run_ids_says_there_is_no_viewer_page(fake_client, tmp_path):
+    traces_file = _jsonl(tmp_path / "traces.jsonl", {"id": "a"}, {"id": "b", "run": None})
+
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file)])
+    assert result.exit_code == 0, result.output
+    assert "No viewer link" in result.output
+    assert "/dashboard/" not in result.output
+
+    result = runner.invoke(main_app, ["traces", "upload", str(traces_file), "-o", "json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["runs"] == []

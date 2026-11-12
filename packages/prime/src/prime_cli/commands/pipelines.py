@@ -243,7 +243,8 @@ def _card(
         return matches[0]
     if not matches:
         _fail(ValueError(f"nothing waiting matches; see prime pipelines get {run_id}"))
-    listed = ", ".join(f"--node {c['node']} --job {c['job']}" for c in matches)
+    # Quoted for a shell, as the Answer line is: the names are the run's.
+    listed = ", ".join(shlex.join(["--node", c["node"], "--job", c["job"]]) for c in matches)
     _fail(ValueError(f"{len(matches)} questions match; name one with {listed}"))
 
 
@@ -341,10 +342,13 @@ def outputs(
                         file.write(chunk)
             # Only a complete download replaces what was there.
             partial.replace(target)
+            partial = None
         except (httpx.HTTPError, OSError) as error:
+            _fail(APIError(f"downloading {out['name']}: {error}"))
+        finally:
+            # Also on Ctrl-C, which is no Exception: a partial file is never left behind.
             if partial is not None:
                 partial.unlink(missing_ok=True)
-            _fail(APIError(f"downloading {out['name']}: {error}"))
         console.print(f"Saved {escape(str(target))}")
 
 

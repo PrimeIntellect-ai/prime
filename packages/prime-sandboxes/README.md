@@ -295,6 +295,30 @@ all reachable guests before releasing this SDK: older servers can ignore the
 protobuf field and execute as their default user. Existing guests must be upgraded
 or recreated before using this option.
 
+### Native Process Output Recovery
+
+`AsyncSandboxClient.open_process()` resumes interrupted output streams by session
+UUID and output sequence. Replayed chunks are deduplicated across stdout and
+stderr, and the final sequence is checked before accepting the exit code.
+
+Native sessions lease the bounded command connection pool for their lifetime,
+including reconnects. Connections are reused across commands, with capacity
+accounted for stdin and signal requests too, so blocked input cannot starve
+signals. Keep the sandbox client open until its process handles have been closed.
+
+sandboxd retains up to 4 MiB per command and 64 MiB across the guest, including
+record overhead. Connected readers apply backpressure rather than losing unread
+output. Disconnected output can be evicted; recovery then raises
+`ProcessOutputLostError` instead of returning incomplete output as success.
+Forced pipe closure also raises this error when complete output cannot be proven.
+Replay uses the existing guest-local session lifetime and does not survive a
+daemon restart or session expiration.
+
+Roll out sandboxd before releasing this SDK. Uninterrupted streams work with older
+daemons; an interruption fails explicitly when the server cannot replay output.
+Regenerate the Python protocol bindings from the platform checkout with
+`bash packages/prime-sandboxes/tools/generate-command-session.sh /path/to/platform`.
+
 ### File Operations
 
 ```python

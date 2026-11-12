@@ -66,17 +66,17 @@ def test_run_submits_the_graph_with_the_secrets_it_names(api: Dict[str, Any], tm
     assert body["graph"] == {"name": "g", "nodes": {}}
     assert body["secrets"] == {"GITHUB_TOKEN": "gh"} and body["sample"] == 2
     assert body["pipeline_id"] is None
-    assert "prime pipelines status run1" in result.output
+    assert "prime pipelines get run1" in result.output
 
 
 def test_run_saves_a_new_version_of_a_named_pipeline(api: Dict[str, Any], tmp_path) -> None:
     graph = tmp_path / "g.json"
     graph.write_text(json.dumps({"name": "g", "nodes": {}}))
     result = runner.invoke(
-        app, ["pipelines", "run", str(graph), "--pipeline-id", "p1"], env=TEST_ENV
+        app, ["pipelines", "run", str(graph), "--pipeline", "p1", "-t", "t1"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    assert api["post"][1]["pipeline_id"] == "p1"
+    assert api["post"][1]["pipeline_id"] == "p1" and api["post"][1]["team_id"] == "t1"
     assert "Pipeline: p1" in result.output
 
 
@@ -158,25 +158,58 @@ def test_run_refuses_a_secret_missing_from_the_environment(api: Dict[str, Any], 
     assert result.exit_code == 1 and "NOPE" in result.output and "post" not in api
 
 
-def test_status_shows_counts_cards_cost_and_outputs(api: Dict[str, Any]) -> None:
-    result = runner.invoke(app, ["pipelines", "status", "run1"], env=TEST_ENV)
+def test_get_shows_counts_what_waits_cost_and_outputs(api: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "get", "run1"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert api["get"] == "/pipelines/runs/run1"
     for text in ("scout", "Waiting on you", "Keep or drop each idea.", "$0.25", "report/report.md"):
         assert text in result.output
 
 
-def test_status_as_json(api: Dict[str, Any]) -> None:
-    result = runner.invoke(app, ["pipelines", "status", "run1", "-o", "json"], env=TEST_ENV)
-    assert result.exit_code == 0 and json.loads(result.output)["id"] == "run1"
+def test_get_as_json_is_the_run_with_what_waits(api: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "get", "run1", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    found = json.loads(result.output)
+    assert found["id"] == "run1" and found["state"]["cards"] == RUN["state"]["cards"]
 
 
-def test_stop(api: Dict[str, Any]) -> None:
-    result = runner.invoke(app, ["pipelines", "stop", "run1"], env=TEST_ENV)
+def test_stop_asks_first(api: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "stop", "run1"], env=TEST_ENV, input="n\n")
+    assert result.exit_code == 0 and "Stop run run1?" in result.output and "post" not in api
+    result = runner.invoke(app, ["pipelines", "stop", "run1"], env=TEST_ENV, input="y\n")
     assert result.exit_code == 0 and api["post"] == ("/pipelines/runs/run1/stop", None)
 
 
-def test_status_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch) -> None:
+def test_stop_without_a_terminal_stops_nothing_unless_told_yes(api: Dict[str, Any]) -> None:
+    # No answer to read: it ends, rather than waiting, and nothing is stopped.
+    result = runner.invoke(app, ["pipelines", "--plain", "stop", "run1"], env=TEST_ENV, input="")
+    assert result.exit_code == 1 and "post" not in api
+    result = runner.invoke(app, ["pipelines", "--plain", "stop", "run1", "--yes"], env=TEST_ENV)
+    assert result.exit_code == 0 and api["post"] == ("/pipelines/runs/run1/stop", None)
+
+
+def test_the_group_is_five_commands(api: Dict[str, Any]) -> None:
+    from prime_cli.commands.pipelines import app as pipelines
+
+    assert sorted(command.name for command in pipelines.registered_commands) == [
+        "get",
+        "outputs",
+        "reply",
+        "run",
+        "stop",
+    ]
+
+
+@pytest.mark.parametrize("command", ["run", "get"])
+def test_help_documents_the_json_output(api: Dict[str, Any], command) -> None:
+    result = runner.invoke(app, ["pipelines", command, "--help"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    text = " ".join(strip_ansi(result.output).replace("│", " ").split())
+    assert "JSON output (--output json):" in text and "pipeline_id" in text
+    assert (".state.cards[]" in text) == (command == "get")
+
+
+def test_get_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch) -> None:
     run = {
         **RUN,
         "error": "bad [type=missing]",
@@ -189,7 +222,7 @@ def test_status_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch
     monkeypatch.setattr(
         "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
     )
-    result = runner.invoke(app, ["pipelines", "status", "run1"], env=TEST_ENV)
+    result = runner.invoke(app, ["pipelines", "get", "run1"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert "bad [type=missing]" in result.output and "Choose [keep/drop]" in result.output
     assert "report/[/red].md" in result.output
@@ -356,12 +389,13 @@ def _reply(review: Dict[str, Any], *args: str) -> Any:
     return result, sent
 
 
-def test_cards_lists_what_waits_and_how_to_answer_each(review: Dict[str, Any]) -> None:
-    result = runner.invoke(app, ["pipelines", "cards", "run1"], env=TEST_ENV)
+def test_get_lists_what_waits_and_how_to_answer_each(review: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "get", "run1"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert review["get"] == "/pipelines/runs/run1"
     for text in (
-        "review (job review.t1), review: Keep or drop each idea.",
+        "Waiting on you at review (job review.t1), review: Keep or drop each idea.",
+        "3 ideas",
         "- b",
         "gate (job graph), choice",
         "Options: yes, no",
@@ -373,20 +407,15 @@ def test_cards_lists_what_waits_and_how_to_answer_each(review: Dict[str, Any]) -
     assert review["posts"] == []
 
 
-def test_cards_say_why_a_reply_was_not_applied(review: Dict[str, Any]) -> None:
+def test_get_says_why_a_reply_was_not_applied(review: Dict[str, Any]) -> None:
     review["run"] = {
         **RUN,
         "state": {"cards": [], "skipped_controls": [{"seq": 3, "error": "KeyError: [job]"}]},
     }
-    result = runner.invoke(app, ["pipelines", "cards", "run1"], env=TEST_ENV)
+    result = runner.invoke(app, ["pipelines", "get", "run1"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
-    assert "control 3" in result.output and "KeyError: [job]" in result.output
-    assert "Nothing is waiting on you." in result.output
-
-
-def test_cards_as_json(review: Dict[str, Any]) -> None:
-    result = runner.invoke(app, ["pipelines", "cards", "run1", "-o", "json"], env=TEST_ENV)
-    assert result.exit_code == 0 and json.loads(result.output)["cards"] == CARDS
+    assert "Not applied (control 3): KeyError: [job]" in result.output
+    assert "Waiting on you" not in result.output
 
 
 @pytest.mark.parametrize(
@@ -410,6 +439,7 @@ def test_reply_to_a_review_sends_the_items_kept(review: Dict[str, Any], args, ke
         }
     ]
     assert f"Sent (control 7), keeping {len(keep)} of 3" in result.output
+    assert "prime pipelines get run1 says why" in result.output
 
 
 def test_reply_with_a_choice_and_to_a_question(review: Dict[str, Any]) -> None:
@@ -427,15 +457,15 @@ def test_reply_with_a_choice_and_to_a_question(review: Dict[str, Any]) -> None:
 @pytest.mark.parametrize(
     "args, error",
     [
-        ([], "3 cards match"),
-        (["--job", "graph", "--choice", "yes"], "2 cards match"),
-        (["--node", "nope"], "no waiting card matches"),
+        ([], "3 questions match"),
+        (["--job", "graph", "--choice", "yes"], "2 questions match"),
+        (["--node", "nope"], "nothing waiting matches; see prime pipelines get run1"),
         (["--node", "gate", "--choice", "maybe"], "choose one of: yes, no"),
         (["--node", "gate", "--keep", "a"], "it has no items"),
         (["--node", "review", "--choice", "yes"], "no options"),
         (["--node", "review"], "one of --keep, --drop or --keep-all"),
         (["--node", "review", "--keep", "a", "--drop", "b"], "one of --keep"),
-        (["--node", "review", "--keep", "z"], "not an item of this card: z"),
+        (["--node", "review", "--keep", "z"], "not an item of this review: z"),
         (["--node", "ask", "--note", "  "], "answer the question with --note"),
     ],
 )
@@ -459,18 +489,32 @@ def test_a_refused_reply_says_why(review: Dict[str, Any], monkeypatch) -> None:
     assert result.exit_code == 1 and "This run has finished" in result.output
 
 
-def test_refresh_and_drain(review: Dict[str, Any]) -> None:
-    assert (
-        runner.invoke(app, ["pipelines", "refresh", "run1", "traces"], env=TEST_ENV).exit_code == 0
-    )
-    assert runner.invoke(app, ["pipelines", "drain", "run1"], env=TEST_ENV).exit_code == 0
-    assert review["posts"] == [
-        ("/pipelines/runs/run1/control", {"control": {"type": "refresh", "node": "traces"}}),
-        ("/pipelines/runs/run1/control", {"control": {"type": "drain"}}),
-    ]
+def test_stop_with_drain_lets_running_work_finish(review: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "stop", "run1", "--drain"], env=TEST_ENV, input="n\n")
+    assert result.exit_code == 0 and "Wind down run run1?" in result.output
+    assert review["posts"] == []
+    result = runner.invoke(app, ["pipelines", "stop", "run1", "--drain", "-y"], env=TEST_ENV)
+    assert result.exit_code == 0 and "Sent (control 7)" in result.output
+    assert review["posts"] == [("/pipelines/runs/run1/control", {"control": {"type": "drain"}})]
     assert "get" not in review
 
 
+@pytest.mark.parametrize("gone", ["status", "cards", "drain", "refresh"])
+def test_the_commands_folded_away_are_gone(review: Dict[str, Any], gone) -> None:
+    result = runner.invoke(app, ["pipelines", gone, "run1"], env=TEST_ENV)
+    assert result.exit_code == 2 and review["posts"] == [] and "get" not in review
+
+
 def test_control_paths_encode_the_run_id(review: Dict[str, Any]) -> None:
-    assert runner.invoke(app, ["pipelines", "drain", "r/1"], env=TEST_ENV).exit_code == 0
+    result = runner.invoke(app, ["pipelines", "stop", "r/1", "--drain", "--yes"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
     assert review["posts"][0][0] == "/pipelines/runs/r%2F1/control"
+
+
+def test_outputs_say_when_the_folder_cannot_be_made(api: Dict[str, Any], tmp_path) -> None:
+    (tmp_path / "file").write_text("in the way")
+    result = runner.invoke(
+        app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path / "file" / "out")], env=TEST_ENV
+    )
+    assert result.exit_code == 1 and "downloading report.md" in result.output
+    assert "Traceback" not in result.output

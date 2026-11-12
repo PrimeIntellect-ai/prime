@@ -478,6 +478,7 @@ def test_kubectl_is_confined_to_the_grant_namespace(e2e):
 def _cert_covers(proxy: _PoolProxy, ca_data: str, name: str) -> bool:
     """Whether the apiserver certificate behind `proxy` is valid for `name`."""
     context = ssl.create_default_context(cadata=base64.b64decode(ca_data).decode())
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     with socket.create_connection((proxy.host, proxy.port), timeout=10) as raw:
         try:
             with context.wrap_socket(raw, server_hostname=name):

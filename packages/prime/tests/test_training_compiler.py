@@ -479,6 +479,7 @@ def test_run_validates_before_volume_creation_and_submits_normalized_config(
                 "source_ref": "from-config",
                 "volume": "research",
                 "gpu_type": "H100",
+                "mode": mode,
                 **runtime,
             }
         )
@@ -535,7 +536,6 @@ def test_run_validates_before_volume_creation_and_submits_normalized_config(
         [
             "train",
             str(path),
-            "--sft" if mode == "sft" else "--fft",
             "--image-tag",
             "selected",
             "--ref",
@@ -561,7 +561,7 @@ def test_run_validates_before_volume_creation_and_submits_normalized_config(
     [
         ({"trainer": {"optim": {"lr": 0.1}}}, [], "rl"),
         ({"data": {"type": "fake"}}, [], "sft"),
-        ({}, ["--sft"], "sft"),
+        ({"data": {"paths": ["shards"]}}, [], "pretrain"),
     ],
 )
 def test_validate_prepares_runtime_without_sending_config_or_creating_run(
@@ -743,6 +743,7 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     from prime_cli.core.client import APIClient
 
     body = {"data": {"type": "fake"}} if mode == "sft" else {"trainer": {}, "orchestrator": {}}
+    body["mode"] = mode
     path = tmp_path / "run.toml"
     path.write_text(toml.dumps({"name": "review", **body, **extra}))
     monkeypatch.setattr(
@@ -784,7 +785,7 @@ def test_run_falls_back_to_raw_config_when_local_validation_is_unavailable(
     monkeypatch.setattr(HostedTrainingClient, "create_run", create)
     result = CliRunner().invoke(
         app,
-        ["train", str(path), "--sft" if mode == "sft" else "--fft", "--yes"],
+        ["train", str(path), "--yes"],
         env={"PRIME_DISABLE_VERSION_CHECK": "1"},
     )
     assert result.exit_code == exit_code, result.output

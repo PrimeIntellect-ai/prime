@@ -12,6 +12,7 @@ from connectrpc.errors import ConnectError
 from google.protobuf.message import Message
 from pyqwest import HTTPTransport
 
+from ._connectrpc import raise_if_cancelled
 from .core import APIError
 from .rpc_command_session import is_recoverable_stream_fault, parse_command_session_start_event
 
@@ -307,6 +308,7 @@ class AsyncSandboxProcess:
                 except asyncio.CancelledError:
                     raise
                 except BaseException as stream_error:
+                    raise_if_cancelled(stream_error)
                     error = stream_error
 
                 if ended:
@@ -326,6 +328,7 @@ class AsyncSandboxProcess:
         except asyncio.CancelledError:
             raise
         except BaseException as error:
+            raise_if_cancelled(error)
             if isinstance(error, ConnectError):
                 error = APIError(f"process stream RPC failed ({error.code.value}): {error.message}")
             if not self._started.done():

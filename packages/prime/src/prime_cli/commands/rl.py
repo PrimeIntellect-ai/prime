@@ -19,7 +19,7 @@ from rich.text import Text
 
 from prime_cli.core import Config
 
-from ..api.rl import EnvServerInfo, RLClient, RLRun
+from ..api.rl import EnvServerInfo, RLClient, RLRun, RunFailure, RunRestarts
 from ..api.training import (
     HostedTrainingClient,
     HostedTrainingRunResponse,
@@ -48,6 +48,7 @@ from ..utils.env_vars import EnvParseError, collect_env_vars
 from ..utils.formatters import format_file_size, strip_ansi
 from ..utils.prompt import confirm_or_skip
 from .feedback import submit_feedback
+from .inference_deploy import DEPLOYMENT_JSON_HELP, deploy_checkpoint_command
 from .usage import RUN_USAGE_JSON_HELP, run_usage_command
 
 console = get_console()
@@ -55,7 +56,14 @@ console = get_console()
 RL_RUN_JSON_HELP = json_output_help(
     ".run = {id, name?, status, base_model, environments[], "
     "rollouts_per_example, max_steps, batch_size, gpu_count?, created_at, updated_at, ...}",
+    ".run.restarts? = {count, failures[{role, index, kind, failed_at, exit_code?, "
+    "exit_reason?, exit_message?}]} — dedicated runs; failures oldest first",
 )
+
+# How many of a run's latest failures `prime train get` lists, and how many lines of the last
+# one's log it shows, without --restarts.
+RESTARTS_SHOWN = 3
+LOG_TAIL_LINES = 10
 
 RL_DISPATCH_JSON_HELP = json_output_help(
     ".run = {runId, sourceRef?, onDemand?, gpuType?, pricePerGpuHour?, "
@@ -351,33 +359,45 @@ def _looks_like_lora(cfg: Dict[str, Any]) -> bool:
     return isinstance(cfg.get("model"), str) or isinstance(cfg.get("env"), list)
 
 
-def _looks_like_sft(cfg: Dict[str, Any]) -> bool:
-    """True iff the mega-TOML carries the prime-rl SFT schema shape: a
-    `[data]` block (required by SFTConfig, absent from the RL schema) and
-    no `[trainer]`/`[orchestrator]` blocks (required by the RL schema,
-    absent from SFTConfig). The two prime-rl TOML schemas are disjoint on
-    these keys, so the sniff is unambiguous without parsing the file with
-    either schema.
-    """
-    return "data" in cfg and "trainer" not in cfg and "orchestrator" not in cfg
+_TRAINING_MODES = ("rl", "sft", "pretrain")
 
 
-def _looks_like_pretrain(cfg: Dict[str, Any]) -> bool:
-    """True iff the config reads datatrove token shards, which only prime-rl's
-    PretrainConfig accepts. Pretrain configs also have the SFT shape, so this
-    sniff runs first."""
+def _guess_training_mode(cfg: Dict[str, Any]) -> str:
+    """Deprecated fallback for configs without a top-level `mode`: pretrain
+    when `[data]` reads token shards (`paths`, with `type` unset or
+    "datatrove"), SFT when there is a `[data]` block and no
+    `[trainer]`/`[orchestrator]`, else RL."""
     data = cfg.get("data")
-    return isinstance(data, dict) and data.get("type") == "datatrove"
-
-
-def _training_mode(cfg: Dict[str, Any], *, sft: bool) -> str:
-    """The prime-rl schema the config follows: pretrain for datatrove data, SFT
-    if `--sft` was passed or the config has the SFT shape, else RL."""
-    if _looks_like_pretrain(cfg):
+    if isinstance(data, dict) and "paths" in data and data.get("type", "datatrove") == "datatrove":
         return "pretrain"
-    if sft or _looks_like_sft(cfg):
+    if "data" in cfg and "trainer" not in cfg and "orchestrator" not in cfg:
         return "sft"
     return "rl"
+
+
+def _training_mode(cfg: Dict[str, Any], config_path: Any, out: Any = console) -> str:
+    """The prime-rl schema the config follows, from its top-level `mode`
+    (prime-rl's own run-kind field). Configs without one are still guessed
+    from their shape, with a warning."""
+    mode = cfg.get("mode")
+    if mode == "eval":
+        raise ValueError(
+            f'{config_path} is an eval config (`mode = "eval"`); '
+            "prime train runs rl, sft and pretrain configs."
+        )
+    if mode is not None and mode not in _TRAINING_MODES:
+        raise ValueError(
+            f"mode in {config_path} must be one of {', '.join(_TRAINING_MODES)}, got {mode!r}."
+        )
+    if mode is not None:
+        return mode
+    guessed = _guess_training_mode(cfg)
+    out.print(
+        f"[yellow]Warning:[/yellow] {config_path} has no top-level `mode`; "
+        f'running it as {guessed}. Add `mode = "{guessed}"` to the config: '
+        "configs without a mode will stop being accepted."
+    )
+    return guessed
 
 
 def _warn_legacy_full_finetune_type(cfg: Dict[str, Any], config_path: str) -> None:
@@ -475,7 +495,9 @@ def _collect_secrets(env: Optional[List[str]], env_files: List[str]) -> Dict[str
 # phantom paths. `image_tag` is similarly chart-level — the backend
 # parses it off the request body, not the embedded prime-rl config.
 # `type` is stripped here too rather than left for the backend's
-# legacy CLI-metadata cleanup to silently absorb.
+# legacy CLI-metadata cleanup to silently absorb. `mode` travels as the
+# request's own `mode` field instead: prime-rl builds older than its
+# `mode` field reject the key as an extra input.
 _CLI_ONLY_KEYS = frozenset(
     {
         "env_file",
@@ -486,6 +508,7 @@ _CLI_ONLY_KEYS = frozenset(
         "volume_size",
         "source_ref",
         "type",
+        "mode",
     }
 )
 
@@ -932,6 +955,55 @@ def _render_failure_analysis(analysis: Dict[str, Any]) -> None:
             console.print(f"    - [dim]{rich_escape(str(line))}[/dim]")
 
 
+def _describe_failure(failure: RunFailure) -> str:
+    """One failure as the dashboard words it: "trainer 0 was OOM-killed (exit 137)"."""
+    job = f"{failure.role} {failure.index}"
+    if failure.kind == "DISRUPTED":
+        return f"{job} was taken away by the cluster"
+    exit_code = "" if failure.exit_code is None else f" (exit {failure.exit_code})"
+    if failure.exit_reason == "OOMKilled":
+        return f"{job} was OOM-killed{exit_code}"
+    return f"{job} failed{exit_code}"
+
+
+def _print_log_tail(message: str, max_lines: Optional[int] = None) -> None:
+    # A container's log can carry terminal colors and cursor controls, which a console acts on.
+    lines = strip_ansi(message).rstrip("\n").splitlines()
+    if max_lines is not None:
+        lines = lines[-max_lines:]
+    for line in lines:
+        # Logs are often drawn to a width; wrapping them would break the drawing.
+        console.print(f"    [dim]│ {rich_escape(line)}[/dim]", soft_wrap=True)
+
+
+def _render_restarts(run_id: str, restarts: RunRestarts, *, every_failure: bool) -> None:
+    """The run's restart count and the failures behind it, latest first: the last few with the
+    end of the latest one's log, or with --restarts every one with its own."""
+    if restarts.count == 0 and not restarts.failures:
+        return
+    console.print(
+        f"\n[bold]Restarted {restarts.count} time{'' if restarts.count == 1 else 's'}[/bold]"
+    )
+    failures = list(reversed(restarts.failures))
+    shown = failures if every_failure else failures[:RESTARTS_SHOWN]
+    for failure in shown:
+        at = failure.failed_at.strftime("%Y-%m-%d %H:%M")
+        console.print(f"  [dim]{at}[/dim]  {rich_escape(_describe_failure(failure))}")
+        if every_failure and failure.exit_message:
+            _print_log_tail(failure.exit_message)
+    if every_failure:
+        return
+    if len(failures) > len(shown):
+        console.print(
+            f"  [dim]… {len(failures) - len(shown)} more "
+            f"(prime train get {run_id} --restarts)[/dim]"
+        )
+    latest = failures[0] if failures else None
+    if latest is not None and latest.exit_message:
+        console.print(f"  Last failure's log ({rich_escape(f'{latest.role} {latest.index}')}):")
+        _print_log_tail(latest.exit_message, LOG_TAIL_LINES)
+
+
 def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
@@ -1015,7 +1087,6 @@ def validate_training_config(
         dir_okay=False,
         help="Reuse an existing schema interpreter; its commit must match the hosted runtime.",
     ),
-    sft: bool = typer.Option(False, "--sft", help="Validate a dedicated SFT config."),
     image_tag: Optional[str] = typer.Option(None, "--image-tag"),
     ref: Optional[str] = typer.Option(
         None,
@@ -1033,7 +1104,7 @@ def validate_training_config(
     artifact_out: Optional[Path] = typer.Option(None, "--artifact-out"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Validate dedicated RL/SFT config locally against the selected hosted runtime.
+    """Validate a dedicated RL, SFT or pretrain config locally against the selected hosted runtime.
 
     Experimental: creates no training run. Environment plugins and platform
     dispatch policy are checked when submitting a run.
@@ -1062,7 +1133,7 @@ def validate_training_config(
                 "submit with --volume (or set top-level `volume`)."
             )
         config = _schema_input(_hosted_config(raw, notices))
-        mode = _training_mode(raw, sft=sft)
+        mode = _training_mode(raw, config_path, notices)
         payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
         if selected_image:
             payload["imageTag"] = selected_image
@@ -1156,11 +1227,11 @@ def create_run(
             "for SFT the volume is mounted read-only at /volume, so "
             "data.name must point at a path on the volume (e.g. "
             '/volume/datasets/<name> or the relative "datasets/<name>" — '
-            "the platform resolves it). Get a dataset there yourself with "
-            "`prime volumes ssh <volume> --read-write` and the huggingface "
-            "CLI inside that session (see `prime volumes`); without a "
-            "volume, SFT only works with fake datasets. Closed beta, see "
-            "`prime volumes`. Falls back to a "
+            "the platform resolves it). Upload a dataset with `prime volumes "
+            "put`; accounts with a cluster allocation can also use `prime "
+            "volumes ssh <volume> --read-write` and the huggingface CLI "
+            "inside that session (see `prime volumes`). Without a volume, "
+            "SFT only works with fake datasets. Falls back to a "
             'top-level `volume = "..."` in the TOML. Created on the fly '
             "(default 5Ti) if it doesn't exist."
         ),
@@ -1199,39 +1270,6 @@ def create_run(
             "and already-merged PRs are not supported."
         ),
     ),
-    full_finetune: bool = typer.Option(
-        False,
-        "--full-finetune",
-        "--fft",
-        hidden=True,
-        help=(
-            "Deprecated: every RL config now runs as a full fine-tune on a "
-            "dedicated cluster, so this flag is a no-op."
-        ),
-    ),
-    sft: bool = typer.Option(
-        False,
-        "--sft",
-        help=(
-            "Dispatch this config as a supervised fine-tune on the dedicated "
-            "training path. Usually unnecessary — an SFT config (a [data] "
-            "block and no [trainer]/[orchestrator]) is auto-detected. "
-            "Hosted SFT is trainer-only: [eval], [inference], and "
-            "[weight_broadcast] blocks are rejected. Datasets are local "
-            "files on a named volume (pass --volume): the run mounts that "
-            "volume read-only at /volume, so data.name points at a path "
-            "on it (e.g. /volume/datasets/<name> or the relative "
-            '"datasets/<name>" — the platform resolves it); outputs land '
-            "under runs/<runId>/ on the same volume. Get datasets there "
-            "yourself with `prime volumes ssh <volume> --read-write` and "
-            "the huggingface CLI inside that session (hf download <repo> "
-            "--repo-type dataset --local-dir datasets/<name>): materialize "
-            "HF load_dataset-readable files (Parquet/JSON, not "
-            "save_to_disk) into the volume's datasets/ directory, then "
-            "verify with a fresh-process load_dataset check. Without "
-            "--volume, only fake datasets work."
-        ),
-    ),
     resume_from: Optional[str] = typer.Option(
         None,
         "--resume-from",
@@ -1246,20 +1284,13 @@ def create_run(
     Example:
 
         prime train rl.toml
-        prime train sft.toml --sft
-        prime train sft.toml --sft --volume research
+        prime train sft.toml --volume research
+        prime train pretrain.toml --volume research
+
+    The config's top-level `mode` ("rl", "sft" or "pretrain") picks the run kind.
     """
     validate_output_format(output, console)
 
-    # Mutually exclusive run kinds: accepting both would silently resolve
-    # to whichever branch is checked first. --full-finetune/--fft is
-    # otherwise a no-op now that every RL run is dedicated.
-    if sft and full_finetune:
-        console.print(
-            "[red]Error:[/red] --sft and --full-finetune/--fft are mutually "
-            "exclusive — pick the run kind matching the config."
-        )
-        raise typer.Exit(1)
     if ref is not None and pr is not None:
         console.print("[red]Error:[/red] --ref and --pr are mutually exclusive.")
         raise typer.Exit(1)
@@ -1280,20 +1311,13 @@ def create_run(
 
     # Dispatch routing (see `_training_mode`). Unset [deployment] sizing
     # falls through to prime-rl's own default, same as a local run.
-    mode: Optional[str] = _training_mode(raw_cfg, sft=sft)
-    if mode == "sft" and full_finetune:
-        console.print(
-            f"[red]Error:[/red] {config_path} looks like an SFT config "
-            "(a \\[data] block, no \\[trainer]/\\[orchestrator]) but "
-            "--full-finetune/--fft was passed. Use --sft instead."
+    try:
+        mode: Optional[str] = _training_mode(
+            raw_cfg, config_path, get_console(stderr=True) if output == "json" else console
         )
-        raise typer.Exit(1)
-    if mode == "pretrain" and full_finetune:
-        console.print(
-            f"[red]Error:[/red] {config_path} is a pretrain config (datatrove "
-            "\\[data]) but --full-finetune/--fft was passed. Remove it."
-        )
-        raise typer.Exit(1)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
+        raise typer.Exit(1) from exc
     # On SFT and pretrain the volume is also the dataset contract: it is
     # mounted read-only at /volume, so `data.name` (SFT) or `data.paths`
     # (pretrain shards) must point at paths on the volume; the platform
@@ -1483,9 +1507,12 @@ def list_gpus(
 ) -> None:
     """List GPU types you can dispatch a full-FT run on.
 
-    Uses the active team from `prime config` when set, otherwise your
-    personal allocations. Pass any value to `prime train run
-    --gpu-type <value>` to steer dispatch.
+    Reserved types (your team's or your own allocations) plus the types
+    sold on-demand, which is what dispatch accepts: placement picks
+    reserved capacity for the types you already hold and the billed
+    shared pool for the rest. Uses the active team from `prime config`
+    when set, otherwise your personal allocations. Pass any value to
+    `prime train run --gpu-type <value>` to steer dispatch.
     """
     validate_output_format(output, console)
 
@@ -1499,7 +1526,13 @@ def list_gpus(
         raise typer.Exit(1)
 
     if output == "json":
-        output_data_as_json({"gpuTypes": response.gpu_types}, console)
+        output_data_as_json(
+            {
+                "gpuTypes": response.gpu_types,
+                "onDemandGpuTypes": response.on_demand_gpu_types,
+            },
+            console,
+        )
         return
 
     if not response.gpu_types:
@@ -1508,9 +1541,15 @@ def list_gpus(
         )
         return
 
+    # A flat list hid the one difference that costs money, so the
+    # on-demand ones are marked. `prime train models` carries the rates.
+    on_demand = set(response.on_demand_gpu_types)
     console.print("[bold]Available GPU types[/bold] [dim](full-FT dispatch)[/dim]")
     for gpu_type in response.gpu_types:
-        console.print(f"  [cyan]{gpu_type}[/cyan]")
+        suffix = "  [dim](on-demand, billed per GPU-hour)[/dim]" if gpu_type in on_demand else ""
+        console.print(f"  [cyan]{gpu_type}[/cyan]{suffix}")
+    if on_demand:
+        console.print("[dim]Rates: `prime train models`[/dim]")
 
 
 def _prompt_required_text(label: str, help_text: str, empty_error: str) -> str:
@@ -1688,12 +1727,19 @@ def list_runs(
 def get_run(
     run_id: str = typer.Argument(..., help="Run ID to get details for"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    restarts: bool = typer.Option(
+        False,
+        "--restarts",
+        help="List every failure behind the run's restarts, each with the end of its log",
+    ),
 ) -> None:
     """Get details of a specific run.
 
     Example:
 
         prime train get <run_id>
+
+        prime train get <run_id> --restarts
 
         prime train get <run_id> -o json
     """
@@ -1740,6 +1786,13 @@ def get_run(
             console.print(f"  Team: {run.team_id}")
         if run.source_commit:
             console.print(f"  Source Commit: {run.source_commit}")
+        resumed = run.resumed_from
+        if resumed and resumed.run_id:
+            console.print(
+                f"  Resumed from: run {rich_escape(resumed.run_id)} @ step {resumed.step}"
+            )
+        elif resumed and resumed.dir:
+            console.print(f"  Resumed from: {rich_escape(resumed.dir)}")
         console.print(f"  Created: [dim]{formatted['created_at']}[/dim]")
         if run.started_at:
             console.print(f"  Started: [dim]{run.started_at.strftime('%Y-%m-%d %H:%M')}[/dim]")
@@ -1750,6 +1803,9 @@ def get_run(
 
         if run.failure_analysis:
             _render_failure_analysis(run.failure_analysis)
+
+        if run.restarts:
+            _render_restarts(run_id, run.restarts, every_failure=restarts)
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -2728,3 +2784,10 @@ def list_checkpoints(
 # other run-scoped monitoring commands. Implemented in commands/usage.py and
 # also re-exposed as the top-level `prime usage` summary command.
 app.command("usage", rich_help_panel="Monitoring", epilog=RUN_USAGE_JSON_HELP)(run_usage_command)
+
+
+# `prime train deploy` serves a run's checkpoint; same as
+# `prime inference deploy-checkpoint`, kept next to `checkpoints`.
+app.command("deploy", rich_help_panel="Commands", epilog=DEPLOYMENT_JSON_HELP)(
+    deploy_checkpoint_command
+)

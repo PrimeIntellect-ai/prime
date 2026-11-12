@@ -115,7 +115,8 @@ Build and evaluate environments with [verifiers](https://github.com/PrimeIntelle
 # List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
+# Launch a prime-rl config on a dedicated cluster; its top-level `mode`
+# ("rl", "sft" or "pretrain") picks the run kind
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
@@ -216,7 +217,7 @@ prime sandbox volumes grow data --size-gb 512
 prime sandbox volumes delete data
 
 # Publish a sandbox's private volume writes as a durable checkpoint
-prime sandbox volumes publish data --sandbox <sandbox-id> [--force] [--no-wait]
+prime sandbox volumes publish data --sandbox <sandbox-id> [--no-wait]
 
 # Create a volume and import a local directory into it
 prime sandbox volumes create data --from ~/datasets/my-data
@@ -225,14 +226,15 @@ prime sandbox volumes create data --from ~/datasets/my-data
 prime sandbox delete <sandbox-id>
 ```
 
-Volume writes are private to a sandbox until a publish reaches DURABLE. A
+Volume writes are private to a sandbox until a publish reaches DURABLE
+and its merge finishes. A
 new volume starts empty; each publish becomes the volume's head, and a
 sandbox always sees the volume as of its own creation, so attach a new
 sandbox to read a newer head. Read-only mounts cannot publish. A publish
-whose volume head moved since attach is rejected (409) unless `--force`,
-which still cannot overtake another sandbox's pending publish. `--no-wait`
-prints the checkpoint id and state; the data is published only once that
-checkpoint is DURABLE, checkable with
+whose volume head moved since attach is rejected (409). `--no-wait`
+prints the checkpoint id and state; the data is published once that
+checkpoint is DURABLE and, on servers that merge volume publishes, its
+merge finishes — both checkable with
 `prime sandbox checkpoint get <checkpoint-id>`.
 
 `volumes create --from` copies a local directory into a disposable
@@ -414,13 +416,13 @@ prime pods ssh <pod-id>
 
 ## Local dedicated-training validation (experimental)
 
-Validate a dedicated RL or SFT config against the schema of the runtime selected
+Validate a dedicated RL, SFT or pretrain config against the schema of the runtime selected
 by Platform, including its default image:
 
 ```bash
 prime train validate rl.toml
 prime train validate rl.toml --ref your-branch
-prime train validate sft.toml --sft --artifact-out normalized.json
+prime train validate sft.toml --artifact-out normalized.json
 ```
 
 The CLI needs `uv` to cache a CPU-only schema environment. An existing matching
@@ -438,7 +440,7 @@ adaptation and rendering. Environment plugins and dispatch policy remain deferre
 Validation creates no run. `--artifact-out` can save the normalized config for
 inspection.
 
-Dedicated submissions (`prime train rl.toml` or `prime train sft.toml --sft`)
+Dedicated submissions (`prime train rl.toml`)
 perform local validation automatically before creating a run or volume. Platform
 checks the runtime pins and deployment policy, applies hosted settings, and
 renders the deployment internally. Queued runs keep the same pinned runtime and

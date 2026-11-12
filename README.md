@@ -149,7 +149,8 @@ Build and evaluate environments with [verifiers](https://github.com/PrimeIntelle
 # List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
+# Launch a prime-rl config on a dedicated cluster; its top-level `mode`
+# ("rl", "sft" or "pretrain") picks the run kind
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
@@ -157,6 +158,30 @@ prime train list
 prime train logs <run-id> -f
 prime train metrics <run-id>
 prime train checkpoints <run-id>
+
+# Serve a checkpoint as an OpenAI-compatible endpoint
+prime train deploy <run-id> --step <N> --wait
+```
+
+### Inference Deployments
+
+```bash
+# List deployable models and your team's clusters that can serve them
+prime inference catalog
+
+# Deploy a catalog model (on Prime's on-demand pool unless --cluster is set)
+prime inference deploy <model-catalog-id> --name my-endpoint --replicas 1 --wait
+
+# Deploy a training checkpoint, then check a deployment's status and endpoint
+prime inference deploy-checkpoint <run-id> --step <N> --wait
+prime inference deployments get <deployment-id>
+
+# List your deployments (--team for a team's), and change a replica count
+prime inference deployments list [--team <team-id>]
+prime inference deployments scale <deployment-id> --replicas 2
+
+# Delete a deployment (asks for confirmation; --yes skips it)
+prime inference deployments delete <deployment-id>
 ```
 
 ### GPU Resources

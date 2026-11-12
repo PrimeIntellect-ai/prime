@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 import pytest
+from prime_cli.client import APIError
 from prime_cli.main import app
 from prime_cli.utils.formatters import strip_ansi
 from typer.testing import CliRunner
@@ -56,6 +57,18 @@ def _members_payload(rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, A
     return {"data": rows if rows is not None else [_member()]}
 
 
+def _connection_payload(**overrides: Any) -> Dict[str, Any]:
+    # snake_case on purpose: that is how the API spells this payload.
+    row: Dict[str, Any] = {
+        "connectable": True,
+        "ssh_host": "203.0.113.10",
+        "ssh_port": 22033,
+        "ssh_command": "ssh -p 22033 username@203.0.113.10",
+    }
+    row.update(overrides)
+    return row
+
+
 class _StubConfig:
     def __init__(self, team_id: Optional[str]) -> None:
         self._team_id = team_id
@@ -66,13 +79,25 @@ class _StubConfig:
 
 
 class _DummyAPIClient:
-    def __init__(self, get_payload: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        get_payload: Optional[Dict[str, Any]] = None,
+        connection_payload: Optional[Dict[str, Any]] = None,
+        connection_error: Optional[Exception] = None,
+    ) -> None:
         self._get_payload = get_payload
+        self._connection_payload = connection_payload
+        self._connection_error = connection_error
         self.calls: List[Dict[str, Any]] = []
         self.post_calls: List[Dict[str, Any]] = []
 
     def get(self, endpoint, params=None, timeout=None):
         self.calls.append({"endpoint": endpoint, "params": params})
+        # `/connection` is a separate route with its own payload shape.
+        if endpoint.endswith("/connection"):
+            if self._connection_error is not None:
+                raise self._connection_error
+            return self._connection_payload
         return self._get_payload
 
     def post(self, endpoint, json=None):
@@ -91,9 +116,15 @@ def _install(
     monkeypatch: pytest.MonkeyPatch,
     get_payload: Optional[Dict[str, Any]] = None,
     team_id: Optional[str] = "team-123",
+    connection_payload: Optional[Dict[str, Any]] = None,
+    connection_error: Optional[Exception] = None,
 ) -> _DummyAPIClient:
     monkeypatch.delenv("PRIME_TEAM_ID", raising=False)
-    dummy = _DummyAPIClient(get_payload=get_payload)
+    dummy = _DummyAPIClient(
+        get_payload=get_payload,
+        connection_payload=connection_payload if connection_payload else _connection_payload(),
+        connection_error=connection_error,
+    )
     monkeypatch.setattr("prime_cli.commands.factory_slurm.APIClient", lambda: dummy)
     monkeypatch.setattr("prime_cli.commands.factory_slurm.Config", lambda: _StubConfig(team_id))
     monkeypatch.setattr("prime_cli.main.check_for_update", lambda: (False, None))
@@ -142,16 +173,115 @@ def test_slurm_get_detail_and_miss(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "No Slurm deployment matched 'nope'" in miss_output
 
 
-def test_slurm_get_never_invents_connect_info(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The roster API carries no connect fields: the detail view renders
-    # only what the API provides — never ssh_host, ssh_port, or
-    # connectable claims.
-    _install(monkeypatch, _clusters_payload())
+def test_slurm_get_renders_ssh_coordinates(monkeypatch: pytest.MonkeyPatch) -> None:
+    dummy = _install(monkeypatch, _clusters_payload())
+
     result = runner.invoke(app, ["factory", "slurm", "get", "job-123"], env=TEST_ENV)
     output = strip_ansi(result.output)
     assert result.exit_code == 0, result.output
-    assert "ssh" not in output.lower()
-    assert "connectable" not in output.lower()
+    assert "SSH host: 203.0.113.10" in output
+    assert "SSH port: 22033" in output
+    # Rendered from the server's own ssh_command, never rebuilt here.
+    assert "SSH: ssh -p 22033 username@203.0.113.10" in output
+    # The team is a query parameter on this route, not a path segment.
+    connection_call = dummy.calls[-1]
+    assert connection_call["endpoint"] == "/slurm-clusters/job-123/connection"
+    assert connection_call["params"] == {"team_id": "team-123"}
+
+
+def test_slurm_get_json_merges_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The cluster row is echoed verbatim (including fields this CLI
+    # version does not model) with the connection payload attached.
+    row = _cluster(volumeBindings=[{"volumeId": "vol-1"}])
+    _install(monkeypatch, _clusters_payload([row]))
+
+    result = runner.invoke(app, ["factory", "slurm", "get", "job-123", "--json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {**row, "connection": _connection_payload()}
+
+
+def test_slurm_get_omits_port_when_the_api_omits_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A null ssh_port is the default port 22, not a missing value: the
+    # CLI must render the server's command as-is rather than inventing
+    # a -p flag the dashboard doesn't show.
+    _install(
+        monkeypatch,
+        _clusters_payload(),
+        connection_payload=_connection_payload(
+            ssh_port=None, ssh_command="ssh username@203.0.113.10"
+        ),
+    )
+    result = runner.invoke(app, ["factory", "slurm", "get", "job-123"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "SSH host: 203.0.113.10" in output
+    assert "SSH port:" not in output
+    assert "SSH: ssh username@203.0.113.10" in output
+    assert "-p" not in output
+
+
+def test_slurm_get_renders_command_override_without_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An admin-set full-command override is opaque (jump hosts, custom
+    # identity files) and arrives with no host or port to render.
+    _install(
+        monkeypatch,
+        _clusters_payload(),
+        connection_payload=_connection_payload(
+            ssh_host=None,
+            ssh_port=None,
+            ssh_command="ssh -J bastion.example.com username@login.internal",
+        ),
+    )
+    result = runner.invoke(app, ["factory", "slurm", "get", "job-123"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "SSH: ssh -J bastion.example.com username@login.internal" in output
+    assert "SSH host:" not in output and "SSH port:" not in output
+
+
+def test_slurm_get_never_invents_connect_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A deployment the API reports as not connectable has no usable
+    # login target: the detail view renders what the API provides and
+    # never fabricates a host or port.
+    _install(
+        monkeypatch,
+        _clusters_payload([_cluster(status="PENDING")]),
+        connection_payload=_connection_payload(
+            connectable=False, ssh_host=None, ssh_port=None, ssh_command=None
+        ),
+    )
+    result = runner.invoke(app, ["factory", "slurm", "get", "job-123"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "SSH: unavailable" in output
+    assert "SSH host:" not in output and "SSH port:" not in output
+
+
+def test_slurm_get_survives_connection_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The roster details are still worth printing when only the connect
+    # lookup fails (older backend, missing scope).
+    _install(
+        monkeypatch,
+        _clusters_payload(),
+        connection_error=APIError("HTTP 404: Not Found"),
+    )
+
+    result = runner.invoke(app, ["factory", "slurm", "get", "job-123"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, result.output
+    assert "research-b300-slurm" in output
+    assert "Could not read SSH coordinates" in output
+    # Not "unavailable": a failed lookup knows nothing either way, and
+    # claiming the deployment isn't RUNNING would contradict the
+    # RUNNING status printed two lines above.
+    assert "SSH: unknown" in output
+    assert "not RUNNING" not in output
+
+    json_result = runner.invoke(app, ["factory", "slurm", "get", "job-123", "--json"], env=TEST_ENV)
+    assert json_result.exit_code == 0, json_result.output
+    assert json.loads(json_result.stdout)["connection"] is None
 
 
 def test_slurm_members_table_and_json(monkeypatch: pytest.MonkeyPatch) -> None:

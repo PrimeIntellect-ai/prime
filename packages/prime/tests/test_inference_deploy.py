@@ -484,9 +484,63 @@ def test_deployments_list_without_team_is_personal(monkeypatch: pytest.MonkeyPat
     result, out = _run("inference", "deployments", "list")
 
     assert result.exit_code == 0, out
-    # No teamId param: the API scopes a teamless call to the caller.
+    # No account context and no --team: the API scopes a teamless call to the caller.
     assert api.calls == [("GET", "/inference/deployments", None)]
     assert "No inference deployments" in out
+
+
+def test_deployments_list_uses_the_account_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The console shows the selected team's endpoints, so the CLI must too.
+
+    Listing the caller's own deployments while a team is selected reads as an
+    empty team, which is how this diverged from `prime inference catalog`.
+    """
+    api = FakeAPI(gets=[{"data": [_deployment("RUNNING", replicas=1)]}])
+    api.install(monkeypatch)
+    monkeypatch.setattr("prime_cli.core.Config.team_id", "team_cfg", raising=False)
+
+    result, out = _run("inference", "deployments", "list")
+
+    assert result.exit_code == 0, out
+    assert api.calls == [("GET", "/inference/deployments", {"teamId": "team_cfg"})]
+    assert "dep_1" in out
+
+
+def test_deployments_list_team_flag_overrides_the_account_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeAPI(gets=[{"data": []}])
+    api.install(monkeypatch)
+    monkeypatch.setattr("prime_cli.core.Config.team_id", "team_cfg", raising=False)
+
+    result, out = _run("inference", "deployments", "list", "--team", "team_1")
+
+    assert result.exit_code == 0, out
+    assert api.calls == [("GET", "/inference/deployments", {"teamId": "team_1"})]
+
+
+def test_deployments_list_personal_ignores_the_account_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeAPI(gets=[{"data": []}])
+    api.install(monkeypatch)
+    monkeypatch.setattr("prime_cli.core.Config.team_id", "team_cfg", raising=False)
+
+    result, out = _run("inference", "deployments", "list", "--personal")
+
+    assert result.exit_code == 0, out
+    assert api.calls == [("GET", "/inference/deployments", None)]
+
+
+def test_deployments_list_rejects_team_with_personal(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = FakeAPI(gets=[{"data": []}])
+    api.install(monkeypatch)
+
+    result, out = _run("inference", "deployments", "list", "--team", "team_1", "--personal")
+
+    assert result.exit_code == 1, out
+    assert api.calls == []
+    assert "not both" in out
 
 
 def test_deployments_list_json_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:

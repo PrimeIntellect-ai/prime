@@ -670,8 +670,23 @@ def test_list_says_when_there_is_nothing(saved: Dict[str, Any]) -> None:
     assert result.exit_code == 0 and "No pipelines yet." in result.output
     result = runner.invoke(app, ["pipelines", "list", "--page", "2"], env=TEST_ENV)
     assert result.exit_code == 0 and "No more pipelines." in result.output
-    result = runner.invoke(app, ["pipelines", "list", "--num", "0"], env=TEST_ENV)
-    assert result.exit_code == 1 and "at least 1" in result.output
+
+
+@pytest.mark.parametrize("command", ["list", "runs"])
+@pytest.mark.parametrize("paging", [["--num", "0"], ["--num", "101"], ["--page", "0"]])
+def test_a_page_the_platform_would_refuse_is_refused_first(
+    saved: Dict[str, Any], command, paging
+) -> None:
+    result = runner.invoke(app, ["pipelines", command, *paging], env=TEST_ENV)
+    assert result.exit_code == 1 and saved["requests"] == []
+    assert "--num must be from 1 to 100, and --page at least 1" in result.output
+
+
+@pytest.mark.parametrize("command", ["list", "runs"])
+def test_the_largest_page_is_asked_for_as_given(saved: Dict[str, Any], command) -> None:
+    result = runner.invoke(app, ["pipelines", command, "--num", "100"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert saved["requests"][0][2]["per_page"] == 100
 
 
 def test_runs_lists_one_pipelines_or_the_accounts(saved: Dict[str, Any]) -> None:

@@ -49,6 +49,8 @@ RUNS_JSON_HELP = json_output_help(
     ".page = number",
     ".per_page = number",
 )
+# The most items the platform's lists give in one page.
+MAX_PER_PAGE = 100
 # A pipeline's or a run's id, as the platform's routes take it.
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 GET_JSON_HELP = json_output_help(
@@ -204,8 +206,8 @@ def _page(page: int, num: int, total: int, shown: int, what: str) -> None:
 
 
 def _listing(endpoint: str, params: dict[str, Any], num: int, page: int) -> dict[str, Any]:
-    if num < 1 or page < 1:
-        _fail(ValueError("--num and --page must be at least 1"))
+    if not 1 <= num <= MAX_PER_PAGE or page < 1:
+        _fail(ValueError(f"--num must be from 1 to {MAX_PER_PAGE}, and --page at least 1"))
     wanted = {**params, "page": page, "per_page": num}
     try:
         return APIClient().get(endpoint, params={k: v for k, v in wanted.items() if v})
@@ -218,7 +220,7 @@ def list_pipelines(
     team: Optional[str] = typer.Option(
         None, "--team", "-t", help="This team's pipelines (default: your selected team's)."
     ),
-    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
+    num: int = typer.Option(20, "--num", "-n", help=f"Items per page (at most {MAX_PER_PAGE})"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:
@@ -258,7 +260,7 @@ def list_runs(
         help="Without a pipeline: the runs of this team's pipelines (default: your selected "
         "team's).",
     ),
-    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
+    num: int = typer.Option(20, "--num", "-n", help=f"Items per page (at most {MAX_PER_PAGE})"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:

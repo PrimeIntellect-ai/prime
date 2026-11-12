@@ -524,6 +524,45 @@ def test_outputs_say_when_the_folder_cannot_be_made(api: Dict[str, Any], tmp_pat
     assert "Traceback" not in result.output
 
 
+def test_an_interrupted_download_leaves_no_partial_file(
+    api: Dict[str, Any], monkeypatch, tmp_path
+) -> None:
+    from contextlib import contextmanager
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def iter_bytes(self):
+            yield b"# R"
+            raise KeyboardInterrupt
+
+    @contextmanager
+    def stream(self: Any, method: str, url: str, **kwargs: Any):
+        yield Response()
+
+    monkeypatch.setattr("httpx.Client.stream", stream)
+    result = runner.invoke(
+        app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path)], env=TEST_ENV
+    )
+    assert result.exit_code != 0
+    assert list((tmp_path / "report").iterdir()) == []
+
+
+def test_reply_quotes_the_names_it_suggests_when_several_match(
+    review: Dict[str, Any],
+) -> None:
+    cards = [
+        {"job": "a; rm -rf ~", "node": "ask", "question": "Which?"},
+        {"job": "b", "node": "ask", "question": "Which?"},
+    ]
+    review["run"] = {**RUN, "state": {"cards": cards}}
+    env = {**TEST_ENV, "COLUMNS": "2000"}
+    result = runner.invoke(app, ["pipelines", "reply", "run1", "--note", "x"], env=env)
+    assert result.exit_code == 1 and review["posts"] == []
+    assert "--node ask --job 'a; rm -rf ~', --node ask --job b" in result.output
+
+
 PIPELINES = {
     "pipelines": [
         {

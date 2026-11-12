@@ -8,11 +8,17 @@ exchanges the user's platform API token for a short-lived ServiceAccount token.
 That indirection is what makes revocation work. Deleting the grant deletes the
 namespace and its ServiceAccount, so the next refresh fails and any token
 already issued expires within the hour.
+
+Researchers never reach a cluster's apiserver directly. Each pool has its own
+Tailscale API proxy on the customer's tailnet, so every grant carries its own
+`server`, and the proxy passes the apiserver's TLS through: the client has to
+verify the apiserver certificate under `tlsServerName`, not the proxy's name.
 """
 
 import os
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import typer
 import yaml
@@ -47,12 +53,16 @@ def _kubeconfig_path(cluster: str) -> Path:
 def _build_kubeconfig(
     *,
     cluster: str,
-    server: str,
     ca_data: str,
-    grants: List[Dict[str, str]],
+    grants: List[Dict[str, Any]],
     base_url: str,
 ) -> Dict[str, Any]:
-    """Render a kubeconfig with one context per pool the user has access to.
+    """Render a kubeconfig with one cluster entry and one context per reachable
+    pool grant.
+
+    Every grant must already carry a `server`. Pools do not share an endpoint
+    (each has its own API proxy), so each context points at its own cluster
+    entry, while the CA is the cluster's and is shared.
 
     The `exec` block is the whole point: `interactiveMode: Never` because
     kubectl must not try to prompt, and `provideClusterInfo: false` because the
@@ -80,16 +90,24 @@ def _build_kubeconfig(
         {"name": "PRIME_DISABLE_VERSION_CHECK", "value": "1"},
     ]
 
+    clusters = []
     contexts = []
     users = []
     for grant in grants:
         pool = grant["pool"]
         context_name = f"{cluster}-{pool}"
+        cluster_entry: Dict[str, Any] = {
+            "server": grant["server"],
+            "certificate-authority-data": ca_data,
+        }
+        if grant.get("tlsServerName"):
+            cluster_entry["tls-server-name"] = grant["tlsServerName"]
+        clusters.append({"name": context_name, "cluster": cluster_entry})
         contexts.append(
             {
                 "name": context_name,
                 "context": {
-                    "cluster": cluster,
+                    "cluster": context_name,
                     "user": context_name,
                     "namespace": grant["namespace"],
                 },
@@ -122,15 +140,7 @@ def _build_kubeconfig(
     return {
         "apiVersion": "v1",
         "kind": "Config",
-        "clusters": [
-            {
-                "name": cluster,
-                "cluster": {
-                    "server": server,
-                    "certificate-authority-data": ca_data,
-                },
-            }
-        ],
+        "clusters": clusters,
         "contexts": contexts,
         "users": users,
         "current-context": contexts[0]["name"] if contexts else "",
@@ -154,38 +164,90 @@ def login(
         console.print(f"[red]No active access grant for '{cluster}'.[/red]")
         raise typer.Exit(1)
 
-    # `server` is written verbatim. The platform is responsible for returning
-    # the cluster's customer-reachable public endpoint here; researchers are
-    # usually on a different network than the cluster's internal API address.
-    server = info.get("server")
     ca_data = info.get("certificateAuthorityData")
-    if not server or not ca_data:
+    if not ca_data:
         console.print(
             f"[red]The platform returned incomplete connection info for '{cluster}'.[/red]"
         )
         raise typer.Exit(1)
 
+    # Any top-level `server` (an older platform's single cluster endpoint) is
+    # deliberately ignored: the only supported path to the apiserver is the
+    # grant's own API proxy on the researcher's tailnet.
+    reachable = []
+    for grant in grants:
+        pool = grant.get("pool") or "?"
+        reason = _unreachable_reason(grant)
+        if reason:
+            console.print(f"[yellow]Skipping pool '{pool}': {reason}[/yellow]")
+        else:
+            reachable.append(grant)
+
+    path = _kubeconfig_path(cluster)
+    if not reachable:
+        # Failing before the write leaves any earlier kubeconfig as it was,
+        # rather than replacing it with one that has no contexts.
+        console.print(
+            f"[red]None of your pools on '{cluster}' is reachable yet; "
+            f"{path} was not written.[/red]"
+        )
+        raise typer.Exit(1)
+
     kubeconfig = _build_kubeconfig(
         cluster=cluster,
-        server=server,
         ca_data=ca_data,
-        grants=grants,
+        grants=reachable,
         # The exact URL this login request just used — not re-derived at
         # refresh time, where context resolution would lose a custom one.
         base_url=client.base_url,
     )
 
-    path = _kubeconfig_path(cluster)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(kubeconfig, sort_keys=False))
-    # It carries no credential, but it does name every namespace the user can
-    # reach, so don't leave it group-readable.
-    path.chmod(0o600)
+    # The file is regenerated from scratch, so contexts for grants that are
+    # gone or currently unreachable drop out on every login.
+    try:
+        _write_private(path, yaml.safe_dump(kubeconfig, sort_keys=False))
+    except OSError as e:
+        console.print(f"[red]Could not write {path}: {e}[/red]")
+        raise typer.Exit(1) from e
 
     console.print(f"[green]Wrote kubeconfig to {path}[/green]")
-    if len(grants) > 1:
-        pools = ", ".join(grant["pool"] for grant in grants)
+    if len(reachable) > 1:
+        pools = ", ".join(grant["pool"] for grant in reachable)
         console.print(f"Contexts for pools: {pools}")
     console.print("\nUse it with:")
     console.print(f"  export KUBECONFIG={path}")
     console.print("  kubectl get pods")
+
+
+def _unreachable_reason(grant: Dict[str, Any]) -> Optional[str]:
+    """Why a grant cannot get a context, or None when it can."""
+    if not grant.get("pool") or not grant.get("namespace"):
+        return "the platform returned an incomplete grant."
+    if not grant.get("server"):
+        return (
+            grant.get("unavailableReason")
+            or "the platform returned no API endpoint for this pool yet."
+        )
+    return None
+
+
+def _write_private(path: Path, content: str) -> None:
+    """Replace `path` atomically with a 0600 file.
+
+    It carries no credential, but it does name every namespace the user can
+    reach, so it is never group-readable — not even briefly, which is why the
+    temp file is created 0600 rather than chmod-ed after the fact. Writing
+    beside the target and renaming means kubectl never sees a half-written
+    file and a failed login leaves the previous one intact.
+    """
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise

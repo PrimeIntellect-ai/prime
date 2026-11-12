@@ -46,8 +46,8 @@ def _auth() -> None:
     """
 
 
-# Exit codes. 1 is "try again later", everything above it is "this will not
-# work until something changes".
+# Exit codes. 1 is "try again later" (unreachable, or a 503 from the platform),
+# everything above it is "this will not work until something changes".
 EXIT_UNREACHABLE = 1
 EXIT_FORBIDDEN = 2
 EXIT_RATE_LIMITED = 3
@@ -128,6 +128,16 @@ def k8s_token(
                 EXIT_RATE_LIMITED,
             )
         _fail("Too many credential refresh attempts.", EXIT_RATE_LIMITED)
+
+    if response.status_code == 503:
+        # The platform's signal that this should work again on its own: the
+        # cluster is not ready, its heartbeat is stale, or the pool's API
+        # capability was withdrawn for now. Its reason says which.
+        _fail(
+            _detail(response)
+            or f"Cluster '{cluster}' is temporarily unavailable. Try again shortly.",
+            EXIT_UNREACHABLE,
+        )
 
     if response.status_code >= 500:
         _fail(

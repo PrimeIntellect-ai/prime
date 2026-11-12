@@ -162,6 +162,8 @@ def run(
     if Path(target).is_file():
         try:
             data = json.loads(Path(target).read_text())
+        except OSError as error:
+            _fail(ValueError(f"can't read {target}: {error.strerror or error}"))
         except ValueError as error:
             _fail(ValueError(f"{target} is not JSON: {error}"))
         body |= {"graph": data, "team_id": team or Config().team_id, "pipeline_id": pipeline}

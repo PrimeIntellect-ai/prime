@@ -793,3 +793,18 @@ def test_delete_of_a_pipeline_that_is_not_yours_is_not_found(saved: Dict[str, An
     result = runner.invoke(app, ["pipelines", "delete", "p1", "-y"], env=TEST_ENV)
     assert result.exit_code == 1 and "Pipeline not found" in result.output
     assert [request[0] for request in saved["requests"]] == ["GET"]
+
+
+def test_run_says_when_the_graph_file_cannot_be_read(
+    api: Dict[str, Any], monkeypatch, tmp_path
+) -> None:
+    graph = tmp_path / "g.json"
+    graph.write_text("{}")
+
+    def read_text(self: Any, *args: Any, **kwargs: Any) -> str:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("pathlib.Path.read_text", read_text)
+    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
+    assert result.exit_code == 1 and "can't read" in result.output
+    assert "Traceback" not in result.output and "post" not in api

@@ -232,9 +232,20 @@ def test_get_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch) -
     assert "report/[/red].md" in result.output
 
 
-@pytest.mark.parametrize("name", ["../evil", "D:evil"])
-def test_outputs_refuse_a_name_that_leaves_the_directory(monkeypatch, tmp_path, name) -> None:
-    run = {**RUN, "outputs": [{"name": name, "node": "report", "bytes": 1}]}
+@pytest.mark.parametrize(
+    ("node", "name"),
+    [
+        ("report", "../evil"),
+        ("report", "D:evil"),
+        ("report", ".."),
+        # To Windows these are `..`: it drops a component's trailing dots and spaces.
+        (".. ", "evil"),
+        ("report", ".. ."),
+        ("", "evil"),
+    ],
+)
+def test_outputs_refuse_a_name_that_leaves_the_directory(monkeypatch, tmp_path, node, name) -> None:
+    run = {**RUN, "outputs": [{"name": name, "node": node, "bytes": 1}]}
     monkeypatch.setattr(
         "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
     )

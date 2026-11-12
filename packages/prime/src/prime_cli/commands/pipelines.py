@@ -455,9 +455,9 @@ def outputs(
         return
     for out in listed:
         parts = (str(out["node"]), str(out["name"]))
+        # Nothing but dots and spaces is `.` or `..` to Windows, which drops trailing ones.
         if any(
-            not part or part in (".", "..") or "/" in part or "\\" in part or ":" in part
-            for part in parts
+            not part.rstrip(". ") or "/" in part or "\\" in part or ":" in part for part in parts
         ):
             _fail(APIError(f"refusing an output named {out['node']}/{out['name']}"))
         target = directory / parts[0] / parts[1]

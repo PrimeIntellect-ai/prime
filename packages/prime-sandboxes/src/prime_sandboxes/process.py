@@ -108,6 +108,7 @@ class AsyncSandboxProcess:
         self._output_replay: bool | None = None
         self._interrupted = False
         self._observed_pid: int | None = None
+        self._output_recovery_failed = False
         self._signals_sent: set[Literal["terminate", "kill"]] = set()
         self._closed = False
         self._close_lock = asyncio.Lock()
@@ -203,7 +204,9 @@ class AsyncSandboxProcess:
                 and not self._started.cancelled()
                 and self._started.exception() is None
             )
-            if (started or self._observed_pid is not None) and not self._remote_exited:
+            if (
+                started or self._observed_pid is not None or self._output_recovery_failed
+            ) and not self._remote_exited:
                 if "kill" in self._signals_sent:
                     await self._wait_for_exit_event()
                 else:
@@ -395,9 +398,13 @@ class AsyncSandboxProcess:
                 )
             elif isinstance(error, ConnectError):
                 error = APIError(f"process stream RPC failed ({error.code.value}): {error.message}")
+            # Replay can fail before the first PID is delivered. The session
+            # may still be running remotely, so aclose must signal it by UUID.
+            if isinstance(error, ProcessOutputLostError):
+                self._output_recovery_failed = True
             if not self._started.done():
                 self._started.set_exception(error)
-            elif not self._exit.done():
+            if not self._exit.done():
                 self._exit.set_exception(error)
                 self.stdout.fail(error)
                 self.stderr.fail(error)

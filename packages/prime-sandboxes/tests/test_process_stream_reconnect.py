@@ -377,3 +377,26 @@ async def test_old_server_initial_response_loss_still_cleans_up(monkeypatch):
             reconnect=lambda started, cursor: old_server(),
         )
     assert signals == ["terminate", "kill"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [Code.OUT_OF_RANGE, Code.DATA_LOSS])
+async def test_replay_failure_before_pid_stops_session_by_uuid(code):
+    """A lost initial response plus unrecoverable output must not leak a process."""
+    from prime_sandboxes import ProcessOutputLostError
+
+    async def failed_replay():
+        raise ConnectError(code, "output no longer available")
+        yield
+
+    signals = []
+
+    async def signal(kind):
+        signals.append(kind)
+
+    with pytest.raises(ProcessOutputLostError):
+        await asyncio.wait_for(
+            AsyncSandboxProcess._create(_FakeStreamClient(), failed_replay(), _noop_stdin, signal),
+            timeout=1,
+        )
+    assert signals == ["terminate", "kill"]

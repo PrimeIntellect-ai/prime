@@ -26,6 +26,10 @@ _GITHUB_API = "https://api.github.com"
 # Cold rl-validator (up to 60s) plus the backend's own work (ENG-6696).
 # Only the read wait grows: an unreachable host still fails in 10s.
 CREATE_RUN_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+# Volume create/expand run the owner's wallet admission (and, on create, the
+# R2 bucket ensure) before answering: 40-60s on prod for a busy team wallet
+# (ENG-7624), past the 30s default, while the row still lands server-side.
+VOLUME_WRITE_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
 
 class PreparedTrainingRuntime(BaseModel):
@@ -44,7 +48,7 @@ class SchemaInstallInputs(BaseModel):
 
 class LocalValidationPreparation(BaseModel):
     contract_version: Literal[1]
-    mode: Literal["rl", "sft"]
+    mode: Literal["rl", "sft", "pretrain"]
     runtime: PreparedTrainingRuntime
     schema_install: SchemaInstallInputs
     submission_supported: bool
@@ -72,9 +76,17 @@ class HostedTrainingRunResponse(BaseModel):
 
 
 class AvailableGpuTypesResponse(BaseModel):
-    """Response from GET /v1/training/available-gpu-types."""
+    """Response from GET /v1/training/available-gpu-types.
+
+    `gpu_types` spans both placement paths, because dispatch derives the
+    path per GPU type: reserved capacity for the types the caller owns,
+    the billed shared pool for everything else. `on_demand_gpu_types` is
+    the subset that is billed per GPU-hour, and is empty against a
+    backend predating the field — annotate, never filter on it.
+    """
 
     gpu_types: List[str] = Field(default_factory=list, alias="gpuTypes")
+    on_demand_gpu_types: List[str] = Field(default_factory=list, alias="onDemandGpuTypes")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -199,6 +211,9 @@ class VolumeSession(BaseModel):
     phase: Optional[str] = None
     # The latest rclone stats line while the session copies data in (staging).
     progress: Optional[str] = None
+    # A live view (platform ENG-7113): the run or read-write session whose
+    # volume this read-only session mounts as it is now. Absent otherwise.
+    live_view_of: Optional[str] = Field(None, alias="liveViewOf")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -220,6 +235,8 @@ class VolumeTransferRoute(BaseModel):
     # A put's upload lease (platform#6358): sent back on refresh, released
     # when the put ends. Absent on gets and from older backends.
     lease_id: Optional[str] = Field(None, alias="leaseId")
+    # A live get that still reads R2: why (e.g. the run is syncing back).
+    note: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -325,7 +342,9 @@ class HostedTrainingClient:
             payload["teamId"] = team_id
         if cluster:
             payload["cluster"] = cluster
-        return Volume.model_validate(self.client.post("/training/volumes", json=payload))
+        return Volume.model_validate(
+            self.client.post("/training/volumes", json=payload, timeout=VOLUME_WRITE_TIMEOUT)
+        )
 
     def list_volumes(self, team_id: Optional[str] = None) -> List[Volume]:
         params = {"teamId": team_id} if team_id else None
@@ -336,7 +355,11 @@ class HostedTrainingClient:
         payload: Dict[str, Any] = {"size": size}
         if team_id:
             payload["teamId"] = team_id
-        return Volume.model_validate(self.client.patch(f"/training/volumes/{name}", json=payload))
+        return Volume.model_validate(
+            self.client.patch(
+                f"/training/volumes/{name}", json=payload, timeout=VOLUME_WRITE_TIMEOUT
+            )
+        )
 
     def delete_volume(self, name: str, team_id: Optional[str] = None) -> None:
         params = {"teamId": team_id} if team_id else None
@@ -391,13 +414,18 @@ class HostedTrainingClient:
         *,
         team_id: Optional[str] = None,
         lease_id: Optional[str] = None,
+        live: bool = False,
     ) -> VolumeTransferRoute:
         """POST …/volumes/{name}/transfer with mode "get" or "put" and the
         volume-relative path ("" = root): the get source or the put
         destination. A root put also sends `entries`, the top-level names it
         writes; a put's credential refresh sends its `lease_id` to extend
-        that lease. Raises NotFoundError on backends without the route."""
+        that lease. A `live` get reads a volume a run or read-write session
+        holds through a read-only live view of it (older backends ignore
+        it). Raises NotFoundError on backends without the route."""
         payload: Dict[str, Any] = {"mode": mode, "path": path}
+        if live:
+            payload["live"] = True
         if entries is not None:
             payload["entries"] = entries
         if lease_id:
@@ -668,10 +696,10 @@ def build_payload_from_toml(
         so config data.name must point at a path on the volume (e.g.
         "/volume/datasets/<name>" or the relative "datasets/<name>" —
         the platform resolves it).
-      - mode: the prime-rl schema family the config belongs to ("rl" or
-        "sft"). Omitted by default so existing RL payloads stay
-        byte-compatible; set to "sft" for SFT configs so the backend +
-        validator dispatch to SFTConfig instead of the RL schema.
+      - mode: the prime-rl schema family the config belongs to ("rl",
+        "sft" or "pretrain"). Omitted by default so existing RL payloads
+        stay byte-compatible; set to "sft" or "pretrain" so the backend
+        dispatches a trainer-only run with SFTConfig or PretrainConfig.
       - source_ref: a prime-rl git ref (branch / tag / sha) the pods
         overlay onto the image at startup, for testing unmerged code
         without an image build. The platform pins the resolved commit.

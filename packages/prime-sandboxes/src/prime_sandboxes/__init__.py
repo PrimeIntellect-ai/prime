@@ -45,6 +45,7 @@ from .models import (
     DeleteSandboxCheckpointsResponse,
     EgressPolicyStatus,
     FileUploadResponse,
+    HeaderRule,
     ImageArtifactType,
     ImageBuildStatus,
     ImageCoordinateState,
@@ -61,9 +62,12 @@ from .models import (
     LanNetwork,
     LanNetworkMember,
     LanRule,
+    LocalhostForward,
+    PausedSandbox,
     PersonalImageOwner,
     PlatformImageOwner,
     ReadFileResponse,
+    RegistryAuth,
     Sandbox,
     SandboxCheckpoint,
     SandboxEgressPolicy,
@@ -71,6 +75,7 @@ from .models import (
     SandboxStatus,
     SandboxStatusLookupError,
     SandboxStatusSnapshot,
+    Secret,
     SourceImageBuildResult,
     SSHSession,
     StartCommand,
@@ -84,7 +89,7 @@ from .models import (
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
 
-__version__ = "0.5.0"
+__version__ = "0.5.11"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -101,7 +106,10 @@ __all__ = [
     "ImageClient",
     "AsyncImageClient",
     # Models
+    "HeaderRule",
+    "Secret",
     "Sandbox",
+    "PausedSandbox",
     "SandboxCheckpoint",
     "SandboxEgressPolicy",
     "SandboxStatus",
@@ -117,6 +125,7 @@ __all__ = [
     "LanNetwork",
     "LanNetworkMember",
     "LanRule",
+    "LocalhostForward",
     "AdvancedConfigs",
     "BackgroundJob",
     "BackgroundJobStatus",
@@ -130,6 +139,7 @@ __all__ = [
     "SandboxStatusLookupError",
     "SSHSession",
     "BuildImageRequest",
+    "RegistryAuth",
     "BuildImageResponse",
     "BulkBuildImageResponse",
     "SourceImageBuildResult",

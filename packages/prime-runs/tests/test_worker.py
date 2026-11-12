@@ -2,6 +2,7 @@
 
 import queue
 import threading
+import time
 
 import pytest
 from conftest import FakeSink
@@ -80,27 +81,44 @@ def test_records_that_skip_a_sink_which_switched_itself_off_are_not_counted():
     worker.close()
 
 
-def test_a_full_queue_drops_rather_than_blocking_the_producer():
+def test_a_full_queue_drops_at_once_rather_than_blocking_the_producer():
     sink = BlockingSink()
-    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.05)
+    worker = UploadWorker([sink], max_queued_records=2)
 
-    # First item is picked up and wedges the uploader inside sink.write().
+    # The first record is picked up and wedges the uploader inside sink.write();
+    # it counts against the bound until it is written.
     assert worker.submit([{"id": 0}])
     assert sink.entered.wait(5.0), "the uploader never reached the sink"
-    # Second fills the one-slot queue; third has nowhere to go.
-    worker.submit([{"id": 1}])
+    assert worker.submit([{"id": 1}])
+    start = time.monotonic()
     accepted = worker.submit([{"id": 2}, {"id": 3}])
 
+    assert time.monotonic() - start < 0.05
     assert accepted is False
     assert worker.dropped == 2
 
     sink.released.set()
+    drain(worker)
+    # Written records free their room.
+    assert worker.submit([{"id": 4}, {"id": 5}])
+    worker.close()
+    assert [record["id"] for batch in sink.batches for record in batch] == [0, 1, 4, 5]
+
+
+def test_a_batch_larger_than_the_bound_fits_an_empty_queue():
+    sink = FakeSink()
+    worker = UploadWorker([sink], max_queued_records=2)
+
+    assert worker.submit([{"id": i} for i in range(5)])
+    drain(worker)
+
+    assert len(sink.batches[0]) == 5
     worker.close()
 
 
-def test_flush_uses_the_drain_budget_to_get_behind_a_full_queue():
+def test_flush_waits_for_the_records_queued_before_it():
     sink = BlockingSink()
-    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.01)
+    worker = UploadWorker([sink])
     assert worker.submit([{"id": 0}])
     assert sink.entered.wait(1.0)
     assert worker.submit([{"id": 1}])
@@ -117,9 +135,9 @@ def test_flush_uses_the_drain_budget_to_get_behind_a_full_queue():
     assert [batch[0]["id"] for batch in sink.batches] == [0, 1]
 
 
-def test_close_uses_its_budget_to_queue_the_stop_behind_pending_records():
+def test_close_queues_the_stop_behind_pending_records():
     sink = BlockingSink()
-    worker = UploadWorker([sink], max_queue_size=1, put_timeout=0.01)
+    worker = UploadWorker([sink])
     assert worker.submit([{"id": 0}])
     assert sink.entered.wait(1.0)
     assert worker.submit([{"id": 1}])
@@ -160,14 +178,16 @@ def test_submitting_after_close_is_refused():
 
 def test_a_forked_child_starts_over_instead_of_re_uploading_the_parents_queue():
     sink = FakeSink()
-    worker = UploadWorker([sink], max_queue_size=4)
+    worker = UploadWorker([sink])
     worker._queue.put([{"id": "parents"}])
+    worker._queued_records = 1
     old_queue = worker._queue
 
     worker.reset_after_fork()
 
     assert worker._queue is not old_queue
     assert worker._queue.empty()
+    assert worker._queued_records == 0
     assert worker._thread is None
     assert isinstance(worker._queue, queue.Queue)
     assert isinstance(worker._lock, type(threading.Lock())) or worker._lock is not None
@@ -380,6 +400,22 @@ def test_a_success_forgives_earlier_blips():
     assert sink.calls == TRANSIENT_FAILURE_LIMIT * 4
     assert sink.enabled is True
     assert len(sink.batches) == TRANSIENT_FAILURE_LIMIT * 2
+    worker.close()
+
+
+def test_an_internal_server_error_counts_as_a_transient_strike():
+    class ServerErrorSink(FakeSink):
+        def write(self, records) -> None:
+            raise APIError("internal server error", status_code=500)
+
+    sink = ServerErrorSink("flaky")
+    worker = UploadWorker([sink])
+
+    worker.submit([{"id": 1}])
+    drain(worker)
+
+    assert sink.enabled is True
+    assert worker.failed_records == {"flaky": 1}
     worker.close()
 
 

@@ -371,6 +371,27 @@ def test_the_default_encoder_writes_non_finite_numbers_as_null():
     assert math.isinf(row["advantage"])  # the float column keeps the value
 
 
+def test_the_default_encoder_writes_numpy_record_streams():
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("pyarrow")
+    import io
+    import json
+
+    import pyarrow.parquet as pq
+
+    from prime_runs.projection import episodes_to_parquet_bytes
+
+    episode = make_train_episode("e1", step=10)
+    trace = episode.traces[0]
+    trace.to_record = lambda: {"id": trace.id, "token_ids": np.array([1, 2, 3])}
+
+    payload = episodes_to_parquet_bytes([episode], "run-abc", 10)
+
+    (row,) = pq.read_table(io.BytesIO(payload)).to_pylist()
+    info = json.loads(row["info"])
+    assert info["native_wrapper"]["traces"][0]["token_ids"] == [1, 2, 3]
+
+
 def test_the_default_encoder_numbers_rows_from_the_offset():
     pytest.importorskip("pyarrow")
     import io

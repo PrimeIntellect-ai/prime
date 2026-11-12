@@ -95,7 +95,8 @@ class PrimeConsole(Console):
                 table.padding = (0, 1)
                 console = _plain_text_console(width=_PLAIN_TABLE_WIDTH)
                 console.print(table, markup=markup)
-                plain_objects.append(console.export_text().rstrip())
+                lines = console.export_text().rstrip().splitlines()
+                plain_objects.append("\n".join(line.rstrip() for line in lines))
                 continue
 
             text = ""

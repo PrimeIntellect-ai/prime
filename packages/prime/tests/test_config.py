@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -113,3 +115,39 @@ class TestTracesOptOut:
 
         assert result.exit_code == 0, result.output
         assert "Traces Opt Out" in result.output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+class TestConfigPermissions:
+    def test_credentials_are_private(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config_dir = tmp_path / ".prime"
+        config_dir.mkdir(mode=0o755)
+        (config_dir / "config.json").write_text("{}")
+        (config_dir / "config.json").chmod(0o644)
+
+        config = Config()
+        config.set_api_key("key")
+        config.save_environment("staging")
+
+        assert stat.S_IMODE(config_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE((config_dir / "environments").stat().st_mode) == 0o700
+        assert stat.S_IMODE((config_dir / "config.json").stat().st_mode) == 0o600
+        assert stat.S_IMODE((config_dir / "environments" / "staging.json").stat().st_mode) == 0o600
+
+    def test_chmod_failure_still_writes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = Config()
+
+        def deny(*_: object) -> None:
+            raise PermissionError
+
+        monkeypatch.setattr(Path, "chmod", deny)
+
+        config.set_api_key("key")
+
+        assert json.loads((tmp_path / ".prime" / "config.json").read_text())["api_key"] == "key"

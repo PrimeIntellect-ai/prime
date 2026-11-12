@@ -3,10 +3,11 @@ eval-sample format (moved here from ``verifiers.v1.utils.platform``) and the
 training viewer's Parquet table (moved here from prime-rl). Duck-typed: verifiers
 ``Trace``/``Episode`` satisfy it structurally and are not imported."""
 
-import json
 import logging
 import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+import orjson
 
 from ._http import encode_json
 
@@ -38,7 +39,7 @@ def _nullify_non_finite(value: Any) -> Any:
 
 
 def _json_column(value: Any) -> str:
-    return json.dumps(_nullify_non_finite(value), allow_nan=False)
+    return orjson.dumps(value, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS).decode()
 
 
 def summary_trace_index(episode: Any) -> int:

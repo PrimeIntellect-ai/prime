@@ -1,7 +1,8 @@
+import json
 import re
 import tempfile
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
 import click
 import typer
@@ -9,15 +10,18 @@ from prime_traces import (
     APIError,
     Batch,
     EpisodeListPage,
+    EpisodeSummary,
     LineFormat,
     NotFoundError,
     PaymentRequiredError,
     PrimeTracesError,
     RunListPage,
     RunStepList,
+    RunSummary,
     TraceListPage,
     TracesClient,
     TraceSearchMatch,
+    TraceSummary,
     UnauthorizedError,
     UploadReceipt,
 )
@@ -30,6 +34,7 @@ from ..core import Config
 from ..utils import (
     PlainTyper,
     get_console,
+    get_traces_viewer_url,
     json_output_help,
     output_data_as_json,
     validate_output_format,
@@ -62,27 +67,30 @@ def _traces_client() -> TracesClient:
 UPLOAD_JSON_HELP = json_output_help(
     ".receipts[] = {upload_id, status}",
     ".num_batches = number",
+    ".runs[] = {run_id, url}: the runs the file's lines name, with their viewer links",
 )
 
 LIST_JSON_HELP = json_output_help(
     ".items[] = trace summary {trace_id, run_id, task_id, user_id, score, total_tokens,"
-    " duration_ms, created_at, ingested_at, ...}",
+    " duration_ms, created_at, ingested_at, url, ...}",
     "with --episodes: .items[] = episode summary {episode_id, run_id, environment_id,"
-    " outcome, has_error, error{type, message}, created_at, ...}",
+    " outcome, has_error, error{type, message}, created_at, url, ...}",
     "with --runs: .items[] = run summary {run_id, trace_count, episode_count, avg_reward,"
-    " has_error, step_count, environment_ids[], model_ids[], context, ...}",
+    " has_error, step_count, environment_ids[], model_ids[], context, url, ...}",
+    ".items[].url = dashboard viewer link, or null for a trace or episode without a run",
     ".next_cursor? = string",
 )
 
 GET_JSON_HELP = json_output_help(
-    ". = trace summary object; with --raw and no --dest, the exact stored trace document",
-    "with --episodes: . = episode summary plus .traces = {trace_count, total_tokens,"
+    ". = trace summary object plus .url = dashboard viewer link (null without a run);"
+    " with --raw and no --dest, the exact stored trace document",
+    "with --episodes: . = episode summary plus .url and .traces = {trace_count, total_tokens,"
     " total_duration_ms, any_trace_error, agent_names[]}; with --raw and no --dest,"
     " the exact stored episode (.traces = member trace IDs)",
     "with --runs: . = run summary {run_id, trace_count, episode_count, avg_reward,"
     " has_error, step_min, step_max, step_count, environment_ids[], model_ids[], context,"
     " first_trace_created_at, last_trace_created_at, last_trace_ingested_at, first_user_id}"
-    " plus .steps[] = {step, trace_count, episode_count, avg_reward}",
+    " plus .url and .steps[] = {step, trace_count, episode_count, avg_reward}",
     "with --raw --dest: {dest, bytes_written}",
 )
 
@@ -91,6 +99,77 @@ GET_JSON_HELP = json_output_help(
 EPISODE_MEMBERS_SHOWN = 20
 
 RUN_TYPES = ("eval", "train", "unknown")
+
+
+def _viewer_url(
+    record: Union[TraceSummary, EpisodeSummary, RunSummary],
+) -> Optional[str]:
+    """The dashboard viewer link for a trace, episode or run; None without a run.
+
+    A `url` the service returns wins, so a route change there needs no CLI
+    release. Otherwise a trace links itself, an episode opens in the viewer,
+    and a run links its page.
+    """
+    extra: Dict[str, Any] = record.model_extra or {}
+    served = extra.get("url")
+    if isinstance(served, str) and served:
+        return served
+    if not record.run_id:
+        return None
+    if isinstance(record, TraceSummary):
+        step = extra.get("run_step")
+        return get_traces_viewer_url(
+            record.run_id,
+            episode_id=record.episode_id,
+            trace_id=record.trace_id,
+            step=step if isinstance(step, int) else None,
+        )
+    if isinstance(record, EpisodeSummary):
+        return get_traces_viewer_url(record.run_id, episode_id=record.episode_id)
+    return get_traces_viewer_url(record.run_id)
+
+
+def _print_viewer_link(url: Optional[str], noun: str) -> None:
+    if url is None:
+        console.print(
+            Text(
+                f"No viewer link: the dashboard shows traces by run, and this {noun} has none.",
+                style="dim",
+            )
+        )
+        return
+    # On one line, so a narrow terminal does not break the link apart.
+    console.print(Text.assemble(("View: ", "dim"), url), soft_wrap=True)
+
+
+def _upload_run_ids(path: Path, *, episodes: bool) -> List[str]:
+    """The run IDs the uploaded lines name, in first-seen order.
+
+    Receipts do not say which runs a batch stored, so read them from the file:
+    `run.id` on a trace line, and on an episode line each member trace's
+    `run.id`, falling back to the episode's own. Lines that do not parse were
+    rejected by the upload already and are skipped here.
+    """
+
+    def run_id(document: Any) -> Optional[str]:
+        run = document.get("run") if isinstance(document, dict) else None
+        value = run.get("id") if isinstance(run, dict) else None
+        return value if isinstance(value, str) and value else None
+
+    seen: Dict[str, None] = {}
+    with open(path, "rb") as f:
+        for line in f:
+            try:
+                document = json.loads(line)
+            except ValueError:
+                continue
+            ids = [run_id(document)]
+            if episodes and isinstance(document, dict):
+                members = document.get("traces")
+                if isinstance(members, list) and members:
+                    ids = [run_id(member) or ids[0] for member in members]
+            seen.update((value, None) for value in ids if value is not None)
+    return list(seen)
 
 
 def _parse_context(values: List[str]) -> Optional[Dict[str, str]]:
@@ -297,7 +376,11 @@ def upload_traces(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Upload a JSONL file of traces. Safe to rerun after interruption:
-    identical bytes replay their committed receipts without re-storing."""
+    identical bytes replay their committed receipts without re-storing.
+
+    Prints a viewer link for each run the file's traces belong to. Viewer links
+    open the dashboard's traces viewer for the team selected in its account switcher.
+    """
     validate_output_format(output, error_console)
     line_format = LineFormat.EPISODE if episodes else LineFormat.TRACE
 
@@ -334,11 +417,15 @@ def upload_traces(
         error_console.print_exception()
         raise typer.Exit(1)
 
+    run_ids = _upload_run_ids(file, episodes=episodes)
     if output == "json":
         output_data_as_json(
             {
                 "receipts": [r.model_dump() for r in receipts],
                 "num_batches": len(receipts),
+                "runs": [
+                    {"run_id": run_id, "url": get_traces_viewer_url(run_id)} for run_id in run_ids
+                ],
             },
             console,
         )
@@ -346,6 +433,24 @@ def upload_traces(
         console.print(f"[green]Uploaded {len(receipts)} batch(es) from {escape(str(file))}[/green]")
         list_command = "prime traces list --episodes" if episodes else "prime traces list"
         console.print(Text(f"List a batch: {list_command} --upload-id <batch id>", style="dim"))
+        if not run_ids:
+            console.print(
+                Text(
+                    "No viewer link: the dashboard shows traces by run,"
+                    " and these traces have no run ID.",
+                    style="dim",
+                )
+            )
+        for run_id in run_ids:
+            console.print(
+                Text.assemble(
+                    ("View run ", "dim"),
+                    (run_id, "dim"),
+                    (": ", "dim"),
+                    get_traces_viewer_url(run_id),
+                ),
+                soft_wrap=True,
+            )
 
 
 PageT = TypeVar("PageT", TraceListPage, EpisodeListPage, RunListPage)
@@ -560,6 +665,8 @@ def list_traces(
     """List trace summaries, episode summaries with --episodes, or runs with --runs.
 
     Traces and episodes are listed newest first, runs by their latest upload.
+    JSON output carries each item's dashboard viewer link as `url`. Viewer links
+    open the dashboard's traces viewer for the team selected in its account switcher.
     """
     validate_output_format(output, error_console)
     _check_paging(page, cursor)
@@ -704,7 +811,10 @@ def list_traces(
         raise typer.Exit(1)
 
     if output == "json":
-        output_data_as_json(result.model_dump(mode="json"), console)
+        payload = result.model_dump(mode="json")
+        for item, record in zip(payload["items"], result.items):
+            item["url"] = _viewer_url(record)
+        output_data_as_json(payload, console)
         return
 
     if isinstance(result, RunListPage):
@@ -739,10 +849,17 @@ def list_traces(
         limit=limit,
         cursor=cursor,
     )
+    # A link per row would crowd out the columns; `get` and JSON carry it.
     if isinstance(result, EpisodeListPage) and result.items:
-        console.print(Text("Details: prime traces get <episode_id> --episodes", style="dim"))
-    if isinstance(result, RunListPage) and result.items:
-        console.print(Text("Details: prime traces get <run_id> --runs", style="dim"))
+        console.print(
+            Text("Details and viewer link: prime traces get <episode_id> --episodes", style="dim")
+        )
+    elif isinstance(result, RunListPage) and result.items:
+        console.print(
+            Text("Details and viewer link: prime traces get <run_id> --runs", style="dim")
+        )
+    elif isinstance(result, TraceListPage) and result.items:
+        console.print(Text("Viewer links: prime traces get <trace_id>, or -o json", style="dim"))
 
 
 @app.command("get", epilog=GET_JSON_HELP)
@@ -764,7 +881,9 @@ def get_trace(
 ) -> None:
     """Get one trace, one episode with --episodes, or one run with --runs.
 
-    --raw fetches the stored trace or episode document.
+    --raw fetches the stored trace or episode document. Otherwise the output
+    includes a link to the dashboard's traces viewer, which shows the team
+    selected in its account switcher; a trace without a run has no viewer page.
     """
     validate_output_format(output, error_console)
     if dest is not None and not raw:
@@ -794,7 +913,7 @@ def get_trace(
                 else:
                     console.print(f"[green]Wrote {written} bytes to {escape(str(dest))}[/green]")
                 return
-            # Raw documents can be tens of MiB. Preserve their exact bytes and
+            # Raw documents can reach 1 GiB. Preserve their exact bytes and
             # do not append a newline so redirected output is a faithful copy.
             stdout = click.get_binary_stream("stdout")
             stdout.write(client.get_raw(trace_id))
@@ -817,12 +936,14 @@ def get_trace(
         error_console.print_exception()
         raise typer.Exit(1)
 
+    url = _viewer_url(summary)
     if output == "json":
-        output_data_as_json(summary.model_dump(mode="json"), console)
+        output_data_as_json({**summary.model_dump(mode="json"), "url": url}, console)
         return
 
     for renderable in summary_view(summary):
         console.print(renderable)
+    _print_viewer_link(url, "trace")
 
 
 def _get_episode(episode_id: str, *, raw: bool, dest: Optional[Path], output: str) -> None:
@@ -877,12 +998,14 @@ def _get_episode(episode_id: str, *, raw: bool, dest: Optional[Path], output: st
             console.print(f"[green]Wrote {len(document)} bytes to {escape(str(dest))}[/green]")
         return
 
+    url = _viewer_url(detail)
     if output == "json":
-        output_data_as_json(detail.model_dump(mode="json"), console)
+        output_data_as_json({**detail.model_dump(mode="json"), "url": url}, console)
         return
     assert members is not None
     for renderable in episode_view(detail, members):
         console.print(renderable)
+    _print_viewer_link(url, "episode")
 
 
 def _get_run(run_id: str, *, output: str) -> None:
@@ -920,11 +1043,13 @@ def _get_run(run_id: str, *, output: str) -> None:
 
     if output == "json":
         payload = run.model_dump(mode="json")
+        payload["url"] = _viewer_url(run)
         payload["steps"] = [step.model_dump(mode="json") for step in steps.items]
         output_data_as_json(payload, console)
         return
     for renderable in run_view(run, steps):
         console.print(renderable)
+    _print_viewer_link(_viewer_url(run), "run")
 
 
 @app.command("delete")

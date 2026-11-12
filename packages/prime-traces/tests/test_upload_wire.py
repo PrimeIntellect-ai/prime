@@ -2,6 +2,7 @@ import gzip
 import hashlib
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from typing import Dict, Tuple
@@ -82,10 +83,24 @@ class TestRequestShape:
         }
         assert receipt.status == "committed"
 
+    def test_upload_records_sends_encoded_lines_as_they_are(self, make_client):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["content"], captured["type"] = request.content, request.headers["content-type"]
+            return httpx.Response(201, json=COMMITTED)
+
+        make_client(handler).upload_records(
+            [b'{"id":"a"}', b'{"id":"b"}\n', {"id": "c"}], compress=False
+        )
+
+        parts = parse_multipart(captured["content"], captured["type"])
+        assert parts["traces"][1] == b'{"id":"a"}\n{"id":"b"}\n{"id":"c"}\n'
+
     @pytest.mark.parametrize(
         ("record", "message"),
         [
-            (object(), "must be a mapping or implement to_record"),
+            (object(), "must be a mapping, bytes, or implement to_record"),
             (
                 type("BadRecord", (), {"to_record": lambda self: ["not", "a", "mapping"]})(),
                 "to_record\\(\\) must return a mapping",
@@ -390,3 +405,69 @@ class TestRetrySemantics:
 
         with pytest.raises(LineFormatConflictError):
             upload(make_client(handler))
+
+
+class TestConcurrentBatches:
+    # 11 bytes each: under a 12-byte target, every line is its own batch.
+    LINES = [f'{{"id":"{i}"}}\n'.encode() for i in range(6)]
+
+    @staticmethod
+    def first_id(request: httpx.Request) -> str:
+        parts = parse_multipart(request.content, request.headers["content-type"])
+        return json.loads(parts["traces"][1].splitlines()[0])["id"]
+
+    def test_batches_overlap_and_come_back_in_order(self, make_client):
+        # Each request waits until three are in flight together.
+        in_flight = threading.Barrier(3, timeout=5)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            in_flight.wait()
+            digest = request.headers["Idempotency-Key"].split(":", 1)[1]
+            return httpx.Response(201, json={"upload_id": digest, "status": "committed"})
+
+        callers = []
+        receipts = make_client(handler).upload_lines(
+            self.LINES,
+            target_batch_bytes=12,
+            max_in_flight=3,
+            compress=False,
+            on_batch=lambda batch, receipt: callers.append(threading.current_thread()),
+        )
+
+        assert [r.upload_id for r in receipts] == [
+            hashlib.sha256(line).hexdigest() for line in self.LINES
+        ]
+        assert callers == [threading.current_thread()] * len(self.LINES)
+
+    def test_a_failed_batch_stops_new_requests_and_waits_for_the_rest(self, make_client):
+        sent = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            first = self.first_id(request)
+            sent.append(first)
+            if first == "1":
+                return httpx.Response(
+                    400, json={"error": {"code": "invalid_trace", "message": "bad"}}
+                )
+            # Outlasts the rejection; ``time.sleep`` is patched out in these tests.
+            threading.Event().wait(0.05)
+            return httpx.Response(201, json=COMMITTED)
+
+        committed = []
+        with pytest.raises(ValidationRejectedError):
+            make_client(handler).upload_lines(
+                self.LINES,
+                target_batch_bytes=12,
+                max_in_flight=2,
+                compress=False,
+                on_batch=lambda batch, receipt: committed.append(batch.first_line_number),
+            )
+
+        assert sorted(sent) == ["0", "1"]
+        assert committed == [1]
+
+    def test_non_positive_max_in_flight_rejected(self, make_client):
+        with pytest.raises(ValueError, match="max_in_flight"):
+            upload(
+                make_client(lambda request: httpx.Response(201, json=COMMITTED)), max_in_flight=0
+            )

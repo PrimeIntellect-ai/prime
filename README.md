@@ -35,9 +35,6 @@ uv tool install prime
 # Authenticate
 prime login
 
-# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
-prime lab setup
-
 # See available Hosted Training models, capacity, and pricing
 prime train models
 
@@ -53,7 +50,6 @@ prime availability list
 
 ## Features
 
-- **Lab Workspaces** - Set up local verifiers workspaces for environments, evals, GEPA, and training
 - **Hosted Training** - Train models against verifiers environments and inspect runs, logs, metrics, and checkpoints
 - **Environments** - Access hundreds of verified environments on our community hub
 - **Evaluations** - Run hosted evaluations and push and manage results
@@ -145,18 +141,16 @@ prime env install <environment-name>
 prime env push my-environment
 ```
 
-### Lab and Hosted Training
+### Hosted Training
 
-Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
+Build and evaluate environments with [verifiers](https://github.com/PrimeIntellect-ai/verifiers) (`uv add verifiers`). Use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
 
 ```bash
-# Set up a Lab workspace
-prime lab setup
-
 # List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
+# Launch a prime-rl config on a dedicated cluster; its top-level `mode`
+# ("rl", "sft" or "pretrain") picks the run kind
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
@@ -164,6 +158,30 @@ prime train list
 prime train logs <run-id> -f
 prime train metrics <run-id>
 prime train checkpoints <run-id>
+
+# Serve a checkpoint as an OpenAI-compatible endpoint
+prime train deploy <run-id> --step <N> --wait
+```
+
+### Inference Deployments
+
+```bash
+# List deployable models and your team's clusters that can serve them
+prime inference catalog
+
+# Deploy a catalog model (on Prime's on-demand pool unless --cluster is set)
+prime inference deploy <model-catalog-id> --name my-endpoint --replicas 1 --wait
+
+# Deploy a training checkpoint, then check a deployment's status and endpoint
+prime inference deploy-checkpoint <run-id> --step <N> --wait
+prime inference deployments get <deployment-id>
+
+# List your deployments (--team for a team's), and change a replica count
+prime inference deployments list [--team <team-id>]
+prime inference deployments scale <deployment-id> --replicas 2
+
+# Delete a deployment (asks for confirmation; --yes skips it)
+prime inference deployments delete <deployment-id>
 ```
 
 ### GPU Resources

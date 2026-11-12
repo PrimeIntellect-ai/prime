@@ -27,9 +27,7 @@ def _publish_path(sandbox_id: str, name: str) -> str:
     return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/publish"
 
 
-def _name_params(
-    client: "APIClient | AsyncAPIClient", team_id: Optional[str]
-) -> dict[str, object]:
+def _name_params(client: "APIClient | AsyncAPIClient", team_id: Optional[str]) -> dict[str, object]:
     resolved_team_id = _resolved_team_id(client, team_id)
     if resolved_team_id:
         return {"team_id": resolved_team_id}
@@ -47,12 +45,20 @@ class Volumes:
     def __init__(self, parent: "SandboxClient"):
         self._parent = parent
 
-    def create(self, name: str, *, team_id: Optional[str] = None) -> Volume:
-        """Create an empty volume in the caller's personal scope or in a team."""
+    def create(
+        self, name: str, *, team_id: Optional[str] = None, size_gb: Optional[int] = None
+    ) -> Volume:
+        """Create an empty volume in the caller's personal scope or in a team.
+
+        ``size_gb`` is the requested capacity in whole GiB; omitted means
+        the base image size (100 GiB).
+        """
         payload: dict[str, object] = {"name": name}
         resolved_team_id = _resolved_team_id(self._parent.client, team_id)
         if resolved_team_id:
             payload["team_id"] = resolved_team_id
+        if size_gb is not None:
+            payload["size_gb"] = size_gb
         response = self._parent.client.request("POST", "/sandbox/volumes", json=payload)
         return Volume.model_validate(response)
 
@@ -93,22 +99,41 @@ class Volumes:
             params=_name_params(self._parent.client, team_id),
         )
 
-    def publish(
-        self, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> SandboxCheckpoint:
+    def grow(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
+        """Grow a volume's capacity to ``size_gb`` whole GiB.
+
+        Grow-only: the server rejects a size at or below the volume's
+        current effective size (its set size, or the 100 GiB base image
+        size when unset). The new size applies to sandboxes created after
+        the change; running attachments keep their current size.
+        """
+        response = self._parent.client.request(
+            "PATCH",
+            _volume_path(name),
+            json={"size_gb": size_gb},
+            params=_name_params(self._parent.client, team_id),
+        )
+        return Volume.model_validate(response)
+
+    def publish(self, sandbox_id: str, name: str, *, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
+        ``wait`` is keyword-only so an old third positional argument (the
+        removed ``force`` flag) raises instead of silently meaning
+        ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
-        (400), or has another sandbox's publish in flight (409); a moved
-        head is 409 unless force is True. With wait=True (the default), the
-        returned checkpoint is the published head once DURABLE; a failed
-        publish raises RuntimeError and an unfinished publish TimeoutError.
+        (400), or has another sandbox's publish in flight (409). With
+        wait=True (the default), the returned checkpoint is the published
+        head once DURABLE; on servers that report volume-merge status the
+        wait also covers the checkpoint's merge, and a failed merge raises
+        RuntimeError with merge_error. A failed publish raises RuntimeError
+        and an unfinished publish TimeoutError.
         """
         response = self._parent.client.request(
             "POST",
             _publish_path(sandbox_id, name),
-            json={"force": force},
+            json={},
         )
         checkpoint = SandboxCheckpoint.model_validate(response)
         if not wait:
@@ -127,12 +152,20 @@ class AsyncVolumes:
     def __init__(self, parent: "AsyncSandboxClient"):
         self._parent = parent
 
-    async def create(self, name: str, *, team_id: Optional[str] = None) -> Volume:
-        """Create an empty volume in the caller's personal scope or in a team."""
+    async def create(
+        self, name: str, *, team_id: Optional[str] = None, size_gb: Optional[int] = None
+    ) -> Volume:
+        """Create an empty volume in the caller's personal scope or in a team.
+
+        ``size_gb`` is the requested capacity in whole GiB; omitted means
+        the base image size (100 GiB).
+        """
         payload: dict[str, object] = {"name": name}
         resolved_team_id = _resolved_team_id(self._parent.client, team_id)
         if resolved_team_id:
             payload["team_id"] = resolved_team_id
+        if size_gb is not None:
+            payload["size_gb"] = size_gb
         response = await self._parent.client.request("POST", "/sandbox/volumes", json=payload)
         return Volume.model_validate(response)
 
@@ -173,22 +206,41 @@ class AsyncVolumes:
             params=_name_params(self._parent.client, team_id),
         )
 
-    async def publish(
-        self, sandbox_id: str, name: str, force: bool = False, wait: bool = True
-    ) -> SandboxCheckpoint:
+    async def grow(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
+        """Grow a volume's capacity to ``size_gb`` whole GiB.
+
+        Grow-only: the server rejects a size at or below the volume's
+        current effective size (its set size, or the 100 GiB base image
+        size when unset). The new size applies to sandboxes created after
+        the change; running attachments keep their current size.
+        """
+        response = await self._parent.client.request(
+            "PATCH",
+            _volume_path(name),
+            json={"size_gb": size_gb},
+            params=_name_params(self._parent.client, team_id),
+        )
+        return Volume.model_validate(response)
+
+    async def publish(self, sandbox_id: str, name: str, *, wait: bool = True) -> SandboxCheckpoint:
         """Publish one of a running sandbox's volume attachments.
 
+        ``wait`` is keyword-only so an old third positional argument (the
+        removed ``force`` flag) raises instead of silently meaning
+        ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
         writable volume with that name (404), makes the volume read-only
-        (400), or has another sandbox's publish in flight (409); a moved
-        head is 409 unless force is True. With wait=True (the default), the
-        returned checkpoint is the published head once DURABLE; a failed
-        publish raises RuntimeError and an unfinished publish TimeoutError.
+        (400), or has another sandbox's publish in flight (409). With
+        wait=True (the default), the returned checkpoint is the published
+        head once DURABLE; on servers that report volume-merge status the
+        wait also covers the checkpoint's merge, and a failed merge raises
+        RuntimeError with merge_error. A failed publish raises RuntimeError
+        and an unfinished publish TimeoutError.
         """
         response = await self._parent.client.request(
             "POST",
             _publish_path(sandbox_id, name),
-            json={"force": force},
+            json={},
         )
         checkpoint = SandboxCheckpoint.model_validate(response)
         if not wait:

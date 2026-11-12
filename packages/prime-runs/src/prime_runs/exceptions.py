@@ -73,4 +73,8 @@ def is_record_rejection(exc: BaseException) -> bool:
 
 def is_transient(exc: BaseException) -> bool:
     """A failure about this moment (retry later) rather than this run (stop)."""
-    return isinstance(exc, (RetryableAPIError, TransportError))
+    # The shared traces mapper leaves a 500 as plain APIError (it is not safe to
+    # replay), but for a sink it is an outage, not a reason to stop for good.
+    return isinstance(exc, (RetryableAPIError, TransportError)) or (
+        isinstance(exc, APIError) and exc.status_code == 500
+    )

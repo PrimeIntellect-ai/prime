@@ -15,13 +15,13 @@ with ``idempotent=``. Connect errors and 429 are replayed for every method.
 Error mapping and backoff come from ``prime_traces.core.client``.
 """
 
-import json
 import sys
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+import orjson
 from prime_traces.core.client import AMBIGUOUS_TRANSPORT_ERRORS, raise_for_response, retry_delay
 
 from . import _fork
@@ -72,10 +72,8 @@ def _user_agent() -> str:
 
 
 def encode_json(value: Any) -> bytes:
-    """Compact UTF-8 JSON; bare ``NaN`` is refused here rather than as a 400."""
-    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
-        "utf-8"
-    )
+    """Compact UTF-8 JSON; NaN and infinity go out as ``null``, never as a bare ``NaN``."""
+    return orjson.dumps(value, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS)
 
 
 class PlatformClient:

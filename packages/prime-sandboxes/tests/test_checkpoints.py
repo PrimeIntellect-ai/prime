@@ -14,7 +14,9 @@ from prime_sandboxes import (
 )
 
 
-def checkpoint_response(state: str = "PENDING") -> dict:
+def checkpoint_response(
+    state: str = "PENDING", merge: str | None = None, merge_error: str | None = None
+) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     return {
         "id": "checkpoint-1",
@@ -24,6 +26,8 @@ def checkpoint_response(state: str = "PENDING") -> dict:
         "state": state,
         "depth": 1,
         "docker_image": "python:3.11-slim",
+        "merge": merge,
+        "merge_error": merge_error,
         "created_at": now,
         "updated_at": now,
     }
@@ -75,6 +79,55 @@ def test_restore_create_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["vm"] is True
     assert "docker_image" not in payload
     assert "disk_size_gb" not in payload
+
+
+def test_restore_memory_requires_checkpoint() -> None:
+    with pytest.raises(ValueError, match="restore_memory requires checkpoint_id"):
+        CreateSandboxRequest(name="fork", docker_image="python:3.11-slim", restore_memory=True)
+
+
+def test_memory_restore_payload_takes_the_paused_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    payloads = []
+
+    def request(method: str, path: str, **kwargs: object) -> dict:
+        payloads.append(kwargs["json"])
+        return sandbox_response()
+
+    monkeypatch.setattr(client.client, "request", request)
+    client.create(CreateSandboxRequest(name="fork", checkpoint_id="pause-1", restore_memory=True))
+    client.create(
+        CreateSandboxRequest(name="fork", checkpoint_id="pause-1", restore_memory=True, cpu_cores=2)
+    )
+    client.create(CreateSandboxRequest(name="cold", checkpoint_id="pause-1"))
+
+    fork, explicit, cold = payloads
+    assert fork["restore_memory"] is True
+    # The defaults would conflict with a paused sandbox of another shape.
+    for field in ("cpu_cores", "memory_gb", "gpu_count", "gpu_type"):
+        assert field not in fork
+    assert explicit["cpu_cores"] == 2
+    assert "memory_gb" not in explicit
+    assert "restore_memory" not in cold
+    assert cold["cpu_cores"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_async_memory_restore_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with AsyncSandboxClient(api_key="test-key") as client:
+        payloads = []
+
+        async def request(method: str, path: str, **kwargs: object) -> dict:
+            payloads.append(kwargs["json"])
+            return sandbox_response()
+
+        monkeypatch.setattr(client.client, "request", request)
+        await client.create(
+            CreateSandboxRequest(name="fork", checkpoint_id="pause-1", restore_memory=True)
+        )
+
+    assert payloads[0]["restore_memory"] is True
+    assert "cpu_cores" not in payloads[0]
 
 
 @pytest.mark.asyncio
@@ -248,7 +301,8 @@ async def test_wait_for_checkpoint_durable(
     durable = await wait_for_checkpoint(checkpoint_client)
     assert durable.state == "DURABLE"
     assert calls == ["checkpoint-1"] * len(states)
-    assert checkpoint_clock == ([] if len(states) == 1 else [1.0, 1.5])
+    # Non-terminal polls inside the fast window all wait the fast delay.
+    assert checkpoint_clock == ([] if len(states) == 1 else [1.0, 1.0])
 
 
 @pytest.mark.asyncio
@@ -317,6 +371,197 @@ async def test_wait_for_checkpoint_cancellation(monkeypatch):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+def mock_checkpoint_merges(client, monkeypatch, merge_states):
+    """Return DURABLE checkpoints whose merge status follows merge_states."""
+    calls = []
+    responses = iter(merge_states)
+
+    def get(checkpoint_id):
+        calls.append(checkpoint_id)
+        merge, merge_error = next(responses)
+        return SandboxCheckpoint.model_validate(
+            checkpoint_response("DURABLE", merge=merge, merge_error=merge_error)
+        )
+
+    async def async_get(checkpoint_id):
+        return get(checkpoint_id)
+
+    monkeypatch.setattr(
+        client._checkpoint_batcher,
+        "get",
+        async_get if isinstance(client, AsyncSandboxClient) else get,
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_polls_until_merge_not_pending(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = mock_checkpoint_merges(
+        checkpoint_client, monkeypatch, [("pending", None), ("merged", None)]
+    )
+
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.state == "DURABLE"
+    assert checkpoint.merge == "merged"
+    assert calls == ["checkpoint-1", "checkpoint-1"]
+    assert checkpoint_clock == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_merge_failed_raises(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = mock_checkpoint_merges(checkpoint_client, monkeypatch, [("failed", "quota exceeded")])
+
+    with pytest.raises(RuntimeError, match="checkpoint-1.*volume merge failed.*quota exceeded"):
+        await wait_for_checkpoint(checkpoint_client)
+    assert calls == ["checkpoint-1"]
+    assert checkpoint_clock == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_merge_pending_timeout(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = mock_checkpoint_merges(checkpoint_client, monkeypatch, [("pending", None)] * 2)
+
+    with pytest.raises(TimeoutError, match="checkpoint-1.*volume merge.*2s"):
+        await wait_for_checkpoint(checkpoint_client, timeout_seconds=2)
+    assert calls == ["checkpoint-1", "checkpoint-1"]
+    assert checkpoint_clock == [1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_older_server_without_merge_fields(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    # Older servers omit merge and merge_error entirely; the wait returns at
+    # DURABLE exactly as before.
+    calls = []
+
+    def get(checkpoint_id):
+        calls.append(checkpoint_id)
+        row = {
+            key: value
+            for key, value in checkpoint_response("DURABLE").items()
+            if key not in ("merge", "merge_error")
+        }
+        return SandboxCheckpoint.model_validate(row)
+
+    async def async_get(checkpoint_id):
+        return get(checkpoint_id)
+
+    monkeypatch.setattr(
+        checkpoint_client._checkpoint_batcher,
+        "get",
+        async_get if isinstance(checkpoint_client, AsyncSandboxClient) else get,
+    )
+
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.state == "DURABLE"
+    assert checkpoint.merge is None
+    assert checkpoint.merge_error is None
+    assert calls == ["checkpoint-1"]
+    assert checkpoint_clock == []
+
+
+def mock_checkpoint_script(client, monkeypatch, rows):
+    """Serve a scripted list of checkpoint rows; one per poll."""
+    calls = []
+    responses = iter(rows)
+
+    def get(checkpoint_id):
+        calls.append(checkpoint_id)
+        return SandboxCheckpoint.model_validate(next(responses))
+
+    async def async_get(checkpoint_id):
+        return get(checkpoint_id)
+
+    monkeypatch.setattr(
+        client._checkpoint_batcher,
+        "get",
+        async_get if isinstance(client, AsyncSandboxClient) else get,
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_fast_window_expires_to_backoff(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    # Non-terminal polls sleep the fixed fast delay for the first
+    # CHECKPOINT_POLL_FAST_WINDOW seconds, then the backoff law resumes from
+    # a fresh index.
+    rows = [checkpoint_response("PENDING")] * 13 + [checkpoint_response("DURABLE")]
+
+    mock_checkpoint_script(checkpoint_client, monkeypatch, rows)
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.state == "DURABLE"
+    assert checkpoint_clock == [1.0] * 10 + [1.0, 1.5, 2.25]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_merge_rearms_fast_cadence(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    # The merge phase re-arms the fast window even after the upload phase
+    # already fell back to backoff.
+    rows = [checkpoint_response("PENDING")] * 12
+    rows += [
+        checkpoint_response("DURABLE", merge="pending"),
+        checkpoint_response("DURABLE", merge="pending"),
+        checkpoint_response("DURABLE", merge="merged"),
+    ]
+
+    mock_checkpoint_script(checkpoint_client, monkeypatch, rows)
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.merge == "merged"
+    # Upload: ten fast sleeps, then the backoff law takes over.
+    # Merge: one re-armed fast window, no matter how late the merge began.
+    assert checkpoint_clock == [1.0] * 10 + [1.0, 1.5] + [1.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_merge_rearms_only_once(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    # Once the re-armed merge window itself expires, later merge-pending polls
+    # fall back to a fresh backoff index instead of re-arming again.
+    rows = [checkpoint_response("PENDING")] * 12
+    rows += [checkpoint_response("DURABLE", merge="pending")] * 11
+    rows += [checkpoint_response("DURABLE", merge="merged")]
+
+    mock_checkpoint_script(checkpoint_client, monkeypatch, rows)
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.merge == "merged"
+    # Twelve upload sleeps (fast window + backoff), ten re-armed fast sleeps,
+    # then a fresh backoff index after the merge window expires.
+    assert checkpoint_clock == [1.0] * 10 + [1.0, 1.5] + [1.0] * 10 + [1.0]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkpoint_backoff_caps_at_max_delay(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    rows = [checkpoint_response("PENDING")] * 29 + [checkpoint_response("DURABLE")]
+
+    mock_checkpoint_script(checkpoint_client, monkeypatch, rows)
+    checkpoint = await wait_for_checkpoint(checkpoint_client)
+
+    assert checkpoint.state == "DURABLE"
+    # Ten fast sleeps, one backoff ramp, then the capped 10s delay.
+    assert checkpoint_clock == (
+        [1.0] * 11 + [1.5, 2.25, 3.375, 5.0625, 7.59375] + [10.0] * 13
+    )
 
 
 async def concurrent_checkpoint_waits(client, checkpoint_ids):
@@ -546,3 +791,109 @@ def test_sync_client_returns_empty_dict_on_204() -> None:
         transport=httpx.MockTransport(lambda request: httpx.Response(204)),
     )
     assert client.request("DELETE", "/sandbox/checkpoints/c1") == {}
+
+
+def test_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str) -> dict:
+        calls.append((method, path))
+        return {**sandbox_response(), "checkpointId": "pause-1"}
+
+    monkeypatch.setattr(client.client, "request", request)
+    paused = client.pause("sandbox-1")
+    client.resume("sandbox-1")
+
+    assert paused.checkpoint_id == "pause-1"
+
+    assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]
+
+
+@pytest.mark.asyncio
+async def test_async_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with AsyncSandboxClient(api_key="test-key") as client:
+        calls = []
+
+        async def request(method: str, path: str) -> dict:
+            calls.append((method, path))
+            return {**sandbox_response(), "checkpointId": "pause-1"}
+
+        monkeypatch.setattr(client.client, "request", request)
+        paused = await client.pause("sandbox-1")
+        await client.resume("sandbox-1")
+
+    assert paused.checkpoint_id == "pause-1"
+
+    assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]
+
+
+def test_account_wide_list_and_delete_follow_cursors(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+    pages = {
+        ("GET", None): {"checkpoints": [checkpoint_response("DURABLE")], "next_cursor": "c1"},
+        ("GET", "c1"): {"checkpoints": [checkpoint_response("FAILED")], "next_cursor": None},
+        ("DELETE", None): {"deleted": ["a"], "errors": [], "next_cursor": "c1"},
+        ("DELETE", "c1"): {
+            "deleted": ["b"],
+            "errors": [{"checkpoint_id": "tip", "code": "CONFLICT", "message": "active"}],
+            "next_cursor": None,
+        },
+    }
+
+    def request(method: str, path: str, params: dict) -> dict:
+        calls.append((method, path, dict(params)))
+        return pages[(method, params.get("cursor"))]
+
+    monkeypatch.setattr(client.client, "request", request)
+    before = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    listed = client.list_all_checkpoints(
+        team_id="team-1", states=["DURABLE"], created_before=before
+    )
+    result = client.delete_all_checkpoints(team_id="team-1")
+
+    assert [c.state for c in listed] == ["DURABLE", "FAILED"]
+    assert calls[0] == (
+        "GET",
+        "/sandbox/checkpoints",
+        {"team_id": "team-1", "state": ["DURABLE"], "created_before": before.isoformat()},
+    )
+    assert calls[1][2]["cursor"] == "c1"
+    assert result.deleted == ["a", "b"]
+    assert [e.checkpoint_id for e in result.errors] == ["tip"]
+
+
+def test_account_wide_calls_default_to_configured_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_TEAM_ID", "configured-team")
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str, params: dict) -> dict:
+        calls.append((method, dict(params)))
+        if method == "GET":
+            return {"checkpoints": [], "next_cursor": None}
+        return {"deleted": [], "errors": [], "next_cursor": None}
+
+    monkeypatch.setattr(client.client, "request", request)
+    client.list_all_checkpoints()
+    client.delete_all_checkpoints()
+    client.delete_all_checkpoints(team_id="explicit-team")
+    assert [p.get("team_id") for _, p in calls] == [
+        "configured-team",
+        "configured-team",
+        "explicit-team",
+    ]
+
+
+def test_explicit_zero_ttl_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    sent = []
+
+    def request(method: str, path: str, json: dict | None = None) -> dict:
+        sent.append(json)
+        return checkpoint_response()
+
+    monkeypatch.setattr(client.client, "request", request)
+    client.checkpoint("sandbox-1", ttl_seconds=0)
+    assert sent == [{"ttl_seconds": 0}]

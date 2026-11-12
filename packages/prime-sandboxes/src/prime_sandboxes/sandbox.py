@@ -48,11 +48,12 @@ from tenacity import (
     retry,
     retry_if_exception,
     stop_after_attempt,
+    stop_after_delay,
     wait_exponential,
     wait_random_exponential,
 )
 
-from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC
+from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC, raise_if_cancelled
 from .core import APIClient, APIError, AsyncAPIClient
 from .core.client import _RateLimitAwareWait
 from .exceptions import (
@@ -81,9 +82,12 @@ from .models import (
     DeleteSandboxCheckpointsResponse,
     EgressPolicyStatus,
     FileUploadResponse,
+    HeaderRule,
     LanNetwork,
     LanNetworkMember,
     LanRule,
+    LocalhostForward,
+    PausedSandbox,
     ReadFileResponse,
     Sandbox,
     SandboxCheckpoint,
@@ -92,6 +96,7 @@ from .models import (
     SandboxStatusSnapshot,
     SSHSession,
     validate_egress_lists,
+    validate_header_rules,
 )
 from .process import AsyncSandboxProcess
 from .rpc_command_session import (
@@ -119,10 +124,11 @@ GATEWAY_CONNECTION_RETRYABLE_EXCEPTIONS = (
     httpx.PoolTimeout,  # No connection available in pool
 )
 
-# connectrpc-python cancels a server stream before its first event when no
-# timeout is supplied. A live process cannot outlast the sandbox's 24-hour
-# maximum lifetime, so use that lifetime as the transport bound.
-_LIVE_PROCESS_TIMEOUT_MS = 24 * 60 * 60 * 1000
+# sandboxd kills a live process when its Connect-Timeout-Ms expires. A process
+# with no timeout is bounded only by the sandbox lifetime, but connectrpc-python
+# cancels a server stream before its first event when no timeout is supplied,
+# so send the largest value the Connect protocol allows (10 digits, ~115 days).
+_LIVE_PROCESS_NO_TIMEOUT_MS = 9_999_999_999
 _PROCESS_INPUT_TIMEOUT_MS = 30_000
 _PROCESS_SIGNAL_TIMEOUT_MS = 10_000
 _LIVE_PROCESS_TCP_KEEPALIVE_SECONDS = 15.0
@@ -139,6 +145,20 @@ _BACKGROUND_JOB_LAUNCH_BACKOFF_SECONDS = 0.5
 # The platform retries a failed LAN push from its scheduled status sweep.
 _LAN_SYNC_TIMEOUT_SECONDS = 120.0
 _LAN_SYNC_POLL_SECONDS = 2.0
+
+
+# A memory restore continues the paused guest, so its shape comes from the paused
+# sandbox; the server refuses these fields when they differ from it.
+_MEMORY_RESTORE_SHAPE = ("cpu_cores", "memory_gb", "gpu_count", "gpu_type")
+
+
+def _omit_unset_memory_shape(request: CreateSandboxRequest, payload: Dict[str, Any]) -> None:
+    """Drop the shape defaults a memory restore must take from the paused sandbox,
+    keeping only the fields the caller set explicitly."""
+    if request.restore_memory:
+        for field in _MEMORY_RESTORE_SHAPE:
+            if field not in request.model_fields_set:
+                payload.pop(field, None)
 
 
 def _lan_rules_payload(rules: List[LanRule]) -> List[Dict[str, Any]]:
@@ -441,27 +461,40 @@ def _lease_command_client(
 
 
 def _network_update_payload(
-    allow: Optional[List[str]], deny: Optional[List[str]]
-) -> Dict[str, Optional[List[str]]]:
+    allow: Optional[List[str]],
+    deny: Optional[List[str]],
+    rules: Optional[Dict[str, HeaderRule]] = None,
+) -> Dict[str, Any]:
+    """Build the full-replacement egress policy payload.
+
+    The caller supplies the allow/deny selection and the header rules together;
+    rules left as None are part of the replacement and clear any stored rules.
+    """
     if (allow is None) == (deny is None):
         raise ValueError("exactly one of allow or deny must be provided")
 
     entries = list(allow if allow is not None else deny or [])
     if not entries:
         raise ValueError("allow or deny must contain at least one destination")
+    payload: Dict[str, Any]
     if "*" in entries:
         if entries != ["*"]:
             raise ValueError("'*' must be the only destination")
-        return (
+        payload = (
             {"allowlist": None, "denylist": []}
             if allow is not None
             else {"allowlist": [], "denylist": None}
         )
+    else:
+        allowlist = entries if allow is not None else None
+        denylist = entries if deny is not None else None
+        validate_egress_lists(allowlist, denylist)
+        payload = {"allowlist": allowlist, "denylist": denylist}
 
-    allowlist = entries if allow is not None else None
-    denylist = entries if deny is not None else None
-    validate_egress_lists(allowlist, denylist)
-    return {"allowlist": allowlist, "denylist": denylist}
+    canonical_rules = validate_header_rules(rules)
+    if canonical_rules is not None:
+        payload["rules"] = {host: rule.model_dump() for host, rule in canonical_rules.items()}
+    return payload
 
 
 # Response-read failures: the server may have already processed the request
@@ -521,6 +554,13 @@ CREATION_POLL_MAX_DELAY = 10.0
 CREATION_POLL_BACKOFF_FACTOR = 1.5
 # Fraction of the computed delay applied as +/- jitter.
 CREATION_POLL_JITTER = 0.25
+
+# Checkpoint-wait pacing. Checkpoint uploads and volume merges are short
+# server phases (a small merge runs ~4s end to end), so waiting clients poll
+# at a fixed fast cadence for the first seconds of a phase and only then fall
+# back to the creation backoff law.
+CHECKPOINT_POLL_FAST_DELAY = 1.0
+CHECKPOINT_POLL_FAST_WINDOW = 10.0
 # Legacy fixed schedule (1s for the first 5 polls, then 2s) that `max_attempts`
 # used to describe. Retained only to derive the same wall-clock budget.
 _LEGACY_FAST_POLLS = 5
@@ -1595,14 +1635,19 @@ class _AsyncBackgroundJobOutputCoordinator:
             raise
 
 
+def _jittered_poll_delay(delay: float) -> float:
+    """Apply the poll jitter law to a base delay."""
+    jitter = delay * CREATION_POLL_JITTER
+    return max(0.0, delay + random.uniform(-jitter, jitter))
+
+
 def _creation_poll_delay(poll_index: int) -> float:
     """Jittered exponential backoff delay for the Nth creation status poll."""
     delay = min(
         CREATION_POLL_INITIAL_DELAY * (CREATION_POLL_BACKOFF_FACTOR**poll_index),
         CREATION_POLL_MAX_DELAY,
     )
-    jitter = delay * CREATION_POLL_JITTER
-    return max(0.0, delay + random.uniform(-jitter, jitter))
+    return _jittered_poll_delay(delay)
 
 
 def _creation_timeout_seconds(max_attempts: int) -> float:
@@ -1785,6 +1830,28 @@ _read_file_retry = retry(
 )
 
 
+def _is_transient_exec_error(exc: BaseException) -> bool:
+    """A command RPC link fault (gateway 502/503, dropped body), not a command outcome."""
+    cause = exc.__cause__
+    return (
+        isinstance(exc, APIError)
+        and isinstance(cause, ConnectError)
+        and is_transient_control_fault(cause)
+    )
+
+
+# Retry for idempotent exec calls only: background-job status reads and the
+# mkdir-guarded launch. A day-long rollout polls thousands of times, so one gateway
+# or node-ingress blip must not end it. Timeouts and sandbox-gone errors are not
+# APIErrors caused by a transient ConnectError and are never retried here.
+_transient_exec_retry = retry(
+    retry=retry_if_exception(_is_transient_exec_error),
+    stop=stop_after_delay(120),
+    wait=wait_random_exponential(multiplier=1, min=1, max=15),
+    reraise=True,
+)
+
+
 _ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -1801,6 +1868,25 @@ def _validate_env_key(key: str) -> str:
     if not _ENV_VAR_PATTERN.fullmatch(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     return key
+
+
+def _owner_checkpoint_params(
+    team_id: Optional[str],
+    sandbox_id: Optional[str],
+    states: Optional[List[str]],
+    created_before: Optional[datetime],
+) -> Dict[str, Any]:
+    """Query params shared by the account-wide checkpoint list and delete."""
+    params: Dict[str, Any] = {}
+    if team_id:
+        params["team_id"] = team_id
+    if sandbox_id:
+        params["sandbox_id"] = sandbox_id
+    if states:
+        params["state"] = states
+    if created_before:
+        params["created_before"] = created_before.isoformat()
+    return params
 
 
 def _validate_unique_batch_values(values: List[str], field_name: str) -> None:
@@ -1951,6 +2037,20 @@ def _raise_sandbox_gone(
     _raise_not_running_error(sandbox_id, ctx, command=command, cause=cause)
 
 
+def _parse_local_forwards(body: Dict[str, Any]) -> List[LocalhostForward]:
+    return [LocalhostForward.model_validate(f) for f in body.get("forwards") or []]
+
+
+def _raise_local_forwards_error(sandbox_id: str, error: httpx.HTTPStatusError) -> NoReturn:
+    status = error.response.status_code
+    if status == 404:
+        raise APIError(
+            f"Sandbox {sandbox_id} does not support localhost forwards; "
+            "recreate the sandbox to use them"
+        ) from error
+    raise APIError(f"Localhost forwards failed (HTTP {status}): {error.response.text}") from error
+
+
 def _raise_not_running_error(
     sandbox_id: str,
     ctx: dict,
@@ -1990,6 +2090,14 @@ def _auth_refresh_cutoff(auth_info: Dict[str, Any]) -> datetime:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     return expires_at - timedelta(seconds=AUTH_REFRESH_MARGIN_SECONDS)
+
+
+def _write_auth_cache(cache_file: Any, data: str) -> None:
+    cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with os.fdopen(os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        with contextlib.suppress(OSError):
+            cache_file.chmod(0o600)
+        f.write(data)
 
 
 def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
@@ -2038,9 +2146,7 @@ class SandboxAuthCache:
     def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                json.dump(self._auth_cache, f)
+            _write_auth_cache(self._cache_file, json.dumps(self._auth_cache))
         except Exception:
             pass
 
@@ -2125,14 +2231,8 @@ class AsyncSandboxAuthCache:
     async def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
         data = json.dumps(self._auth_cache)
-
-        def _write() -> None:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._cache_file, "w") as f:
-                f.write(data)
-
         try:
-            await asyncio.to_thread(_write)
+            await asyncio.to_thread(_write_auth_cache, self._cache_file, data)
         except Exception:
             pass
 
@@ -2209,6 +2309,23 @@ def _next_background_job_poll_delay(current_interval: float) -> float:
         current_interval * BACKGROUND_JOB_POLL_BACKOFF_FACTOR,
         BACKGROUND_JOB_POLL_MAX_DELAY,
     )
+
+
+def _create_payload(
+    request: CreateSandboxRequest, default_team_id: Optional[str]
+) -> Dict[str, Any]:
+    payload = request.model_dump(
+        by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
+    )
+    _omit_unset_memory_shape(request, payload)
+    # VM is the only runtime; send it explicitly so the created runtime
+    # never depends on server-side defaults changing underneath the SDK.
+    payload["vm"] = True
+    # Auto-populate team_id from config if not specified
+    if request.team_id is None and default_team_id is not None:
+        payload["team_id"] = default_team_id
+    payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
+    return payload
 
 
 class SandboxClient:
@@ -2394,23 +2511,67 @@ class SandboxClient:
         With ``lan_network_id`` set, the sandbox joins that LAN network once it is
         running, during this client's ``wait_for_creation`` or
         ``bulk_wait_for_creation``."""
-        payload = request.model_dump(
-            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
-        )
-        # VM is the only runtime; send it explicitly so the created runtime
-        # never depends on server-side defaults changing underneath the SDK.
-        payload["vm"] = True
-        # Auto-populate team_id from config if not specified
-        if request.team_id is None and self.client.config.team_id is not None:
-            payload["team_id"] = self.client.config.team_id
-        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
-
+        payload = _create_payload(request, self.client.config.team_id)
         response = self.client.request(
             "POST",
             "/sandbox",
             json=payload,
             idempotent_post=True,
         )
+        return self._accept_created(request, response)
+
+    def create_gang(
+        self, requests: List[CreateSandboxRequest], idempotency_key: Optional[str] = None
+    ) -> List[Sandbox]:
+        """Create up to 12 sandboxes together on one node, all or nothing.
+
+        Members must share team, architecture, and GPU type; totals are capped
+        at 48 CPU cores, 48 GB memory, 1000 GB disk, and 8 GPUs. Each member
+        boots independently: wait with ``wait_for_gang``, which deletes the
+        whole gang if any member fails to start."""
+        payload = {
+            "sandboxes": [_create_payload(r, self.client.config.team_id) for r in requests],
+            "idempotency_key": idempotency_key or uuid.uuid4().hex,
+        }
+        response = self.client.request(
+            "POST",
+            "/sandbox/gang",
+            json=payload,
+            idempotent_post=True,
+        )
+        return [
+            self._accept_created(r, created)
+            for r, created in zip(requests, response["sandboxes"], strict=True)
+        ]
+
+    def wait_for_gang(
+        self,
+        sandbox_ids: List[str],
+        max_attempts: int = 60,
+        image_build_timeout_seconds: int = 3000,
+    ) -> Dict[str, str]:
+        """Wait until every sandbox of a gang is running.
+
+        A gang is all or nothing: if any member fails or the wait times out,
+        every member is deleted, including those already running, and the
+        error is raised with the cleanup outcome."""
+        try:
+            return self.bulk_wait_for_creation(
+                sandbox_ids,
+                max_attempts=max_attempts,
+                image_build_timeout_seconds=image_build_timeout_seconds,
+            )
+        except Exception as error:
+            try:
+                self.bulk_delete(sandbox_ids=sandbox_ids)
+            except Exception as cleanup:
+                raise RuntimeError(
+                    f"Gang did not start ({error}); deleting its sandboxes also failed "
+                    f"({cleanup}): delete {sandbox_ids} yourself"
+                ) from error
+            raise RuntimeError(f"Gang did not start and was deleted: {error}") from error
+
+    def _accept_created(self, request: CreateSandboxRequest, response: Dict[str, Any]) -> Sandbox:
         sandbox = Sandbox.model_validate(response)
         # Seed the auth cache so the first gateway call skips POST /auth.
         if auth := response.get("gatewayAuth"):
@@ -2424,17 +2585,19 @@ class SandboxClient:
         team_id: Optional[str] = None,
         status: Optional[str] = None,
         labels: Optional[List[str]] = None,
-        page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
         user_id: Optional[str] = None,
+        cursor: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         # Auto-populate team_id from config if not specified
         if team_id is None:
             team_id = self.client.config.team_id
 
-        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        params: Dict[str, Any] = {"per_page": per_page}
+        if cursor is not None:
+            params["cursor"] = cursor
         if team_id:
             params["team_id"] = team_id
         if user_id:
@@ -2454,10 +2617,75 @@ class SandboxClient:
         response = self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
 
-    def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
-        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
-        response = self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+    def pause(self, sandbox_id: str) -> PausedSandbox:
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously.
+
+        The result carries the pause's ``checkpoint_id``: ``resume`` continues the
+        sandbox, and ``create`` with that checkpoint and ``restore_memory=True`` forks it."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/pause")
+        return PausedSandbox.model_validate(response)
+
+    def resume(self, sandbox_id: str) -> Sandbox:
+        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
+        response = self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
+        return Sandbox.model_validate(response)
+
+    def checkpoint(self, sandbox_id: str, ttl_seconds: Optional[int] = None) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring.
+
+        With ttl_seconds the platform deletes the checkpoint that long after the request.
+        """
+        path = f"/sandbox/{sandbox_id}/checkpoints"
+        if ttl_seconds is not None:
+            response = self.client.request("POST", path, json={"ttl_seconds": ttl_seconds})
+        else:
+            response = self.client.request("POST", path)
         return SandboxCheckpoint.model_validate(response)
+
+    def list_all_checkpoints(
+        self,
+        team_id: Optional[str] = None,
+        sandbox_id: Optional[str] = None,
+        states: Optional[List[str]] = None,
+        created_before: Optional[datetime] = None,
+    ) -> List[SandboxCheckpoint]:
+        """List every rootfs checkpoint of your account (or team_id), oldest first.
+
+        Includes checkpoints of deleted sandboxes.
+        """
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        results: List[SandboxCheckpoint] = []
+        while True:
+            response = self.client.request("GET", "/sandbox/checkpoints", params=params)
+            results += [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+            if not response.get("next_cursor"):
+                return results
+            params["cursor"] = response["next_cursor"]
+
+    def delete_all_checkpoints(
+        self,
+        team_id: Optional[str] = None,
+        sandbox_id: Optional[str] = None,
+        states: Optional[List[str]] = None,
+        created_before: Optional[datetime] = None,
+    ) -> DeleteSandboxCheckpointsResponse:
+        """Delete every matching durable or failed checkpoint, with per-checkpoint errors.
+
+        Each deletion behaves like delete_checkpoint; the active tip of a running
+        sandbox is kept and reported as CONFLICT.
+        """
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
+        while True:
+            response = self.client.request("DELETE", "/sandbox/checkpoints", params=params)
+            page = DeleteSandboxCheckpointsResponse.model_validate(response)
+            total.deleted += page.deleted
+            total.errors += page.errors
+            if not response.get("next_cursor"):
+                return total
+            params["cursor"] = response["next_cursor"]
 
     def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
         """Get the latest state of a filesystem checkpoint."""
@@ -2534,32 +2762,64 @@ class SandboxClient:
     def wait_for_checkpoint(
         self, checkpoint_id: str, timeout_seconds: float = 300
     ) -> SandboxCheckpoint:
-        """Wait for a filesystem checkpoint to become DURABLE.
+        """Wait for a filesystem checkpoint to become DURABLE, then for its
+        volume merge to leave "pending" when the checkpoint reports one.
 
         Concurrent waits share cross-sandbox batches of up to 100 checkpoints.
-        Polls with backoff until timeout_seconds elapse, returning the durable
-        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
-        on expiry.
+        Polls at a fixed fast cadence for the first seconds of each wait
+        phase, then with exponential backoff until timeout_seconds elapses,
+        returning the durable checkpoint; checkpoints without a merge field
+        (older servers, plain checkpoints) return at DURABLE. The fast
+        cadence re-arms once when the checkpoint first reports a pending
+        volume merge. Raises RuntimeError on FAILED,
+        DELETING, or a failed merge (merge_error in the message) and
+        TimeoutError on expiry.
         In-flight requests follow the API client's timeout and retry policy.
         """
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
-        deadline = time.monotonic() + timeout_seconds
-        poll_index = 0
+        now = time.monotonic()
+        deadline = now + timeout_seconds
+        phase_start = now
+        slow_index = 0
+        merge_phase = False
+        merge_pending = False
         while time.monotonic() < deadline:
             checkpoint = self._checkpoint_batcher.get(checkpoint_id)
             if checkpoint.state == "DURABLE":
-                return checkpoint
-            if checkpoint.state in ("FAILED", "DELETING"):
+                if checkpoint.merge == "failed":
+                    raise RuntimeError(
+                        f"Checkpoint {checkpoint_id}'s volume merge failed: "
+                        f"{checkpoint.merge_error or 'no error details'}"
+                    )
+                if checkpoint.merge != "pending":
+                    return checkpoint
+                if not merge_phase:
+                    # The volume merge is a fresh server phase with its own
+                    # short budget, so re-arm the fast cadence for it once.
+                    merge_phase = True
+                    phase_start = time.monotonic()
+                    slow_index = 0
+                merge_pending = True
+            elif checkpoint.state in ("FAILED", "DELETING"):
                 raise RuntimeError(
-                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
+                    f"Checkpoint {checkpoint_id} cannot become durable "
+                    f"(state={checkpoint.state}): "
                     f"{checkpoint.error or 'no error details'}"
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            time.sleep(min(_creation_poll_delay(poll_index), remaining))
-            poll_index += 1
+            if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
+                time.sleep(min(_creation_poll_delay(slow_index), remaining))
+                slow_index += 1
+            else:
+                time.sleep(min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining))
+        if merge_pending:
+            raise TimeoutError(
+                f"Checkpoint {checkpoint_id} did not finish its volume merge "
+                f"within {timeout_seconds:g}s (merge=pending)"
+            )
         raise TimeoutError(
             f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
         )
@@ -2767,15 +3027,18 @@ class SandboxClient:
         *,
         allow: Optional[List[str]] = None,
         deny: Optional[List[str]] = None,
+        rules: Optional[Dict[str, HeaderRule]] = None,
     ) -> EgressPolicyStatus:
         """Replace the network rules of a running VM sandbox.
 
         Exactly one of ``allow`` or ``deny`` must be provided. Each call is a
         complete replacement, never a merge; use ``["*"]`` to allow or deny
-        all destinations. New connections follow the replacement once
-        ``applied`` is true; established flows are not revoked.
+        all destinations. ``rules`` (per-host HTTPS header substitution rules)
+        joins the same complete replacement: pass the full set or None to
+        clear them. New connections follow the replacement once ``applied``
+        is true; established flows are not revoked.
         """
-        payload = _network_update_payload(allow, deny)
+        payload = _network_update_payload(allow, deny, rules)
 
         response = self.client.request(
             "PUT",
@@ -2783,6 +3046,54 @@ class SandboxClient:
             json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
+
+    def get_localhost_forwards(self, sandbox_id: str) -> List[LocalhostForward]:
+        """Get the localhost forwards of a running VM sandbox."""
+        return self._local_forwards_request(sandbox_id, None)
+
+    def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> List[LocalhostForward]:
+        """Replace the localhost forwards of a running VM sandbox; returns the new set.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox. The peer must share a LAN network whose rules allow the port.
+        Each call is a complete replacement, never a merge; an empty list removes
+        all forwards. Applied before this returns.
+        """
+        payload = {"forwards": [f.model_dump(by_alias=True) for f in forwards]}
+        return self._local_forwards_request(sandbox_id, payload)
+
+    def _local_forwards_request(
+        self, sandbox_id: str, payload: Optional[Dict[str, Any]]
+    ) -> List[LocalhostForward]:
+        """GET (payload None) or POST sandboxd's local-forwards through the gateway."""
+        reauthed = False
+        while True:
+            auth = self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/network/local-forwards"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            try:
+                if payload is None:
+                    response = self._gateway_get(url, headers=headers, params={}, timeout=30)
+                else:
+                    response = self._gateway_post(url, headers=headers, timeout=30, json=payload)
+                response.raise_for_status()
+                return _parse_local_forwards(response.json())
+            except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
+                if e.response.status_code == 401 and self._should_retry_401(sandbox_id, reauthed):
+                    reauthed = True
+                    continue
+                _raise_local_forwards_error(sandbox_id, e)
+            except httpx.RequestError as e:
+                raise APIError(
+                    f"Localhost forwards request failed: {_format_exception_diagnostic(e)}"
+                ) from e
 
     def bulk_delete(
         self,
@@ -2989,9 +3300,10 @@ class SandboxClient:
         # The job records its PID (for liveness checks while it has no exit file), acknowledges
         # the launch, then releases the launch output streams. Wrap command in subshell so 'exit'
         # terminates the subshell, not the outer shell, and 'echo $?' always runs.
+        # The newline before ')' lets a caller command ending in a heredoc delimiter terminate.
         sh_command = (
             f"echo $$ > {shlex.quote(pid_file)} || exit 1; echo started; exec > /dev/null 2>&1; "
-            f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
+            f"({command_body}\n) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
             f"echo $? > {exit_file_quoted}"
         )
         quoted_sh_command = shlex.quote(sh_command)
@@ -3006,7 +3318,7 @@ class SandboxClient:
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
-                launch = self.execute_command(
+                launch = _transient_exec_retry(self.execute_command)(
                     sandbox_id,
                     bg_cmd,
                     working_dir=launch_cwd,
@@ -3055,6 +3367,7 @@ class SandboxClient:
         assert snapshot.exit_code is not None
         return self._background_job_output_coordinator.get(job, snapshot.exit_code, timeout)
 
+    @_transient_exec_retry
     def _get_background_job_status_unleased(
         self,
         sandbox_id: str,
@@ -4048,22 +4361,69 @@ class AsyncSandboxClient:
         With ``lan_network_id`` set, the sandbox joins that LAN network once it is
         running, during this client's ``wait_for_creation`` or
         ``bulk_wait_for_creation``."""
-        payload = request.model_dump(
-            by_alias=False, exclude_none=True, exclude={"lan_network_id", "lan_tags"}
-        )
-        # VM is the only runtime; send it explicitly so the created runtime
-        # never depends on server-side defaults changing underneath the SDK.
-        payload["vm"] = True
-        if request.team_id is None and self.client.config.team_id is not None:
-            payload["team_id"] = self.client.config.team_id
-        payload["idempotency_key"] = request.idempotency_key or uuid.uuid4().hex
-
+        payload = _create_payload(request, self.client.config.team_id)
         response = await self.client.request(
             "POST",
             "/sandbox",
             json=payload,
             idempotent_post=True,
         )
+        return await self._accept_created(request, response)
+
+    async def create_gang(
+        self, requests: List[CreateSandboxRequest], idempotency_key: Optional[str] = None
+    ) -> List[Sandbox]:
+        """Create up to 12 sandboxes together on one node, all or nothing.
+
+        Members must share team, architecture, and GPU type; totals are capped
+        at 48 CPU cores, 48 GB memory, 1000 GB disk, and 8 GPUs. Each member
+        boots independently: wait with ``wait_for_gang``, which deletes the
+        whole gang if any member fails to start."""
+        payload = {
+            "sandboxes": [_create_payload(r, self.client.config.team_id) for r in requests],
+            "idempotency_key": idempotency_key or uuid.uuid4().hex,
+        }
+        response = await self.client.request(
+            "POST",
+            "/sandbox/gang",
+            json=payload,
+            idempotent_post=True,
+        )
+        return [
+            await self._accept_created(r, created)
+            for r, created in zip(requests, response["sandboxes"], strict=True)
+        ]
+
+    async def wait_for_gang(
+        self,
+        sandbox_ids: List[str],
+        max_attempts: int = 60,
+        image_build_timeout_seconds: int = 3000,
+    ) -> Dict[str, str]:
+        """Wait until every sandbox of a gang is running.
+
+        A gang is all or nothing: if any member fails or the wait times out,
+        every member is deleted, including those already running, and the
+        error is raised with the cleanup outcome."""
+        try:
+            return await self.bulk_wait_for_creation(
+                sandbox_ids,
+                max_attempts=max_attempts,
+                image_build_timeout_seconds=image_build_timeout_seconds,
+            )
+        except Exception as error:
+            try:
+                await self.bulk_delete(sandbox_ids=sandbox_ids)
+            except Exception as cleanup:
+                raise RuntimeError(
+                    f"Gang did not start ({error}); deleting its sandboxes also failed "
+                    f"({cleanup}): delete {sandbox_ids} yourself"
+                ) from error
+            raise RuntimeError(f"Gang did not start and was deleted: {error}") from error
+
+    async def _accept_created(
+        self, request: CreateSandboxRequest, response: Dict[str, Any]
+    ) -> Sandbox:
         sandbox = Sandbox.model_validate(response)
         # Seed the auth cache so the first gateway call skips POST /auth.
         if auth := response.get("gatewayAuth"):
@@ -4077,16 +4437,18 @@ class AsyncSandboxClient:
         team_id: Optional[str] = None,
         status: Optional[str] = None,
         labels: Optional[List[str]] = None,
-        page: int = 1,
         per_page: int = 50,
         exclude_terminated: Optional[bool] = None,
         user_id: Optional[str] = None,
+        cursor: Optional[str] = None,
     ) -> SandboxListResponse:
         """List sandboxes"""
         if team_id is None:
             team_id = self.client.config.team_id
 
-        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        params: Dict[str, Any] = {"per_page": per_page}
+        if cursor is not None:
+            params["cursor"] = cursor
         if team_id:
             params["team_id"] = team_id
         if user_id:
@@ -4106,10 +4468,70 @@ class AsyncSandboxClient:
         response = await self.client.request("GET", f"/sandbox/{sandbox_id}")
         return Sandbox.model_validate(response)
 
-    async def checkpoint(self, sandbox_id: str) -> SandboxCheckpoint:
-        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring."""
-        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/checkpoints")
+    async def pause(self, sandbox_id: str) -> PausedSandbox:
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously.
+
+        The result carries the pause's ``checkpoint_id``: ``resume`` continues the
+        sandbox, and ``create`` with that checkpoint and ``restore_memory=True`` forks it."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/pause")
+        return PausedSandbox.model_validate(response)
+
+    async def resume(self, sandbox_id: str) -> Sandbox:
+        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
+        response = await self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
+        return Sandbox.model_validate(response)
+
+    async def checkpoint(
+        self, sandbox_id: str, ttl_seconds: Optional[int] = None
+    ) -> SandboxCheckpoint:
+        """Request a filesystem checkpoint; use wait_for_checkpoint before restoring.
+
+        With ttl_seconds the platform deletes the checkpoint that long after the request.
+        """
+        path = f"/sandbox/{sandbox_id}/checkpoints"
+        if ttl_seconds is not None:
+            response = await self.client.request("POST", path, json={"ttl_seconds": ttl_seconds})
+        else:
+            response = await self.client.request("POST", path)
         return SandboxCheckpoint.model_validate(response)
+
+    async def list_all_checkpoints(
+        self,
+        team_id: Optional[str] = None,
+        sandbox_id: Optional[str] = None,
+        states: Optional[List[str]] = None,
+        created_before: Optional[datetime] = None,
+    ) -> List[SandboxCheckpoint]:
+        """List every rootfs checkpoint of your account (or team_id), oldest first."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        results: List[SandboxCheckpoint] = []
+        while True:
+            response = await self.client.request("GET", "/sandbox/checkpoints", params=params)
+            results += [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+            if not response.get("next_cursor"):
+                return results
+            params["cursor"] = response["next_cursor"]
+
+    async def delete_all_checkpoints(
+        self,
+        team_id: Optional[str] = None,
+        sandbox_id: Optional[str] = None,
+        states: Optional[List[str]] = None,
+        created_before: Optional[datetime] = None,
+    ) -> DeleteSandboxCheckpointsResponse:
+        """Delete every matching durable or failed checkpoint, with per-checkpoint errors."""
+        team_id = team_id if team_id is not None else self.client.config.team_id
+        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
+        while True:
+            response = await self.client.request("DELETE", "/sandbox/checkpoints", params=params)
+            page = DeleteSandboxCheckpointsResponse.model_validate(response)
+            total.deleted += page.deleted
+            total.errors += page.errors
+            if not response.get("next_cursor"):
+                return total
+            params["cursor"] = response["next_cursor"]
 
     async def get_checkpoint(self, checkpoint_id: str) -> SandboxCheckpoint:
         """Get the latest state of a filesystem checkpoint."""
@@ -4192,29 +4614,59 @@ class AsyncSandboxClient:
         """Wait for a filesystem checkpoint to become DURABLE.
 
         Concurrent waits share cross-sandbox batches of up to 100 checkpoints.
-        Polls with backoff until timeout_seconds elapse, returning the durable
-        checkpoint. Raises RuntimeError on FAILED or DELETING and TimeoutError
-        on expiry.
+        Polls at a fixed fast cadence for the first seconds of each wait
+        phase, then with exponential backoff until timeout_seconds elapses,
+        returning the durable checkpoint; the fast cadence re-arms once when
+        the checkpoint first reports a pending volume merge. Raises
+        RuntimeError on FAILED or DELETING and TimeoutError on expiry.
         In-flight requests follow the API client's timeout and retry policy.
         """
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
-        deadline = time.monotonic() + timeout_seconds
-        poll_index = 0
+        now = time.monotonic()
+        deadline = now + timeout_seconds
+        phase_start = now
+        slow_index = 0
+        merge_phase = False
+        merge_pending = False
         while time.monotonic() < deadline:
             checkpoint = await self._checkpoint_batcher.get(checkpoint_id)
             if checkpoint.state == "DURABLE":
-                return checkpoint
-            if checkpoint.state in ("FAILED", "DELETING"):
+                if checkpoint.merge == "failed":
+                    raise RuntimeError(
+                        f"Checkpoint {checkpoint_id}'s volume merge failed: "
+                        f"{checkpoint.merge_error or 'no error details'}"
+                    )
+                if checkpoint.merge != "pending":
+                    return checkpoint
+                if not merge_phase:
+                    # The volume merge is a fresh server phase with its own
+                    # short budget, so re-arm the fast cadence for it once.
+                    merge_phase = True
+                    phase_start = time.monotonic()
+                    slow_index = 0
+                merge_pending = True
+            elif checkpoint.state in ("FAILED", "DELETING"):
                 raise RuntimeError(
-                    f"Checkpoint {checkpoint_id} cannot become durable (state={checkpoint.state}): "
+                    f"Checkpoint {checkpoint_id} cannot become durable "
+                    f"(state={checkpoint.state}): "
                     f"{checkpoint.error or 'no error details'}"
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
-            poll_index += 1
+            if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
+                await asyncio.sleep(min(_creation_poll_delay(slow_index), remaining))
+                slow_index += 1
+            else:
+                await asyncio.sleep(
+                    min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining)
+                )
+        if merge_pending:
+            raise TimeoutError(
+                f"Checkpoint {checkpoint_id} did not finish its volume merge "
+                f"within {timeout_seconds:g}s (merge=pending)"
+            )
         raise TimeoutError(
             f"Checkpoint {checkpoint_id} did not become DURABLE within {timeout_seconds:g}s"
         )
@@ -4435,15 +4887,18 @@ class AsyncSandboxClient:
         *,
         allow: Optional[List[str]] = None,
         deny: Optional[List[str]] = None,
+        rules: Optional[Dict[str, HeaderRule]] = None,
     ) -> EgressPolicyStatus:
         """Replace the network rules of a running VM sandbox.
 
         Exactly one of ``allow`` or ``deny`` must be provided. Each call is a
         complete replacement, never a merge; use ``["*"]`` to allow or deny
-        all destinations. New connections follow the replacement once
-        ``applied`` is true; established flows are not revoked.
+        all destinations. ``rules`` (per-host HTTPS header substitution rules)
+        joins the same complete replacement: pass the full set or None to
+        clear them. New connections follow the replacement once ``applied``
+        is true; established flows are not revoked.
         """
-        payload = _network_update_payload(allow, deny)
+        payload = _network_update_payload(allow, deny, rules)
 
         response = await self.client.request(
             "PUT",
@@ -4451,6 +4906,58 @@ class AsyncSandboxClient:
             json=payload,
         )
         return EgressPolicyStatus.model_validate(response)
+
+    async def get_localhost_forwards(self, sandbox_id: str) -> List[LocalhostForward]:
+        """Get the localhost forwards of a running VM sandbox."""
+        return await self._local_forwards_request(sandbox_id, None)
+
+    async def set_localhost_forwards(
+        self, sandbox_id: str, forwards: List[LocalhostForward]
+    ) -> List[LocalhostForward]:
+        """Replace the localhost forwards of a running VM sandbox; returns the new set.
+
+        Each forward makes the sandbox's own loopback port reach the same port on a
+        peer sandbox. The peer must share a LAN network whose rules allow the port.
+        Each call is a complete replacement, never a merge; an empty list removes
+        all forwards. Applied before this returns.
+        """
+        payload = {"forwards": [f.model_dump(by_alias=True) for f in forwards]}
+        return await self._local_forwards_request(sandbox_id, payload)
+
+    async def _local_forwards_request(
+        self, sandbox_id: str, payload: Optional[Dict[str, Any]]
+    ) -> List[LocalhostForward]:
+        """GET (payload None) or POST sandboxd's local-forwards through the gateway."""
+        reauthed = False
+        while True:
+            auth = await self._auth_cache.get_or_refresh(sandbox_id)
+            gateway_url = auth["gateway_url"].rstrip("/")
+            url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}/network/local-forwards"
+            headers = {"Authorization": f"Bearer {auth['token']}"}
+            try:
+                if payload is None:
+                    response = await self._gateway_get(url, headers=headers, params={}, timeout=30)
+                else:
+                    response = await self._gateway_post(
+                        url, headers=headers, timeout=30, json=payload
+                    )
+                response.raise_for_status()
+                return _parse_local_forwards(response.json())
+            except httpx.HTTPStatusError as e:
+                if _is_gateway_sandbox_terminated(e.response):
+                    _raise_sandbox_gone(
+                        sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
+                    )
+                if e.response.status_code == 401 and await self._should_retry_401(
+                    sandbox_id, reauthed
+                ):
+                    reauthed = True
+                    continue
+                _raise_local_forwards_error(sandbox_id, e)
+            except httpx.RequestError as e:
+                raise APIError(
+                    f"Localhost forwards request failed: {_format_exception_diagnostic(e)}"
+                ) from e
 
     async def bulk_delete(
         self,
@@ -4523,8 +5030,13 @@ class AsyncSandboxClient:
         working_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         user: Optional[str] = None,
+        timeout: Optional[int] = None,
     ) -> AsyncSandboxProcess:
         """Start a live process in a VM sandbox.
+
+        ``timeout`` is the process's maximum runtime in seconds; sandboxd kills
+        the process when it expires. ``None`` (default) leaves the process
+        bounded only by the sandbox's lifetime.
 
         The returned handle streams stdout and stderr, accepts stdin writes,
         waits for the exit code, and can signal the process. If the stream drops before
@@ -4535,6 +5047,14 @@ class AsyncSandboxClient:
         retained EndEvent — an exit missed while detached is still observed.
         Output emitted while detached is not replayed.
         """
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be a positive number of seconds")
+        timeout_ms = (
+            _LIVE_PROCESS_NO_TIMEOUT_MS
+            if timeout is None
+            else min(timeout * 1000, _LIVE_PROCESS_NO_TIMEOUT_MS)
+        )
+
         await self._auth_cache.get_or_refresh(sandbox_id)
 
         auth = await self._auth_cache.get_or_refresh(sandbox_id)
@@ -4571,7 +5091,7 @@ class AsyncSandboxClient:
             request=request,
             method=COMMAND_SESSION_START_RPC_METHOD,
             headers=headers,
-            timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+            timeout_ms=timeout_ms,
         )
 
         async def write_stdin(data: bytes) -> None:
@@ -4626,7 +5146,7 @@ class AsyncSandboxClient:
                         request=reattach_request,
                         method=method,
                         headers={"Authorization": f"Bearer {auth['token']}"},
-                        timeout_ms=_LIVE_PROCESS_TIMEOUT_MS,
+                        timeout_ms=timeout_ms,
                     )
                     async for response in stream:
                         yield response
@@ -4693,6 +5213,7 @@ class AsyncSandboxClient:
                 )
                 return
             except ConnectError as error:
+                raise_if_cancelled(error)
                 if error.code == Code.UNAUTHENTICATED and await self._should_retry_401(
                     sandbox_id, reauthed
                 ):
@@ -4771,6 +5292,7 @@ class AsyncSandboxClient:
                     exit_code=exit_code,
                 )
             except ConnectError as e:
+                raise_if_cancelled(e)
                 # Only re-auth before any stream event.
                 if (
                     e.code == Code.UNAUTHENTICATED
@@ -4854,9 +5376,10 @@ class AsyncSandboxClient:
         # The job records its PID (for liveness checks while it has no exit file), acknowledges
         # the launch, then releases the launch output streams. Wrap command in subshell so 'exit'
         # terminates the subshell, not the outer shell, and 'echo $?' always runs.
+        # The newline before ')' lets a caller command ending in a heredoc delimiter terminate.
         sh_command = (
             f"echo $$ > {shlex.quote(pid_file)} || exit 1; echo started; exec > /dev/null 2>&1; "
-            f"({command_body}) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
+            f"({command_body}\n) > {stdout_log_file_quoted} 2> {stderr_log_file_quoted}; "
             f"echo $? > {exit_file_quoted}"
         )
         quoted_sh_command = shlex.quote(sh_command)
@@ -4871,7 +5394,7 @@ class AsyncSandboxClient:
         )
         for attempt in range(_BACKGROUND_JOB_LAUNCH_ATTEMPTS):
             try:
-                launch = await self.execute_command(
+                launch = await _transient_exec_retry(self.execute_command)(
                     sandbox_id,
                     bg_cmd,
                     working_dir=launch_cwd,
@@ -4920,6 +5443,7 @@ class AsyncSandboxClient:
         assert snapshot.exit_code is not None
         return await self._background_job_output_coordinator.get(job, snapshot.exit_code, timeout)
 
+    @_transient_exec_retry
     async def _get_background_job_status_unleased(
         self,
         sandbox_id: str,

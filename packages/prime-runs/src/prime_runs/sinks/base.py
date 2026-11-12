@@ -81,12 +81,17 @@ def is_episode(record: Any) -> bool:
 
 
 def stamp_run(mapping: Mapping[str, Any], run_id: str, run_type: str = RUN_KIND) -> Dict[str, Any]:
-    """A copy of ``mapping`` keyed to this run: ``run.id`` and ``run.type`` are
-    set on the envelope and on every member trace, over whatever run the
-    producer recorded there (its own local id), and the rest of that block
-    (``name``, ``work``) is kept. Members matter because the traces service
-    reads ``run_id`` from ``trace.run.id`` only, while verifiers records the
-    run on the episode."""
+    """A copy of ``mapping`` keyed to this run: ``run.id`` is set on the envelope
+    and on every member trace, over whatever run the producer recorded there (its
+    own local id), and the rest of that block (``type``, ``name``, ``work``) is
+    kept. Members matter because the traces service reads ``run_id`` from
+    ``trace.run.id`` only, while verifiers records the run on the episode.
+
+    ``run_type`` fills ``run.type`` only where the producer recorded none. A
+    recorded type is verifiers' ``RunInfo`` discriminator and decides whether
+    ``work`` (the dispatch step) is part of the run, so it is not overwritten: a
+    prime-rl eval records a ``train`` run with ``eval`` work. The run's kind
+    reaches the traces service as the upload's ``run_type`` context instead."""
     stamped = dict(mapping)
     stamped["run"] = _rekey(stamped.get("run"), run_id, run_type)
     members = stamped.get("traces")
@@ -103,5 +108,10 @@ def stamp_run(mapping: Mapping[str, Any], run_id: str, run_type: str = RUN_KIND)
 def _rekey(run: Any, run_id: str, run_type: str) -> Dict[str, Any]:
     keyed = dict(run) if isinstance(run, Mapping) else {}
     keyed["id"] = run_id
-    keyed["type"] = run_type
+    if not has_run_type(keyed.get("type")):
+        keyed["type"] = run_type
     return keyed
+
+
+def has_run_type(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)

@@ -26,8 +26,6 @@ def test_train_help_promotes_config_run_path() -> None:
     assert "request" in result.output
     # Retired with shared LoRA training: both only knew the LoRA schema.
     assert not re.search(r"^│\s+(init|configs)\s", result.output, re.M)
-    # --fft is a deprecated no-op: still parsed, no longer advertised.
-    assert "--full-finetune" not in result.output
 
 
 def test_rl_alias_is_hidden_from_root_help() -> None:
@@ -90,28 +88,27 @@ def test_train_rejects_lora_config_without_dispatch(monkeypatch, tmp_path: Path)
     cfg = tmp_path / "rl.toml"
     for body in (_LORA_CONFIG, 'model = "Qwen/Qwen3-0.6B"\n'):
         cfg.write_text(body)
-        for args in ([], ["--fft"]):
-            result = runner.invoke(app, ["train", str(cfg), *args, "-y"], env=TEST_ENV)
-            assert result.exit_code == 1, (body, args)
-            assert "shared LoRA training config" in result.output
-            assert "prime-rl" in result.output
+        result = runner.invoke(app, ["train", str(cfg), "-y"], env=TEST_ENV)
+        assert result.exit_code == 1, body
+        assert "shared LoRA training config" in result.output
+        assert "prime-rl" in result.output
     assert captured == []
 
 
 def test_train_rl_config_dispatches_without_deployment_block(monkeypatch, tmp_path: Path) -> None:
     """The same prime-rl config runs locally and hosted: an unset
-    [deployment] falls through to prime-rl's own default sizing, with or
-    without the now no-op --fft flag."""
+    [deployment] falls through to prime-rl's own default sizing."""
     captured = _capture_fft_dispatch(monkeypatch)
     cfg = tmp_path / "rl.toml"
-    cfg.write_text('max_steps = 20\n\n[model]\nname = "Qwen/Qwen3-0.6B"\n\n[orchestrator]\n')
-    for args in ([], ["--fft"], ["--full-finetune"]):
-        result = runner.invoke(app, ["train", str(cfg), *args, "-y", "-o", "json"], env=TEST_ENV)
-        assert result.exit_code == 0, (args, result.output)
-        assert json.loads(result.output)["run"]["runId"] == "r1"
-    assert len(captured) == 3
-    assert all("deployment" not in p["config"] for p in captured)
-    assert all(p.get("mode") in (None, "rl") for p in captured)
+    cfg.write_text(
+        'mode = "rl"\nmax_steps = 20\n\n[model]\nname = "Qwen/Qwen3-0.6B"\n\n[orchestrator]\n'
+    )
+    result = runner.invoke(app, ["train", str(cfg), "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["run"]["runId"] == "r1"
+    assert len(captured) == 1
+    assert "deployment" not in captured[0]["config"]
+    assert "mode" not in captured[0]
 
 
 def test_train_reports_missing_and_invalid_config(monkeypatch, tmp_path: Path) -> None:
@@ -168,6 +165,39 @@ def _fake_run_payload(status: str, run_id: str = "run-1") -> dict[str, Any]:
         "createdAt": "2026-08-25T00:00:00Z",
         "updatedAt": "2026-08-25T00:00:00Z",
     }
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("│┃").split("│" if "│" in line else "┃")]
+
+
+def test_train_list_shows_gpu_count(monkeypatch) -> None:
+    runs = [
+        {**_fake_run_payload("RUNNING", run_id="run-gpu"), "gpuCount": 16},
+        _fake_run_payload("COMPLETED", run_id="run-legacy"),
+    ]
+
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        return {"runs": runs, "total": len(runs)}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+
+    result = runner.invoke(
+        app,
+        ["train", "list"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    header = next(cells for line in lines if (cells := _table_cells(line))[:1] == ["ID"])
+    gpus = {
+        cells[0]: cells[header.index("GPUs")]
+        for line in lines
+        if (cells := _table_cells(line))[:1] and cells[0].startswith("run-")
+    }
+    assert gpus == {"run-gpu": "16", "run-legacy": "-"}
 
 
 def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:
@@ -396,6 +426,7 @@ def test_train_resume(monkeypatch, response, exit_code, expected_output) -> None
 
 
 _FFT_BODY = (
+    'mode = "rl"\n\n'
     '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[deployment]\nnum_train_gpus = 1\nnum_infer_gpus = 1\n'
 )
 
@@ -736,12 +767,10 @@ def test_train_source_overlay_reaches_the_sft_payload(monkeypatch, tmp_path: Pat
     sft = '[model]\nname = "Qwen/Qwen3-0.6B"\n\n[data]\nname = "/volume/datasets/x"\n'
     cfg.write_text(sft)
     result = runner.invoke(
-        app, ["train", str(cfg), "--sft", "--ref", "feat/x", "-y", "-o", "json"], env=TEST_ENV
+        app, ["train", str(cfg), "--ref", "feat/x", "-y", "-o", "json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    result = runner.invoke(
-        app, ["train", str(cfg), "--sft", "--pr", "42", "-y", "-o", "json"], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["train", str(cfg), "--pr", "42", "-y", "-o", "json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert [(p["mode"], p["sourceRef"]) for p in captured] == [("sft", "feat/x"), ("sft", sha)]
 
@@ -933,6 +962,156 @@ def test_train_get_prints_a_shared_runs_cluster(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Cluster: oes1yd0lubfsku6iekofnoau" in result.output
+
+
+@pytest.mark.parametrize(
+    "resumed_from, expected",
+    [
+        ({"runId": "parent-run", "step": 120}, "Resumed from: run parent-run @ step 120"),
+        ({"dir": "/data/ckpts/step_50"}, "Resumed from: /data/ckpts/step_50"),
+        (None, None),
+    ],
+)
+def test_train_get_prints_resumed_from(monkeypatch, resumed_from, expected) -> None:
+    from prime_cli.api.rl import RLRun
+
+    payload = _fake_run_payload("RUNNING")
+    if resumed_from is not None:
+        payload["resumedFrom"] = resumed_from
+    run = RLRun.model_validate(payload)
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-1"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    if expected:
+        assert expected in result.output
+    else:
+        assert "Resumed from" not in result.output
+
+
+def _run_with_restarts(monkeypatch, restarts):
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate(
+        {
+            "id": "restarted-run",
+            "userId": "user-1",
+            "status": "RUNNING",
+            "kind": "DEDICATED_FULL_FT",
+            "createdAt": "2026-11-06T17:00:00Z",
+            "updatedAt": "2026-11-06T17:00:00Z",
+            "restarts": restarts,
+        }
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+
+def _failure(minute, role="trainer", kind="FAILED", **exit_fields):
+    return {
+        "role": role,
+        "index": 0,
+        "kind": kind,
+        "failedAt": f"2026-11-06T17:{minute:02d}:00",
+        **exit_fields,
+    }
+
+
+RESTARTS = {
+    "count": 4,
+    "failures": [
+        _failure(1, exitCode=3, exitReason="Error", exitMessage="old traceback"),
+        _failure(2, role="inference", kind="DISRUPTED"),
+        _failure(3, role="orchestrator", exitCode=137, exitReason="OOMKilled"),
+        _failure(
+            4,
+            exitCode=1,
+            exitReason="Error",
+            exitMessage="\n".join(f"line {i}" for i in range(15)) + "\nRuntimeError: boom\n",
+        ),
+    ],
+}
+
+
+def test_train_get_lists_the_latest_restarts_and_the_last_failures_log(monkeypatch) -> None:
+    _run_with_restarts(monkeypatch, RESTARTS)
+
+    result = runner.invoke(app, ["train", "get", "restarted-run"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Restarted 4 times" in out
+    latest = [
+        "trainer 0 failed (exit 1)",
+        "orchestrator 0 was OOM-killed (exit 137)",
+        "inference 0 was taken away by the cluster",
+    ]
+    assert [out.index(line) for line in latest] == sorted(out.index(line) for line in latest)
+    assert "trainer 0 failed (exit 3)" not in out
+    assert "… 1 more (prime train get restarted-run --restarts)" in out
+    assert "│ RuntimeError: boom" in out
+    assert "│ line 6\n" in out and "│ line 5\n" not in out
+    assert "old traceback" not in out
+
+
+def test_train_get_restarts_lists_every_failure_with_its_log(monkeypatch) -> None:
+    _run_with_restarts(monkeypatch, RESTARTS)
+
+    result = runner.invoke(app, ["train", "get", "restarted-run", "--restarts"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "trainer 0 failed (exit 3)" in result.output
+    assert "│ old traceback" in result.output
+    assert "│ line 0" in result.output
+    assert "more (prime train get" not in result.output
+
+
+def test_train_get_strips_terminal_controls_from_restart_logs(monkeypatch) -> None:
+    colored = (
+        "\x1b[31mTraceback (most recent call last):\x1b[0m\n"
+        "\x1b[2J\x1b[1;31mValueError: bad\x1b[0m\n"
+    )
+    failure = _failure(1, exitCode=1, exitReason="Error", exitMessage=colored)
+    _run_with_restarts(monkeypatch, {"count": 1, "failures": [failure]})
+
+    for args in ([], ["--restarts"]):
+        result = runner.invoke(app, ["train", "get", "restarted-run", *args], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert "\x1b" not in result.output
+        assert "│ Traceback (most recent call last):" in result.output
+        assert "│ ValueError: bad" in result.output
+
+
+def test_train_get_shows_no_restarts_for_a_run_without_any(monkeypatch) -> None:
+    for restarts in (None, {"count": 0, "failures": []}):
+        _run_with_restarts(monkeypatch, restarts)
+
+        result = runner.invoke(app, ["train", "get", "restarted-run"], env=TEST_ENV)
+
+        assert result.exit_code == 0, result.output
+        assert "Restarted" not in result.output
+
+
+def test_train_get_json_keeps_the_restarts(monkeypatch) -> None:
+    _run_with_restarts(monkeypatch, RESTARTS)
+
+    result = runner.invoke(app, ["train", "get", "restarted-run", "-o", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    restarts = json.loads(result.output)["run"]["restarts"]
+    assert restarts["count"] == 4
+    assert [f["role"] for f in restarts["failures"]] == [
+        "trainer",
+        "inference",
+        "orchestrator",
+        "trainer",
+    ]
+    assert restarts["failures"][2]["exit_reason"] == "OOMKilled"
 
 
 # --- on-demand billed launch output -----------------------------------------

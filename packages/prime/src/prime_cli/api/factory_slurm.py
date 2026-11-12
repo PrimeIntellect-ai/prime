@@ -48,6 +48,25 @@ class FactorySlurmMember(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class FactorySlurmConnection(BaseModel):
+    """SSH login coordinates for one deployment.
+
+    `connectable` is the server's own verdict: a non-RUNNING
+    deployment, or one with no customer-reachable endpoint, reports
+    False with null fields. `ssh_command` is the authoritative
+    copy-paste command, resolved server-side so it always matches the
+    dashboard's connect box. A null `ssh_port` means the default port
+    22, NOT a missing value; an admin-set full-command override
+    carries no host or port at all. Field names are snake_case because
+    the API spells them that way on this route.
+    """
+
+    connectable: bool
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[int] = None
+    ssh_command: Optional[str] = None
+
+
 class FactorySlurmClient:
     """Client for the team-scoped /slurm-clusters roster surface."""
 
@@ -67,6 +86,19 @@ class FactorySlurmClient:
 
     def list_members(self, team_id: str, cluster_id: str) -> Dict[str, Any]:
         return self._get_json(f"/slurm-clusters/{team_id}/{cluster_id}/members")
+
+    def get_connection(self, team_id: str, cluster_id: str) -> Dict[str, Any]:
+        """SSH login coordinates for one deployment.
+
+        Note the route shape: the team is a query parameter here, not a
+        path segment as in every other route on this surface. The server
+        replies in snake_case (`ssh_host`/`ssh_port`), unlike the
+        camelCase roster payloads — echoed verbatim so --json stays an
+        exact copy of the response.
+        """
+        return self._get_json(
+            f"/slurm-clusters/{cluster_id}/connection", params={"team_id": team_id}
+        )
 
     def add_member(
         self,
@@ -89,5 +121,47 @@ class FactorySlurmClient:
     def remove_member(self, team_id: str, cluster_id: str, username: str) -> None:
         self.client.delete(f"/slurm-clusters/{team_id}/{cluster_id}/members/{username}")
 
+    def resize_cluster(
+        self, team_id: str, cluster_id: str, num_nodes: int, timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Resize a Slurm cluster to the specified node count.
 
-__all__ = ["FactorySlurmClient", "FactorySlurmCluster", "FactorySlurmMember"]
+        Platform API: POST /api/v1/slurm-clusters/{team_id}/{job_id}/resize
+        Contract: github.com/PrimeIntellect-ai/platform PR #6917
+
+        Args:
+            team_id: The team ID that owns the cluster
+            cluster_id: The cluster/job identifier (id field from list_clusters)
+            num_nodes: The desired total node count (absolute target, not delta)
+                       Must be >= 1 and <= max(64, current_size)
+            timeout: Optional request timeout in seconds
+
+        Returns:
+            API response dict with:
+            - numNodes: int (new total node count)
+            - added: list[str] (names of nodes added)
+            - removed: list[str] (names of nodes removed)
+
+        Raises:
+            APIError: If the resize request fails
+            - 400: invalid numNodes or insufficient resources
+            - 403: API key lacks the factory:write scope, not team admin,
+                   or self-service disabled
+            - 404: cluster not found or wrong team
+            - 409: not running / concurrent operation / insufficient idle nodes
+            - 502: labels changed but verification failed
+            - 503: Slurm state unavailable (retryable)
+        """
+        endpoint = f"/slurm-clusters/{team_id}/{cluster_id}/resize"
+        try:
+            return self.client.post(endpoint, json={"numNodes": num_nodes}, timeout=timeout)
+        except ValueError as exc:
+            raise APIError("Slurm cluster resize API returned a malformed response body.") from exc
+
+
+__all__ = [
+    "FactorySlurmClient",
+    "FactorySlurmCluster",
+    "FactorySlurmConnection",
+    "FactorySlurmMember",
+]

@@ -31,7 +31,6 @@ Prime is the official CLI and Python SDK for [Prime Intellect](https://primeinte
 **What can you do with Prime?**
 
 - Deploy GPU pods with H100, A100, and other high-performance GPUs
-- Set up Lab workspaces for verifiers environments, evals, GEPA, and training
 - Discover and launch Hosted Training runs against verifiers environments
 - Create and manage isolated sandbox environments for running code
 - Access hundreds of pre-configured development environments
@@ -87,9 +86,6 @@ Get your API key from the [Prime Intellect Dashboard](https://app.primeintellect
 # Browse environments on the hub
 prime env list
 
-# Set up a Lab workspace for environments, evals, GEPA, and Hosted Training
-prime lab setup
-
 # See available Hosted Training models, capacity, and pricing
 prime train models
 
@@ -111,18 +107,16 @@ prime sandbox create python:3.11
 
 ## Features
 
-### Lab and Hosted Training
+### Hosted Training
 
-Start with `prime lab setup` to create a local workspace with starter configs, coding-agent skills and a verifiers install; build and evaluate environments there with verifiers' `vf-init` and `vf-eval`. Then use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
+Build and evaluate environments with [verifiers](https://github.com/PrimeIntellect-ai/verifiers) (`uv add verifiers`). Use `prime train models` to choose a Hosted Training model with current capacity and pricing. Hosted Training runs take [prime-rl](https://github.com/PrimeIntellect-ai/prime-rl) configs as-is; its [`examples/`](https://github.com/PrimeIntellect-ai/prime-rl/tree/main/examples) are good starting points.
 
 ```bash
-# Set up a Lab workspace
-prime lab setup
-
 # List cached models and on-demand GPU capacity and pricing
 prime train models
 
-# Launch a prime-rl config (RL, or SFT with --sft) on a dedicated cluster
+# Launch a prime-rl config on a dedicated cluster; its top-level `mode`
+# ("rl", "sft" or "pretrain") picks the run kind
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
@@ -215,14 +209,15 @@ prime sandbox download <sandbox-id> /remote/file.txt ./local/
 # Attach persistent volumes (repeatable; :ro mounts read-only)
 prime sandbox create --volume data:/data --volume cache:/mnt:ro python:3.11
 
-# Manage volumes
+# Manage volumes (create takes --size-gb; default capacity is 100 GiB)
 prime sandbox volumes create data
 prime sandbox volumes list [--page N] [--num N] [--json]
 prime sandbox volumes get data
+prime sandbox volumes grow data --size-gb 512
 prime sandbox volumes delete data
 
 # Publish a sandbox's private volume writes as a durable checkpoint
-prime sandbox volumes publish data --sandbox <sandbox-id> [--force] [--no-wait]
+prime sandbox volumes publish data --sandbox <sandbox-id> [--no-wait]
 
 # Create a volume and import a local directory into it
 prime sandbox volumes create data --from ~/datasets/my-data
@@ -231,14 +226,15 @@ prime sandbox volumes create data --from ~/datasets/my-data
 prime sandbox delete <sandbox-id>
 ```
 
-Volume writes are private to a sandbox until a publish reaches DURABLE. A
+Volume writes are private to a sandbox until a publish reaches DURABLE
+and its merge finishes. A
 new volume starts empty; each publish becomes the volume's head, and a
 sandbox always sees the volume as of its own creation, so attach a new
 sandbox to read a newer head. Read-only mounts cannot publish. A publish
-whose volume head moved since attach is rejected (409) unless `--force`,
-which still cannot overtake another sandbox's pending publish. `--no-wait`
-prints the checkpoint id and state; the data is published only once that
-checkpoint is DURABLE, checkable with
+whose volume head moved since attach is rejected (409). `--no-wait`
+prints the checkpoint id and state; the data is published once that
+checkpoint is DURABLE and, on servers that merge volume publishes, its
+merge finishes — both checkable with
 `prime sandbox checkpoint get <checkpoint-id>`.
 
 `volumes create --from` copies a local directory into a disposable
@@ -254,7 +250,7 @@ not a resumption of a failed transfer.
 
 ### Volume contents
 
-Inspect stored files without starting an SSH session:
+Inspect a volume's files:
 
 ```bash
 prime volumes list                         # List volumes
@@ -275,9 +271,14 @@ whole volume with its cap, even when a file or subtree is selected.
 Directory marker objects count toward the object total; internal SSH sync
 metadata is excluded. These commands report usage without enforcing the cap.
 
-Reads use the stored copy. Read-write SSH changes appear after the next
-sync, normally about 60 seconds later. This freshness note is printed to
-stderr; `cat` writes only the file's bytes to stdout, without adding a newline.
+While a run or read-write session holds the volume, `ls`, `du`, `cat` and
+`get` read it live, as that writer has it right now: the CLI starts (or
+reuses) a read-only SSH view of the writer's volume and runs the read there,
+so a run's checkpoints are visible and downloadable mid-run. This needs your
+SSH key (`prime config set-ssh-key-path`); the view stops after 30 minutes
+idle. Otherwise, and while a finished writer is still syncing back, reads use
+the stored copy. Notes about the source go to stderr; `cat` writes only the
+file's bytes to stdout, without adding a newline.
 
 ### Team Management
 
@@ -415,13 +416,13 @@ prime pods ssh <pod-id>
 
 ## Local dedicated-training validation (experimental)
 
-Validate a dedicated RL or SFT config against the schema of the runtime selected
+Validate a dedicated RL, SFT or pretrain config against the schema of the runtime selected
 by Platform, including its default image:
 
 ```bash
 prime train validate rl.toml
 prime train validate rl.toml --ref your-branch
-prime train validate sft.toml --sft --artifact-out normalized.json
+prime train validate sft.toml --artifact-out normalized.json
 ```
 
 The CLI needs `uv` to cache a CPU-only schema environment. An existing matching
@@ -439,7 +440,7 @@ adaptation and rendering. Environment plugins and dispatch policy remain deferre
 Validation creates no run. `--artifact-out` can save the normalized config for
 inspection.
 
-Dedicated submissions (`prime train rl.toml` or `prime train sft.toml --sft`)
+Dedicated submissions (`prime train rl.toml`)
 perform local validation automatically before creating a run or volume. Platform
 checks the runtime pins and deployment policy, applies hosted settings, and
 renders the deployment internally. Queued runs keep the same pinned runtime and

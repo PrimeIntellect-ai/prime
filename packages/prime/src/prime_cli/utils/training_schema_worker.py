@@ -54,7 +54,7 @@ def check_deferred_settings(model, data, deferred, mode):
     """Validate deferred blocks without their environment sources, which need plugins."""
     probe = deepcopy(data)
     blocks = {"orchestrator.eval": deferred["eval"]} if "eval" in deferred else {}
-    if mode == "sft":
+    if mode != "rl":
         blocks = dict(deferred)
     for path, block in blocks.items():
         *parents, name = path.split(".")
@@ -139,6 +139,24 @@ def installed_commit(install):
     return None
 
 
+def config_class(mode):
+    if mode == "rl":
+        from prime_rl.configs.rl import RLConfig
+
+        return RLConfig
+    if mode == "sft":
+        from prime_rl.configs.sft import SFTConfig
+
+        return SFTConfig
+    try:
+        from prime_rl.configs.pretrain import PretrainConfig
+    except ImportError as error:
+        raise ValueError(
+            "This prime-rl build has no pretrain mode: pick a newer image with --image-tag."
+        ) from error
+    return PretrainConfig
+
+
 def normalize(request):
     data = deepcopy(request["config"])
     if data.pop("k8s", None):
@@ -146,11 +164,9 @@ def normalize(request):
             "[k8s] is not supported for hosted runs: Platform manages deployment settings. "
             "Remove the [k8s] table."
         )
-    from prime_rl.configs.rl import RLConfig
-    from prime_rl.configs.sft import SFTConfig
     from prime_rl.utils import config as serialization
 
-    model = RLConfig if request["mode"] == "rl" else SFTConfig
+    model = config_class(request["mode"])
     if request["mode"] == "rl":
         deferred = defer_environments(data.get("orchestrator") or {})
     else:
@@ -162,7 +178,7 @@ def normalize(request):
     if request["mode"] == "rl":
         reject_unsupported_hosted_settings(config)
     check_deferred_settings(model, data, deferred, request["mode"])
-    if request["mode"] == "sft":
+    if request["mode"] != "rl":
         components = {"trainer": config.model_dump(mode="json") | deferred}
     else:
         dump = getattr(serialization, "dump_rl_components", None)

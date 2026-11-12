@@ -200,7 +200,7 @@ def test_ls_root_delimiter_and_pagination(storage):
     requests = [kw for op, kw in storage.s3.requests if op == "list"]
     assert len(requests) >= 3
     assert all(kw["Prefix"] == "vol1/" and kw["Delimiter"] == "/" for kw in requests)
-    assert storage.routing == [(("data", "get", "", None), {"team_id": "team1"})]
+    assert storage.routing == [(("data", "get", "", None), {"team_id": "team1", "live": True})]
     assert storage.s3.closed
     assert not result.stderr
     assert "secret" not in result.output
@@ -347,7 +347,7 @@ def test_cat_binary_stream_and_cleanup(storage):
     assert storage.s3.body.chunk_sizes == [64 * 1024]
     assert storage.s3.body.closed and storage.s3.closed
     assert not result.stderr
-    assert storage.routing == [(("data", "get", "", None), {"team_id": "team1"})]
+    assert storage.routing == [(("data", "get", "", None), {"team_id": "team1", "live": True})]
 
 
 def test_cat_empty_file(storage):

@@ -17,10 +17,11 @@ class FakeTracesClient:
         self.closed = False
 
     def upload_records(self, records, **kwargs):
-        self.calls.append((list(records), kwargs))
+        records = list(records)
+        self.calls.append((records, kwargs))
         if self.raises is not None:
             raise self.raises
-        kwargs["on_batch"](SimpleNamespace(num_lines=len(records)), "receipt")
+        kwargs["on_batch"](SimpleNamespace(num_lines=len(records), first_line_number=1), "receipt")
         return ["receipt"]
 
     def close(self) -> None:
@@ -79,8 +80,16 @@ def test_a_record_that_names_its_own_run_is_rekeyed_to_this_one():
 
     sink.write([original])
 
-    assert client.calls[0][0][0]["run"] == {"id": "run-1", "type": "eval", "name": "local"}
+    assert client.calls[0][0][0]["run"] == {"id": "run-1", "type": "train", "name": "local"}
     assert original["run"] == {"id": "theirs", "type": "train", "name": "local"}, "not mutated"
+
+
+@pytest.mark.parametrize("recorded", [None, ""], ids=["null", "empty"])
+def test_a_run_without_a_recorded_type_gets_the_run_s_kind(recorded):
+    client = FakeTracesClient()
+    make_sink(client).write([{"id": "t1", "run": {"id": "theirs", "type": recorded}}])
+
+    assert client.calls[0][0][0]["run"] == {"id": "run-1", "type": "eval"}
 
 
 def test_a_training_episode_keeps_its_dispatch_step_while_being_rekeyed():
@@ -96,6 +105,26 @@ def test_a_training_episode_keeps_its_dispatch_step_while_being_rekeyed():
     sink.write([episode])
 
     assert client.calls[0][0][0]["run"] == {"id": "run-1", "type": "train", "work": work}
+
+
+def test_an_eval_run_keeps_the_producer_s_run_type_and_its_work():
+    """A prime-rl eval opens an ``eval`` run but records ``TrainRunInfo`` with
+    ``EvalWorkInfo`` on its episodes. ``run.type`` is verifiers' discriminator:
+    ``eval`` would make the run an ``EvalRunInfo``, which has no ``work``. The
+    run's kind still goes out as the upload's context."""
+    client = FakeTracesClient()
+    sink = make_sink(client)
+    work = {"type": "eval", "step": 0, "policy": {"start": 0, "end": 0}}
+    run = {"id": "prl-run", "type": "train", "name": "run", "work": work}
+    episode = {"id": "ep-1", "run": run, "traces": [{"id": "a", "run": dict(run)}]}
+
+    sink.write([episode])
+
+    sent, kwargs = client.calls[0]
+    expected = {"id": "run-1", "type": "train", "name": "run", "work": work}
+    assert sent[0]["run"] == expected
+    assert sent[0]["traces"][0]["run"] == expected
+    assert kwargs["context"]["run_type"] == "eval"
 
 
 def test_an_episode_s_run_reaches_every_member_trace():
@@ -129,6 +158,62 @@ def test_every_member_trace_is_rekeyed_too():
     assert sent["traces"][1]["run"] == {"id": "run-1", "type": "eval", "name": "other"}
     assert episode["traces"][0] == {"id": "a"}, "the caller's members were not mutated"
     assert theirs == {"id": "other-run", "type": "eval", "name": "other"}
+
+
+class SelfEncodingEpisode:
+    """An episode that encodes itself, with its run recorded on it and each trace, like
+    verifiers ``Episode``."""
+
+    def __init__(
+        self, run_id: str, traces: int = 1, trace_runs: bool = True, run_type: str = "eval"
+    ) -> None:
+        self.run = SimpleNamespace(id=run_id, type=run_type)
+        trace_run = self.run if trace_runs else None
+        self.traces = [SimpleNamespace(run=trace_run) for _ in range(traces)]
+
+    def to_record(self):
+        return {"id": "ep-1", "run": {"id": self.run.id, "type": "eval"}, "traces": [{"id": "a"}]}
+
+    def to_json(self) -> bytes:
+        return b'{"id":"ep-1"}'
+
+
+def test_an_episode_that_names_this_run_goes_out_as_its_own_bytes():
+    client = FakeTracesClient()
+    sink = make_sink(client)
+
+    sink.write(
+        [
+            SelfEncodingEpisode("run-1"),
+            SelfEncodingEpisode("run-1", traces=0),
+            # Its recorded type is kept either way, so this eval run's sink need not match it.
+            SelfEncodingEpisode("run-1", run_type="train"),
+        ]
+    )
+
+    sent, kwargs = client.calls[0]
+    assert sent == [b'{"id":"ep-1"}', b'{"id":"ep-1"}', b'{"id":"ep-1"}']
+    assert kwargs["line_format"] is LineFormat.EPISODE
+    # Empty episodes produce no samples.
+    assert sink.episodes_written == 2
+
+
+@pytest.mark.parametrize(
+    "episode",
+    [
+        SelfEncodingEpisode("local-run"),
+        SelfEncodingEpisode("run-1", trace_runs=False),
+        SelfEncodingEpisode("run-1", run_type=None),
+    ],
+    ids=["another-run", "traces-without-a-run", "run-without-a-type"],
+)
+def test_an_episode_that_does_not_name_this_run_on_every_trace_is_stamped(episode):
+    client = FakeTracesClient()
+    make_sink(client).write([episode])
+
+    sent = client.calls[0][0][0]
+    assert sent["run"] == {"id": "run-1", "type": "eval"}
+    assert sent["traces"][0]["run"] == {"id": "run-1", "type": "eval"}
 
 
 def test_an_account_without_prime_traces_retires_the_sink_without_a_failure(caplog):

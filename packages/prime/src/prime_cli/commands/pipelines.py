@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import tempfile
 from pathlib import Path
@@ -35,6 +36,21 @@ _RUN_FIELDS = (
     "outputs[{node, name, bytes}], network{allow[]}, created_at, started_at?, completed_at?"
 )
 RUN_JSON_HELP = json_output_help(f". = {{{_RUN_FIELDS}}}")
+LIST_JSON_HELP = json_output_help(
+    ".pipelines[] = {id, name, team_id?, version?, updated_at, runs, latest_run?}",
+    f".pipelines[].latest_run = {{{_RUN_FIELDS}}}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+)
+RUNS_JSON_HELP = json_output_help(
+    f".runs[] = {{{_RUN_FIELDS}}}",
+    ".total = number",
+    ".page = number",
+    ".per_page = number",
+)
+# A pipeline's or a run's id, as the platform's routes take it.
+_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 GET_JSON_HELP = json_output_help(
     f". = {{{_RUN_FIELDS}, state?}}",
     ".state.nodes.<node> = {done, running, held, failed, cost}",
@@ -72,23 +88,34 @@ that agrees."""
 
 
 def _with_options(error: APIError, agreed: set[str]) -> APIError:
-    """The platform's refusal, with the option for an agreement it asks for by its field name."""
+    """The platform's refusal, with the option for what it asks for by its field name: an
+    agreement, or which of several pipelines of one name to add the graph to."""
+    if "with pipeline_id" in str(error):
+        return APIError(f"{error} Pass one of these ids with --pipeline.")
     wanted = [o for name, o in AGREEMENTS.items() if name in str(error) and name not in agreed]
     return APIError(f"{error} To agree, pass {' and '.join(wanted)}.") if wanted else error
 
 
 @app.command("run", epilog=RUN_JSON_HELP)
 def run(
-    graph: Path = typer.Argument(
-        ..., exists=True, dir_okay=False, help="The graph file, in either form."
+    target: str = typer.Argument(
+        ...,
+        metavar="GRAPH_FILE | PIPELINE",
+        help="A graph file, in either form, to save and run; or a saved pipeline's id, to run "
+        "its latest version.",
     ),
     team: Optional[str] = typer.Option(
-        None, "--team", "-t", help="Run as this team (default: your selected team)."
+        None,
+        "--team",
+        "-t",
+        help="With a graph file: run as this team (default: your selected team). A saved "
+        "pipeline runs as its own account.",
     ),
     pipeline: Optional[str] = typer.Option(
         None,
         "--pipeline",
-        help="Save the graph as a new version of this pipeline (default: a new pipeline).",
+        help="With a graph file: save it as a new version of this pipeline (default: the "
+        "pipeline that has the graph's name, or a new one).",
     ),
     sample: Optional[int] = typer.Option(
         None, "--sample", min=1, help="Preview: items each input runs on."
@@ -119,25 +146,32 @@ def run(
     ),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:
-    """Save a graph as a pipeline and start a run of it."""
+    """Start a run: of a graph file, saved as a version of the pipeline that has its name; or of
+    a saved pipeline, by its id."""
     validate_output_format(output, console)
-    try:
-        data = json.loads(graph.read_text())
-    except ValueError as error:
-        _fail(ValueError(f"{graph} is not JSON: {error}"))
     missing = [name for name in secret if name not in os.environ]
     if missing:
         _fail(ValueError(f"set {', '.join(missing)} in your environment"))
-    body = {
-        "graph": data,
-        "team_id": team or Config().team_id,
-        "pipeline_id": pipeline,
+    body: dict[str, Any] = {
         "sample": sample,
         "secrets": {name: os.environ[name] for name in secret},
         "network": {"allow": allow_host},
         "read_personal_traces": read_personal_traces,
         "run_code": run_code,
     }
+    if Path(target).is_file():
+        try:
+            data = json.loads(Path(target).read_text())
+        except ValueError as error:
+            _fail(ValueError(f"{target} is not JSON: {error}"))
+        body |= {"graph": data, "team_id": team or Config().team_id, "pipeline_id": pipeline}
+    elif pipeline is not None:
+        _fail(ValueError(f"{target} is not a file; --pipeline goes with a graph file"))
+    elif _ID.match(target):
+        # The pipeline's latest version runs, as the pipeline's own account.
+        body["pipeline_id"] = target
+    else:
+        _fail(ValueError(f"{target} is neither a file nor a pipeline's id"))
     agreed = {name for name in AGREEMENTS if body[name]}
     try:
         started = APIClient().post("/pipelines/runs", json=body, timeout=120)
@@ -148,6 +182,107 @@ def run(
         return
     _summary(started)
     console.print(f"Follow it with: prime pipelines get {started['id']}")
+
+
+def _when(value: Optional[str]) -> str:
+    """A time the platform sent, to the minute, in UTC."""
+    return value[:16].replace("T", " ") if value else ""
+
+
+def _status(found: dict[str, Any]) -> str:
+    return "STOPPED" if found.get("stopped") else str(found["status"])
+
+
+def _page(page: int, num: int, total: int, shown: int, what: str) -> None:
+    """The line under a list: where the next page is, or how many there are."""
+    if page * num < total:
+        console.print(f"[dim]{shown} of {total} {what}. Use --page {page + 1} to see more.[/dim]")
+    else:
+        console.print(f"[dim]Total: {total} {what}[/dim]")
+
+
+def _listing(endpoint: str, params: dict[str, Any], num: int, page: int) -> dict[str, Any]:
+    if num < 1 or page < 1:
+        _fail(ValueError("--num and --page must be at least 1"))
+    wanted = {**params, "page": page, "per_page": num}
+    try:
+        return APIClient().get(endpoint, params={k: v for k, v in wanted.items() if v})
+    except APIError as error:
+        _fail(error)
+
+
+@app.command("list", epilog=LIST_JSON_HELP)
+def list_pipelines(
+    team: Optional[str] = typer.Option(
+        None, "--team", "-t", help="This team's pipelines (default: your selected team's)."
+    ),
+    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    output: str = typer.Option("table", "--output", "-o", help="table or json"),
+) -> None:
+    """Your pipelines, last saved first, each with its latest run."""
+    validate_output_format(output, console)
+    found = _listing("/pipelines", {"team_id": team or Config().team_id}, num, page)
+    if output == "json":
+        output_data_as_json(found, console)
+        return
+    if not found["pipelines"]:
+        console.print("No more pipelines." if page > 1 else "No pipelines yet.")
+        return
+    table = Table("id", "name", "runs", "latest run", "status", "saved")
+    for row in found["pipelines"]:
+        latest = row.get("latest_run") or {}
+        table.add_row(
+            escape(row["id"]),
+            escape(row["name"]),
+            str(row["runs"]),
+            escape(latest.get("id", "")),
+            _status(latest) if latest else "",
+            _when(row["updated_at"]),
+        )
+    console.print(table)
+    _page(page, num, found["total"], len(found["pipelines"]), "pipelines")
+
+
+@app.command("runs", epilog=RUNS_JSON_HELP)
+def list_runs(
+    pipeline: Optional[str] = typer.Argument(
+        None, help="Only this pipeline's runs (default: the runs of all your pipelines)."
+    ),
+    team: Optional[str] = typer.Option(
+        None,
+        "--team",
+        "-t",
+        help="Without a pipeline: the runs of this team's pipelines (default: your selected "
+        "team's).",
+    ),
+    num: int = typer.Option(20, "--num", "-n", help="Items per page"),
+    page: int = typer.Option(1, "--page", "-p", help="Page number"),
+    output: str = typer.Option("table", "--output", "-o", help="table or json"),
+) -> None:
+    """Runs, newest first: of one pipeline, or of all your pipelines."""
+    validate_output_format(output, console)
+    # A pipeline has its own account, so no team goes with it.
+    where = {"pipeline_id": pipeline} if pipeline else {"team_id": team or Config().team_id}
+    found = _listing("/pipelines/runs", where, num, page)
+    if output == "json":
+        output_data_as_json(found, console)
+        return
+    if not found["runs"]:
+        console.print("No more runs." if page > 1 else "No runs yet.")
+        return
+    table = Table("id", "pipeline", "status", "version", "started", "outputs")
+    for row in found["runs"]:
+        table.add_row(
+            escape(row["id"]),
+            escape(row["pipeline_id"]),
+            _status(row),
+            escape(row["version"][:12]),
+            _when(row.get("started_at") or row["created_at"]),
+            str(len(row.get("outputs") or [])),
+        )
+    console.print(table)
+    _page(page, num, found["total"], len(found["runs"]), "runs")
 
 
 def _kind(card: dict[str, Any]) -> str:
@@ -377,3 +512,45 @@ def stop(
     except APIError as error:
         _fail(error)
     _summary(stopped)
+
+
+_LIVE_RUN = re.compile(r"Run (\S+) of this pipeline is still running")
+
+
+@app.command("delete")
+def delete(
+    pipeline: str = typer.Argument(..., help="The pipeline's id."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+) -> None:
+    """Delete a pipeline with its versions, its runs and their outputs. Stop its live runs
+    first."""
+    client = APIClient()
+    path = f"/pipelines/{quote(pipeline, safe='')}"
+    try:
+        found = client.get(path)
+    except APIError as error:
+        _fail(error)
+    runs = found["runs"]
+    goes = (
+        "It has no runs."
+        if not runs
+        else "Its 1 run and that run's outputs are deleted with it."
+        if runs == 1
+        else f"Its {runs} runs and their outputs are deleted with it."
+    )
+    question = f'Delete pipeline "{found["name"]}" ({found["id"]})? {goes} This can\'t be undone.'
+    if not confirm_or_skip(question, yes):
+        console.print("Cancelled.")
+        raise typer.Exit(0)
+    try:
+        # Longer than a read: every output file is deleted before the pipeline is.
+        gone = client.request("DELETE", path, timeout=120)
+    except APIError as error:
+        if live := _LIVE_RUN.search(str(error)):
+            stop = shlex.join(["prime", "pipelines", "stop", live.group(1)])
+            _fail(APIError(f"{error} Stop it with: {stop}"))
+        _fail(error)
+    console.print(
+        f"Deleted pipeline [bold]{escape(gone['name'])}[/bold] ({escape(gone['id'])}) "
+        f"with {gone['runs']} run{'' if gone['runs'] == 1 else 's'}."
+    )

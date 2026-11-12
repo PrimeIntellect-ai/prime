@@ -188,25 +188,29 @@ def test_stop_without_a_terminal_stops_nothing_unless_told_yes(api: Dict[str, An
     assert result.exit_code == 0 and api["post"] == ("/pipelines/runs/run1/stop", None)
 
 
-def test_the_group_is_five_commands(api: Dict[str, Any]) -> None:
+def test_the_group_is_eight_commands(api: Dict[str, Any]) -> None:
     from prime_cli.commands.pipelines import app as pipelines
 
-    assert sorted(command.name for command in pipelines.registered_commands) == [
-        "get",
-        "outputs",
-        "reply",
+    assert [command.name for command in pipelines.registered_commands] == [
         "run",
+        "list",
+        "runs",
+        "get",
+        "reply",
+        "outputs",
         "stop",
+        "delete",
     ]
 
 
-@pytest.mark.parametrize("command", ["run", "get"])
+@pytest.mark.parametrize("command", ["run", "get", "list", "runs"])
 def test_help_documents_the_json_output(api: Dict[str, Any], command) -> None:
     result = runner.invoke(app, ["pipelines", command, "--help"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     text = " ".join(strip_ansi(result.output).replace("│", " ").split())
     assert "JSON output (--output json):" in text and "pipeline_id" in text
     assert (".state.cards[]" in text) == (command == "get")
+    assert (".total = number" in text) == (command in ("list", "runs"))
 
 
 def test_get_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch) -> None:
@@ -518,3 +522,235 @@ def test_outputs_say_when_the_folder_cannot_be_made(api: Dict[str, Any], tmp_pat
     )
     assert result.exit_code == 1 and "downloading report.md" in result.output
     assert "Traceback" not in result.output
+
+
+PIPELINES = {
+    "pipelines": [
+        {
+            "id": "p1",
+            "name": "nightly [draft]",
+            "team_id": "t1",
+            "version": "a" * 64,
+            "updated_at": "2026-11-11T10:20:30Z",
+            "runs": 2,
+            "latest_run": {**RUN, "state": None},
+        },
+        {
+            "id": "p2",
+            "name": "idle",
+            "team_id": "t1",
+            "version": "b" * 64,
+            "updated_at": "2026-11-10T08:00:00Z",
+            "runs": 0,
+            "latest_run": None,
+        },
+    ],
+    "total": 2,
+    "page": 1,
+    "per_page": 20,
+}
+RUNS = {
+    "runs": [
+        {**RUN, "state": None, "started_at": "2026-11-11T10:21:00Z"},
+        {**RUN, "id": "run0", "status": "FAILED", "stopped": True, "state": None},
+    ],
+    "total": 41,
+    "page": 1,
+    "per_page": 2,
+}
+
+
+@pytest.fixture
+def saved(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
+    """The platform's routes for saved pipelines: every request, and what each answers."""
+    calls: Dict[str, Any] = {"requests": [], "refuse": None}
+
+    def request(
+        self: Any,
+        method: str,
+        endpoint: str,
+        params: Any = None,
+        json: Any = None,
+        timeout: Any = None,
+    ) -> Dict[str, Any]:
+        calls["requests"].append((method, endpoint, params or json))
+        if calls["refuse"] and method == calls["refuse"][0]:
+            raise calls["refuse"][1]
+        if method == "DELETE":
+            return {"id": "p1", "name": "nightly [draft]", "runs": 2}
+        if endpoint == "/pipelines":
+            return calls.get("pipelines", PIPELINES)
+        if endpoint == "/pipelines/runs":
+            return RUN if method == "POST" else calls.get("runs", RUNS)
+        return PIPELINES["pipelines"][0]
+
+    monkeypatch.setattr("prime_cli.client.APIClient.request", request)
+    # The team picked with `prime switch`: none, unless a test sets one.
+    monkeypatch.setattr(
+        "prime_cli.commands.pipelines.Config",
+        lambda: type("Picked", (), {"team_id": calls.get("team")})(),
+    )
+    return calls
+
+
+def test_list_shows_each_pipeline_with_its_latest_run(saved: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "list", "-t", "t1"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert saved["requests"] == [
+        ("GET", "/pipelines", {"team_id": "t1", "page": 1, "per_page": 20})
+    ]
+    for text in ("p1", "nightly [draft]", "run1", "RUNNING", "2026-11-11 10:20", "idle"):
+        assert text in result.output
+    assert "Total: 2 pipelines" in result.output
+
+
+def test_list_pages_and_prints_json_as_the_platform_sent_it(saved: Dict[str, Any]) -> None:
+    result = runner.invoke(
+        app, ["pipelines", "list", "-n", "5", "-p", "3", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    # No team picked: the caller's own pipelines.
+    assert saved["requests"] == [("GET", "/pipelines", {"page": 3, "per_page": 5})]
+    assert json.loads(result.output) == PIPELINES
+
+
+def test_list_says_when_there_is_nothing(saved: Dict[str, Any]) -> None:
+    saved["pipelines"] = {"pipelines": [], "total": 0, "page": 1, "per_page": 20}
+    result = runner.invoke(app, ["pipelines", "list"], env=TEST_ENV)
+    assert result.exit_code == 0 and "No pipelines yet." in result.output
+    result = runner.invoke(app, ["pipelines", "list", "--page", "2"], env=TEST_ENV)
+    assert result.exit_code == 0 and "No more pipelines." in result.output
+    result = runner.invoke(app, ["pipelines", "list", "--num", "0"], env=TEST_ENV)
+    assert result.exit_code == 1 and "at least 1" in result.output
+
+
+def test_runs_lists_one_pipelines_or_the_accounts(saved: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "runs", "-t", "t1", "-n", "2"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert saved["requests"] == [
+        ("GET", "/pipelines/runs", {"team_id": "t1", "page": 1, "per_page": 2})
+    ]
+    for text in ("run1", "RUNNING", "2026-11-11 10:21", "run0", "STOPPED", "aaaaaaaaaaaa"):
+        assert text in result.output
+    assert "2 of 41 runs. Use --page 2 to see more." in result.output
+
+    # A pipeline has its own account: no team is sent with it.
+    saved["requests"].clear()
+    result = runner.invoke(app, ["pipelines", "runs", "p1", "-t", "t1"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert saved["requests"] == [
+        ("GET", "/pipelines/runs", {"pipeline_id": "p1", "page": 1, "per_page": 20})
+    ]
+    # Without --team, the team picked with `prime switch`.
+    saved["requests"].clear()
+    saved["team"] = "picked"
+    result = runner.invoke(app, ["pipelines", "runs", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0 and json.loads(result.output) == RUNS
+    assert saved["requests"][0][2]["team_id"] == "picked"
+
+
+def test_run_of_a_pipeline_id_starts_its_latest_version(saved: Dict[str, Any]) -> None:
+    env = {**TEST_ENV, "GITHUB_TOKEN": "gh"}
+    args = ["--secret", "GITHUB_TOKEN", "--run-code", "--allow-host", "api.github.com"]
+    result = runner.invoke(app, ["pipelines", "run", "p1", *args, "-t", "t1"], env=env)
+    assert result.exit_code == 0, result.output
+    ((method, endpoint, body),) = saved["requests"]
+    assert (method, endpoint) == ("POST", "/pipelines/runs")
+    # No graph, and no team: the pipeline runs as its own account.
+    assert body == {
+        "pipeline_id": "p1",
+        "sample": None,
+        "secrets": {"GITHUB_TOKEN": "gh"},
+        "network": {"allow": ["api.github.com"]},
+        "read_personal_traces": False,
+        "run_code": True,
+    }
+    assert "prime pipelines get run1" in result.output
+
+
+def test_run_tells_a_file_from_a_pipeline_id(saved: Dict[str, Any], tmp_path) -> None:
+    # A file that exists is a graph, whatever it is called.
+    graph = tmp_path / "p1"
+    graph.write_text(json.dumps({"name": "g", "nodes": {}}))
+    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert saved["requests"][0][2]["graph"] == {"name": "g", "nodes": {}}
+    assert saved["requests"][0][2]["pipeline_id"] is None
+
+    saved["requests"].clear()
+    missing = runner.invoke(app, ["pipelines", "run", "missing.json"], env=TEST_ENV)
+    assert missing.exit_code == 1 and "neither a file nor a pipeline's id" in missing.output
+    both = runner.invoke(app, ["pipelines", "run", "p1", "--pipeline", "p2"], env=TEST_ENV)
+    assert both.exit_code == 1 and "--pipeline goes with a graph file" in both.output
+    assert saved["requests"] == []
+
+
+def test_run_says_how_to_choose_between_pipelines_of_one_name(
+    saved: Dict[str, Any], tmp_path
+) -> None:
+    from prime_cli.client import APIError
+
+    detail = (
+        "Several pipelines are named 'g': p1, p2. Name the one to add this version to "
+        "with pipeline_id."
+    )
+    saved["refuse"] = ("POST", APIError(f"HTTP 409: {detail}"))
+    graph = tmp_path / "g.json"
+    graph.write_text(json.dumps({"name": "g", "nodes": {}}))
+    env = {**TEST_ENV, "COLUMNS": "2000"}
+    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=env)
+    assert result.exit_code == 1 and "p1, p2" in result.output
+    assert "Pass one of these ids with --pipeline." in result.output
+
+
+def test_delete_asks_first_naming_the_pipeline_and_its_runs(saved: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "delete", "p1"], env=TEST_ENV, input="n\n")
+    assert result.exit_code == 0, result.output
+    assert 'Delete pipeline "nightly [draft]" (p1)?' in result.output
+    assert "Its 2 runs and their outputs are deleted with it." in result.output
+    assert "Cancelled." in result.output
+    assert saved["requests"] == [("GET", "/pipelines/p1", None)]
+
+    result = runner.invoke(app, ["pipelines", "delete", "p1"], env=TEST_ENV, input="y\n")
+    assert result.exit_code == 0, result.output
+    assert saved["requests"][-1] == ("DELETE", "/pipelines/p1", None)
+    assert "Deleted pipeline nightly [draft] (p1) with 2 runs." in result.output
+
+
+def test_delete_with_yes_asks_nothing_and_encodes_the_id(saved: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "--plain", "delete", "p/1", "--yes"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert [request[:2] for request in saved["requests"]] == [
+        ("GET", "/pipelines/p%2F1"),
+        ("DELETE", "/pipelines/p%2F1"),
+    ]
+    assert "[y/N]" not in result.output
+
+
+def test_delete_without_an_answer_deletes_nothing(saved: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "delete", "p1"], env=TEST_ENV, input="")
+    assert result.exit_code == 1
+    assert [request[0] for request in saved["requests"]] == ["GET"]
+
+
+def test_delete_refused_for_a_live_run_says_how_to_stop_it(saved: Dict[str, Any]) -> None:
+    from prime_cli.client import APIError
+
+    saved["refuse"] = (
+        "DELETE",
+        APIError("HTTP 409: Run run9 of this pipeline is still running. Stop it first."),
+    )
+    env = {**TEST_ENV, "COLUMNS": "2000"}
+    result = runner.invoke(app, ["pipelines", "delete", "p1", "-y"], env=env)
+    assert result.exit_code == 1
+    assert "Run run9 of this pipeline is still running." in result.output
+    assert "Stop it with: prime pipelines stop run9" in result.output
+
+
+def test_delete_of_a_pipeline_that_is_not_yours_is_not_found(saved: Dict[str, Any]) -> None:
+    from prime_cli.client import APIError
+
+    saved["refuse"] = ("GET", APIError("HTTP 404: Pipeline not found"))
+    result = runner.invoke(app, ["pipelines", "delete", "p1", "-y"], env=TEST_ENV)
+    assert result.exit_code == 1 and "Pipeline not found" in result.output
+    assert [request[0] for request in saved["requests"]] == ["GET"]

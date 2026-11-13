@@ -17,6 +17,8 @@ from prime_sandboxes import (
     Volume,
     VolumeListResponse,
     VolumeMount,
+    VolumeSync,
+    VolumeSyncFailedError,
 )
 
 
@@ -517,7 +519,10 @@ def waiter_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(module.time, "sleep", sleep)
     monkeypatch.setattr(module.asyncio, "sleep", async_sleep)
-    monkeypatch.setattr(module.random, "uniform", lambda low, high: 0.0)
+    # The shared poll-delay helpers moved into _polling.
+    from prime_sandboxes import _polling
+
+    monkeypatch.setattr(_polling.random, "uniform", lambda low, high: 0.0)
     return sleeps
 
 
@@ -786,3 +791,209 @@ def test_publish_response_parses_occupied_bytes():
     assert checkpoint.occupied_bytes == 4096
     # Older responses omit the field entirely.
     assert SandboxCheckpoint.model_validate(_checkpoint_response()).occupied_bytes == 0
+
+
+# --- Volume sync ---
+
+
+def _sync(state: str | None = "UNMOUNTING", **overrides: Any) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "sync_id": "sync-1",
+        "state": state,
+        "head_id": None,
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+    response.update(overrides)
+    return response
+
+
+def _sync_handler(responses: list[dict[str, Any]]) -> Any:
+    """POST sync returns the first response; GETs return the rest."""
+    get_responses = iter(responses[1:])
+
+    def handler(method: str, path: str, json: dict[str, Any] | None) -> dict[str, Any]:
+        assert path == "/sandbox/sb-1/volumes/dataset/sync"
+        if method == "POST":
+            return responses[0]
+        return next(get_responses)
+
+    return handler
+
+
+@pytest.fixture
+def sync_waiter_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Fast-forward the sync waiter's clocks so waits run instantly."""
+    from prime_sandboxes import volumes as module
+
+    sleeps: list[float] = []
+    now = [0.0]
+
+    def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    async def async_sleep(delay: float) -> None:
+        sleep(delay)
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module.time, "sleep", sleep)
+    monkeypatch.setattr(module.asyncio, "sleep", async_sleep)
+    # The shared poll helpers live in _polling; pin their jitter to zero.
+    from prime_sandboxes import _polling
+
+    monkeypatch.setattr(_polling.random, "uniform", lambda low, high: 0.0)
+    return sleeps
+
+
+def test_sync_sends_exact_post_path_and_body():
+    client = RoutingAPIClient(lambda method, path, json: _sync("DONE"))
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    sync = volumes.sync("sb-1", "dataset", wait=False)
+
+    assert client.calls == [("POST", "/sandbox/sb-1/volumes/dataset/sync", {"discard": False})]
+    assert isinstance(sync, VolumeSync)
+    assert sync.sync_id == "sync-1"
+    assert sync.state == "DONE"
+
+
+def test_sync_discard_true_quotes_name_in_path():
+    client = RoutingAPIClient(lambda method, path, json: _sync("DONE"))
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    volumes.sync("sb-1", "a/b", discard=True, wait=False)
+
+    assert client.calls == [("POST", "/sandbox/sb-1/volumes/a%2Fb/sync", {"discard": True})]
+
+
+def test_sync_wait_true_polls_until_done(sync_waiter_clock):
+    client = RoutingAPIClient(
+        _sync_handler(
+            [
+                _sync("UNMOUNTING"),
+                _sync("PUBLISHING"),
+                _sync("REMOUNTING"),
+                _sync("DONE", head_id="ckpt-9"),
+            ]
+        )
+    )
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    sync = volumes.sync("sb-1", "dataset")
+
+    assert sync.state == "DONE"
+    assert sync.head_id == "ckpt-9"
+    poll_calls = client.calls[1:]
+    assert len(poll_calls) == 3
+    assert all(
+        call[0] == "GET" and call[1] == "/sandbox/sb-1/volumes/dataset/sync"
+        for call in poll_calls
+    )
+
+
+def test_sync_wait_polls_fast_then_backs_off(sync_waiter_clock):
+    # The sync wait shares the checkpoint waiter's pacing: a fixed fast
+    # cadence for the first seconds, then the shared backoff law.
+    client = RoutingAPIClient(
+        _sync_handler(
+            [_sync("UNMOUNTING")] + [_sync("PUBLISHING")] * 12 + [_sync("DONE", head_id="ckpt-9")]
+        )
+    )
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    sync = volumes.sync("sb-1", "dataset")
+
+    assert sync.state == "DONE"
+    assert sync_waiter_clock == [1.0] * 10 + [1.0, 1.5, 2.25]
+
+
+def test_sync_wait_returns_immediately_when_request_done(sync_waiter_clock):
+    client = RoutingAPIClient(_sync_handler([_sync("DONE")]))
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    sync = volumes.sync("sb-1", "dataset")
+
+    assert sync.state == "DONE"
+    # The POST already carried the final state; no GET was needed.
+    assert client.calls[1:] == []
+
+
+def test_sync_wait_failed_raises_volume_sync_failed_error(sync_waiter_clock):
+    client = RoutingAPIClient(_sync_handler([_sync("UNMOUNTING"), _sync("FAILED")]))
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    # The response carries no error detail; the exception points at the
+    # sandbox's volume sync logs instead.
+    with pytest.raises(VolumeSyncFailedError, match="state FAILED.*volume sync logs") as error:
+        volumes.sync("sb-1", "dataset")
+
+    assert error.value.sandbox_id == "sb-1"
+    assert error.value.volume_name == "dataset"
+
+
+def test_sync_wait_timeout_raises_timeout_error(sync_waiter_clock):
+    client = RoutingAPIClient(_sync_handler([_sync("PUBLISHING")] * 200))
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    with pytest.raises(TimeoutError, match="did not finish syncing"):
+        volumes.sync("sb-1", "dataset")
+
+    # The 200 queued responses exhaust the waiter's default 600s deadline.
+    assert len(client.calls[1:]) < 200
+
+
+def test_sync_rejects_non_positive_timeout():
+    volumes = _volumes(_sync())
+    with pytest.raises(ValueError):
+        volumes.sync("sb-1", "dataset", timeout_seconds=0)
+
+
+def test_async_sync_sends_exact_post_path_and_body():
+    client, calls = _async_publish_client(lambda method, path, json: _sync("DONE"))
+
+    async def scenario() -> VolumeSync:
+        async with client:
+            return await client.volumes.sync("sb-1", "dataset", discard=True, wait=False)
+
+    sync = asyncio.run(scenario())
+
+    assert calls == [("POST", "/sandbox/sb-1/volumes/dataset/sync", {"discard": True})]
+    assert sync.state == "DONE"
+
+
+def test_async_sync_wait_true_polls_until_done(sync_waiter_clock):
+    client, calls = _async_publish_client(
+        _sync_handler([_sync("UNMOUNTING"), _sync("REMOUNTING"), _sync("DONE", head_id="ckpt-9")])
+    )
+
+    async def scenario() -> VolumeSync:
+        async with client:
+            return await client.volumes.sync("sb-1", "dataset")
+
+    sync = asyncio.run(scenario())
+
+    assert sync.state == "DONE"
+    assert sync.head_id == "ckpt-9"
+    assert [call[0] for call in calls] == ["POST", "GET", "GET"]
+
+
+def test_async_sync_wait_failed_raises_volume_sync_failed_error(sync_waiter_clock):
+    client, _ = _async_publish_client(_sync_handler([_sync("UNMOUNTING"), _sync("FAILED")]))
+
+    async def scenario() -> None:
+        async with client:
+            with pytest.raises(VolumeSyncFailedError, match="state FAILED.*volume sync logs"):
+                await client.volumes.sync("sb-1", "dataset")
+
+    asyncio.run(scenario())
+
+
+def test_async_sync_wait_timeout_raises_timeout_error(sync_waiter_clock):
+    client, _ = _async_publish_client(_sync_handler([_sync("PUBLISHING")] * 200))
+
+    async def scenario() -> None:
+        async with client:
+            with pytest.raises(TimeoutError, match="did not finish syncing"):
+                await client.volumes.sync("sb-1", "dataset")
+
+    asyncio.run(scenario())

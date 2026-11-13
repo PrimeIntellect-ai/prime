@@ -45,16 +45,17 @@ async def test_reconnect_selects_session_uuid_and_replays_exit(monkeypatch):
             async def events():
                 if method == "Start":
                     session_uuids.append(kwargs["request"].session_uuid)
-                    yield _start_event(42)
-                    yield _stdout_event(b"partial\n")
+                    yield _start_event(42, output_replay=True)
+                    yield _stdout_event(b"partial\n", sequence=1)
                     raise ConnectError(Code.UNAVAILABLE, "stream dropped")
+                assert kwargs["request"].after_sequence == 1
                 selector = kwargs["request"].session
                 connect_selectors.append((selector.WhichOneof("selector"), selector.session_uuid))
                 # The process exited while detached; Connect replays the retained
                 # start and end events, mirroring sandboxd since the Connect
                 # retained-exit fix in platform PR #4735 (same source as Start replay).
-                yield _start_event(42, pb.ConnectResponse)
-                yield _end_event(5, pb.ConnectResponse)
+                yield _start_event(42, pb.ConnectResponse, output_replay=True)
+                yield _end_event(5, pb.ConnectResponse, output_sequence=1)
 
             return events()
 
@@ -91,9 +92,9 @@ async def test_process_timeout_applies_to_start_and_reconnect(
 
             async def events():
                 if method == "Start":
-                    yield _start_event(42)
+                    yield _start_event(42, output_replay=True)
                     raise ConnectError(Code.UNAVAILABLE, "stream dropped")
-                yield _start_event(42, pb.ConnectResponse)
+                yield _start_event(42, pb.ConnectResponse, output_replay=True)
                 yield _end_event(0, pb.ConnectResponse)
 
             return events()
@@ -123,7 +124,7 @@ class _ControlFakeConnectClient:
         assert kwargs["method"].name == "Start"
 
         async def events():
-            yield _start_event(42)
+            yield _start_event(42, output_replay=True)
             await self.exit_requested.wait()
             yield _end_event(0)
 

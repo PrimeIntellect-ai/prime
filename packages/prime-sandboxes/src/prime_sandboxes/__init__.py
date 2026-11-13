@@ -17,6 +17,7 @@ from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
     DownloadTimeoutError,
+    ProcessOutputLostError,
     SandboxFileNotFoundError,
     SandboxFileTooLargeError,
     SandboxImagePullError,
@@ -180,4 +181,5 @@ __all__ = [
     "CommandTimeoutError",
     "UploadTimeoutError",
     "DownloadTimeoutError",
+    "ProcessOutputLostError",
 ]

@@ -253,7 +253,8 @@ not a resumption of a failed transfer.
 Inspect a volume's files:
 
 ```bash
-prime volumes list                         # List volumes
+prime volumes list                         # List volumes you created
+prime volumes list --all-users             # Include teammates' volumes
 prime volumes ls my-data                   # List files and directories
 prime volumes ls my-data datasets/ -l -h   # Sizes and modified times
 prime volumes ls my-data runs/ -R          # Include nested run outputs
@@ -262,6 +263,11 @@ prime volumes du my-data -h                # Stored bytes, object count, and cap
 prime volumes du my-data datasets/ -o json # Subtree and whole-volume usage
 prime volumes cat my-data config.json | jq .
 ```
+
+`volumes list` uses your selected account context (`prime switch`). In a
+team, it shows only volumes you created by default; `--all-users` includes
+volumes created by other team members. In a personal account, listings
+remain limited to your personal volumes.
 
 Paths use the same validation as `volumes get` and `put`: they are relative
 to the volume root, and `/` selects that root. `ls -R` includes nested

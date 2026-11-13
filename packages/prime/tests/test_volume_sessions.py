@@ -56,6 +56,7 @@ def _session(**over) -> VolumeSession:
 def _client(monkeypatch, **methods):
     """Install a fake client; `methods` are the client calls to expose."""
     monkeypatch.setattr(volumes, "_client", lambda: (SimpleNamespace(**methods), "team1"))
+    monkeypatch.setattr(volumes, "Config", lambda: SimpleNamespace(user_id="user_123"))
 
 
 def test_client_sessions_wire_contract():
@@ -282,7 +283,7 @@ def test_volumes_list_created_by_column(monkeypatch, over, shown):
 def test_volumes_list_created_by_empty_without_any_creator(monkeypatch):
     v = _volume(createdBy=None, createdByName=None, createdByEmail=None)
     _client(monkeypatch, list_volumes=lambda **kw: [v])
-    result = _run("list")
+    result = _run("list", "--all-users")
     assert result.exit_code == 0, _text(result)
     assert "data" in _text(result)
 
@@ -367,3 +368,81 @@ def test_create_timeout_or_taken_name_points_at_list(monkeypatch, error):
     result = _run("create", "v", "--size", "1Gi")
     assert result.exit_code == 1
     assert "prime volumes list" in _text(result)
+
+
+@pytest.mark.parametrize("args", [(), ("--only-mine",), ("--plain",), ("-o", "json")])
+def test_volumes_list_defaults_to_current_creator_in_selected_team(monkeypatch, args):
+    calls = []
+    own = _volume(name="own-team-volume")
+    teammate = _volume(name="teammate-volume", createdBy="someone_else")
+    unknown = _volume(name="unknown-creator", createdBy=None)
+
+    def list_volumes(**kwargs):
+        calls.append(kwargs)
+        return [own, teammate, unknown]
+
+    _client(monkeypatch, list_volumes=list_volumes)
+    result = _run("list", *args)
+    assert result.exit_code == 0, _text(result)
+    assert calls == [{"team_id": "team1"}]
+    assert "own-team-volume" in _text(result)
+    assert "teammate-volume" not in _text(result)
+    assert "unknown-creator" not in _text(result)
+    if args == ("-o", "json"):
+        assert [v["name"] for v in json.loads(_text(result))] == ["own-team-volume"]
+
+
+@pytest.mark.parametrize("args", [(), ("--plain",), ("-o", "json")])
+def test_volumes_list_all_users_includes_teammates_without_identity(monkeypatch, args):
+    calls = []
+
+    def list_volumes(**kwargs):
+        calls.append(kwargs)
+        return [_volume(), _volume(name="teammate-volume", createdBy="someone_else")]
+
+    _client(monkeypatch, list_volumes=list_volumes)
+    monkeypatch.setattr(volumes, "Config", lambda: SimpleNamespace(user_id=None))
+    result = _run("list", "--all-users", *args)
+    assert result.exit_code == 0, _text(result)
+    assert calls == [{"team_id": "team1"}]
+    assert "data" in _text(result)
+    assert "teammate-volume" in _text(result)
+
+
+def test_volumes_list_without_identity_never_falls_back_to_team_listing(monkeypatch):
+    calls = []
+    _client(monkeypatch, list_volumes=lambda **kw: calls.append(kw) or [_volume()])
+    monkeypatch.setattr(volumes, "Config", lambda: SimpleNamespace(user_id=None))
+    result = _run("list")
+    assert result.exit_code == 1
+    assert "prime whoami" in _text(result)
+    assert "--all-users" in _text(result)
+    assert calls == []
+
+
+def test_volumes_list_personal_context_relies_on_api_user_scope(monkeypatch):
+    calls = []
+
+    def list_volumes(**kwargs):
+        calls.append(kwargs)
+        return [_volume(createdBy=None)]
+
+    _client(monkeypatch, list_volumes=list_volumes)
+    monkeypatch.setattr(
+        volumes, "_client", lambda: (SimpleNamespace(list_volumes=list_volumes), None)
+    )
+    monkeypatch.setattr(volumes, "Config", lambda: SimpleNamespace(user_id=None))
+    result = _run("list", "-o", "json")
+    assert result.exit_code == 0, _text(result)
+    assert calls == [{"team_id": None}]
+    assert [v["name"] for v in json.loads(_text(result))] == ["data"]
+
+
+def test_volumes_list_empty_after_creator_filter(monkeypatch):
+    _client(
+        monkeypatch,
+        list_volumes=lambda **kw: [_volume(createdBy="someone_else")],
+    )
+    result = _run("list", "-o", "json")
+    assert result.exit_code == 0, _text(result)
+    assert json.loads(_text(result)) == []

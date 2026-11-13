@@ -130,13 +130,34 @@ def create(
 
 @app.command("list")
 def list_volumes(
+    only_mine: bool = typer.Option(
+        True,
+        "--only-mine/--all-users",
+        help="Show only volumes you created (default), or include all users in the selected team",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List your volumes."""
+    """List volumes you created in the selected account context.
+
+    Use --all-users to include volumes created by other members of your team.
+    """
     validate_output_format(output, console)
     client, team_id = _client()
+    user_id = Config().user_id if only_mine and team_id else None
+    if only_mine and team_id and not user_id:
+        console.print(
+            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
+            "Run [bold]prime whoami[/bold] to refresh your config, "
+            "or pass --all-users to list the whole team's volumes."
+        )
+        raise typer.Exit(1)
     try:
         volumes = client.list_volumes(team_id=team_id)
+        # Omitting teamId would list only personal volumes, hiding the ones
+        # you created for your team. The API has no creator filter, so keep
+        # the selected team and filter its complete response by creator ID.
+        if user_id:
+            volumes = [v for v in volumes if v.created_by == user_id]
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

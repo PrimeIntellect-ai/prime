@@ -821,6 +821,27 @@ def test_delete_of_a_pipeline_that_is_not_yours_is_not_found(saved: Dict[str, An
     assert [request[0] for request in saved["requests"]] == ["GET"]
 
 
+def test_run_reads_the_graph_file_as_utf8_whatever_the_locale(
+    api: Dict[str, Any], monkeypatch, tmp_path
+) -> None:
+    graph = tmp_path / "g.json"
+    text = json.dumps({"name": "café ✓", "nodes": {}}, ensure_ascii=False)
+    graph.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))  # with a BOM, as Notepad saves it
+    monkeypatch.setattr("locale.getpreferredencoding", lambda *args: "cp1252")
+    monkeypatch.setattr("locale.getencoding", lambda: "cp1252", raising=False)
+    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert api["post"][1]["graph"] == {"name": "café ✓", "nodes": {}}
+
+
+def test_run_says_when_the_graph_file_is_not_utf8(api: Dict[str, Any], tmp_path) -> None:
+    graph = tmp_path / "g.json"
+    graph.write_bytes(b'{"name": "caf\xe9"}')
+    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
+    assert result.exit_code == 1 and "is not JSON" in result.output
+    assert "Traceback" not in result.output and "post" not in api
+
+
 def test_run_says_when_the_graph_file_cannot_be_read(
     api: Dict[str, Any], monkeypatch, tmp_path
 ) -> None:

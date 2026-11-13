@@ -163,7 +163,8 @@ def run(
     }
     if Path(target).is_file():
         try:
-            data = json.loads(Path(target).read_text())
+            # JSON is UTF-8 whatever the locale says; utf-8-sig also takes a file saved with a BOM.
+            data = json.loads(Path(target).read_text(encoding="utf-8-sig"))
         except OSError as error:
             _fail(ValueError(f"can't read {target}: {error.strerror or error}"))
         except ValueError as error:

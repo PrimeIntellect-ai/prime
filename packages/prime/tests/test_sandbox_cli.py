@@ -7,10 +7,15 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from prime_sandboxes import APIError, SandboxCheckpoint, StartCommand
+from prime_sandboxes import APIError, HeaderRule, SandboxCheckpoint, StartCommand
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def _flat(text: str) -> str:
+    """Collapse terminal wrapping so assertions check semantics, not layout."""
+    return " ".join(text.split())
 
 
 def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -27,8 +32,11 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
         updated_at=datetime.now(timezone.utc),
     )
 
-    def create(self: Any, sandbox_id: str) -> SandboxCheckpoint:
+    ttls: list[Any] = []
+
+    def create(self: Any, sandbox_id: str, ttl_seconds: Any = None) -> SandboxCheckpoint:
         assert sandbox_id == "sandbox-1"
+        ttls.append(ttl_seconds)
         return checkpoint
 
     listed: list[tuple[str, Any]] = []
@@ -48,6 +56,9 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert created.exit_code == 0, created.output
     assert "checkpoint-1" in created.output
     assert "prime sandbox checkpoint list sandbox-1" in created.output
+    with_ttl = runner.invoke(app, ["sandbox", "checkpoint", "create", "sandbox-1", "--ttl", "7d"])
+    assert with_ttl.exit_code == 0, with_ttl.output
+    assert ttls == [None, 7 * 86400]
 
     table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
     assert table.exit_code == 0, table.output
@@ -98,9 +109,7 @@ def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch)
             updated_at=datetime.now(timezone.utc),
         )
 
-    monkeypatch.setattr(
-        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint
-    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint)
 
     for checkpoint_id, (state, error) in states.items():
         result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])
@@ -126,6 +135,41 @@ def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch)
     assert "HTTP 404" in strip_ansi(failing.output)
 
 
+def test_checkpoint_get_by_id_shows_volume_merge_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+
+    def get_checkpoint(self: Any, checkpoint_id: str) -> SandboxCheckpoint:
+        merge, merge_error = {
+            "cp-merged": ("merged", None),
+            "cp-pending": ("pending", None),
+            "cp-failed": ("failed", "quota exceeded"),
+        }[checkpoint_id]
+        return SandboxCheckpoint(
+            id=checkpoint_id,
+            sandbox_id="sandbox-1",
+            state="DURABLE",
+            depth=1,
+            docker_image="python:3.11-slim",
+            occupied_bytes=3 * 1024**2,
+            merge=merge,
+            merge_error=merge_error,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_checkpoint", get_checkpoint)
+
+    expected = {
+        "cp-merged": "Merge: merged",
+        "cp-pending": "Merge: pending",
+        "cp-failed": "Merge: failed Merge error: quota exceeded",
+    }
+    for checkpoint_id, line in expected.items():
+        result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])
+        assert result.exit_code == 0, result.output
+        assert line in " ".join(strip_ansi(result.output).split())
+
+
 def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
     captured: dict[str, Any] = {}
@@ -145,6 +189,30 @@ def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch
     assert captured["request"].docker_image is None
     assert captured["request"].disk_size_gb is None
     assert "restored-1" in result.output
+
+
+def test_restore_command_memory_forks_with_the_paused_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: list[Any] = []
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        captured.append(request)
+        return SimpleNamespace(id="forked-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+    forked = runner.invoke(app, ["sandbox", "checkpoint", "restore", "pause-1", "--memory", "-y"])
+    cold = runner.invoke(app, ["sandbox", "checkpoint", "restore", "pause-1", "-y"])
+
+    assert forked.exit_code == 0, forked.output
+    assert cold.exit_code == 0, cold.output
+    memory, disk = captured
+    assert memory.restore_memory is True
+    assert "cpu_cores" not in memory.model_fields_set
+    assert "memory_gb" not in memory.model_fields_set
+    assert disk.restore_memory is None
+    assert disk.cpu_cores == 1.0
 
 
 def test_fork_checkpoints_waits_and_restores(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -439,7 +507,7 @@ def test_sandbox_network_flags_replace_rules(
     result = runner.invoke(app, ["sandbox", "network", "sbx-1", *arguments])
 
     assert result.exit_code == 0, result.output
-    assert captured == {"sandbox_id": "sbx-1", **expected}
+    assert captured == {"sandbox_id": "sbx-1", "rules": None, **expected}
 
 
 def test_sandbox_network_rejects_multiple_modes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -491,8 +559,8 @@ def test_sandbox_network_replaces_instead_of_accumulating(
     assert "generation" not in strip_ansi(first.output).lower()
     assert "Access limited to: google.com" in strip_ansi(second.output)
     assert calls == [
-        {"sandbox_id": "sbx-1", "allow": ["example.com"], "deny": None},
-        {"sandbox_id": "sbx-1", "allow": ["google.com"], "deny": None},
+        {"sandbox_id": "sbx-1", "allow": ["example.com"], "deny": None, "rules": None},
+        {"sandbox_id": "sbx-1", "allow": ["google.com"], "deny": None, "rules": None},
     ]
 
 
@@ -822,6 +890,29 @@ def test_sandbox_create_accepts_region(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["request"].region == "eu-west"
 
 
+def test_sandbox_create_summary_shows_env_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_TEAM_ID", "team-from-env")
+
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-team-env")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(app, ["sandbox", "create", "python:3.11-slim", "--yes"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Team: team-from-env" in output
+    assert "Team: Personal" not in output
+    # The flag is still absent from the request; the SDK resolves it.
+    assert captured["request"].team_id is None
+
+
 def test_sandbox_create_requires_gpu_type(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
@@ -1148,6 +1239,7 @@ def test_sandbox_list_table_has_expires_column(monkeypatch: pytest.MonkeyPatch) 
             page=1,
             per_page=50,
             has_next=False,
+            next_cursor=None,
         )
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
@@ -1184,6 +1276,7 @@ def test_sandbox_list_json_includes_expiry_fields(monkeypatch: pytest.MonkeyPatc
             page=1,
             per_page=50,
             has_next=False,
+            next_cursor=None,
         )
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
@@ -1200,6 +1293,67 @@ def test_sandbox_list_json_includes_expiry_fields(monkeypatch: pytest.MonkeyPatc
     assert by_id["sbx-run"]["expires_at"] is not None
     assert by_id["sbx-pending"]["timeout_minutes"] == 45
     assert by_id["sbx-pending"]["expires_at"] is None
+
+
+def test_sandbox_list_cursor_mode_json_includes_next_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            sandboxes=[],
+            total=None,
+            page=1,
+            per_page=50,
+            has_next=True,
+            next_cursor="cursor-2",
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+
+    result = runner.invoke(app, ["sandbox", "list", "--cursor", "cursor-1", "--output", "json"])
+
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    data = json.loads(result.output)
+    assert captured["cursor"] == "cursor-1"
+    assert "page" not in captured
+    # Cursor mode has no count, but offers the next cursor
+    assert data["total"] is None
+    assert data["next_cursor"] == "cursor-2"
+    assert data["has_next"] is True
+    assert "page" not in data
+
+
+def test_sandbox_list_rejects_page_option(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(app, ["sandbox", "list", "--page", "2"])
+
+    assert result.exit_code != 0
+
+
+def test_sandbox_list_table_prints_cursor_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+
+    def mock_list(self: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            sandboxes=[],
+            total=None,
+            per_page=50,
+            has_next=True,
+            next_cursor="cursor-2",
+        )
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list", mock_list)
+
+    result = runner.invoke(app, ["sandbox", "list"])
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0, f"Failed: {result.output}"
+    assert "Use --cursor cursor-2 to see more." in output
 
 
 def test_sandbox_create_defaults_disk_size_gb_to_5(
@@ -1315,7 +1469,7 @@ def test_pause_and_resume_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def pause(self: Any, sandbox_id: str) -> SimpleNamespace:
         calls.append(("pause", sandbox_id))
-        return SimpleNamespace(status="RUNNING")
+        return SimpleNamespace(status="RUNNING", checkpoint_id="pause-1")
 
     def resume(self: Any, sandbox_id: str) -> SimpleNamespace:
         calls.append(("resume", sandbox_id))
@@ -1327,8 +1481,462 @@ def test_pause_and_resume_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     paused = runner.invoke(app, ["sandbox", "pause", "sandbox-1"])
     assert paused.exit_code == 0, paused.output
     assert "becomes PAUSED" in strip_ansi(paused.output)
+    assert "checkpoint restore pause-1 --memory" in " ".join(strip_ansi(paused.output).split())
 
     resumed = runner.invoke(app, ["sandbox", "resume", "sandbox-1"])
     assert resumed.exit_code == 0, resumed.output
     assert "becomes RUNNING" in strip_ansi(resumed.output)
     assert calls == [("pause", "sandbox-1"), ("resume", "sandbox-1")]
+
+
+def _network_status_with_rules(
+    *, allowlist: list[str] | None = None, denylist: list[str] | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        policy=SimpleNamespace(
+            allowlist=allowlist,
+            denylist=denylist,
+            rules={"api.example.com": HeaderRule(headers={"Authorization": "Bearer tok"})},
+        ),
+        generation=2,
+        applied_generation=2,
+        applied=True,
+    )
+
+
+def test_sandbox_network_inject_header_joins_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_set_network(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
+        captured.clear()
+        captured["sandbox_id"] = sandbox_id
+        captured.update(kwargs)
+        return _network_status(allowlist=["*"])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.set_network", mock_set_network)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "*",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: Bearer ${prime.secrets.OPENAI_KEY}",
+            "--inject-header",
+            "api.example.com",
+            "X-Api-Key: k",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["allow"] == ["*"]
+    assert captured["rules"] == {
+        "api.example.com": HeaderRule(
+            headers={
+                "Authorization": "Bearer ${prime.secrets.OPENAI_KEY}",
+                "X-Api-Key": "k",
+            }
+        )
+    }
+
+
+def test_sandbox_network_inject_header_requires_destinations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    set_network = {}
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.set_network",
+        lambda self, sandbox_id, **kwargs: set_network.update(kwargs),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: Bearer ${prime.secrets.OPENAI_KEY}",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "complete" in output
+
+
+def test_sandbox_network_rejects_duplicate_header_for_one_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "*",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: a",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: b",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "set twice" in output
+
+
+def test_sandbox_network_rejects_malformed_inject_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "*",
+            "--inject-header",
+            "api.example.com",
+            "no-colon",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "expects" in output
+
+
+def test_sandbox_network_policy_file_replaces_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+    policy = {
+        "allow": ["api.example.com"],
+        "rules": {
+            "api.example.com": {"headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}}
+        },
+    }
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps(policy))
+
+    def mock_set_network(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
+        captured.clear()
+        captured["sandbox_id"] = sandbox_id
+        captured.update(kwargs)
+        return _network_status(allowlist=["api.example.com"])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.set_network", mock_set_network)
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--network-policy", str(policy_file)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "sandbox_id": "sbx-1",
+        "allow": ["api.example.com"],
+        "deny": None,
+        "rules": {
+            "api.example.com": HeaderRule(
+                headers={"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+            )
+        },
+    }
+
+
+def test_sandbox_network_policy_file_invalid_rule_hides_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(
+        json.dumps({"allow": ["*"], "rules": {"api.example.com": {"headers": "Bearer sk-literal"}}})
+    )
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--network-policy", str(policy_file)],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "sk-literal" not in output
+    assert "headers: Input should be a valid dictionary" in output
+
+
+def test_sandbox_network_policy_file_rejects_unknown_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps({"allow": ["*"], "extra": 1}))
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--network-policy", str(policy_file)],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "unknown network policy keys: extra" in output
+
+
+def test_sandbox_network_policy_file_conflicts_with_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps({"allow": ["*"], "rules": {}}))
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--allow",
+            "example.com",
+            "--network-policy",
+            str(policy_file),
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "at most one of --allow and --network-policy allow" in output
+
+
+def test_sandbox_network_policy_file_rejects_both_lists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps({"allow": ["*"], "deny": ["a.com"], "rules": {}}))
+
+    result = runner.invoke(
+        app,
+        ["sandbox", "network", "sbx-1", "--network-policy", str(policy_file)],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "at most one of allow and deny" in output
+
+
+def test_sandbox_network_shows_header_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def mock_get_network(self: Any, sandbox_id: str) -> SimpleNamespace:
+        return _network_status_with_rules(denylist=[])
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get_network", mock_get_network)
+
+    result = runner.invoke(app, ["sandbox", "network", "sbx-1"])
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 0, result.output
+    assert "Header rules: api.example.com: 1 header(s)" in output
+
+
+def test_sandbox_create_accepts_inject_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-rules-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: Bearer ${prime.secrets.OPENAI_KEY}",
+            "--yes",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 0, output
+    assert captured["request"].network_rules == {
+        "api.example.com": HeaderRule(
+            headers={"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+        )
+    }
+    assert "Header Rules: api.example.com: 1 header(s)" in output
+
+
+def test_sandbox_create_accepts_network_policy_file_rules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(
+        json.dumps(
+            {
+                "allow": ["api.example.com"],
+                "rules": {
+                    "api.example.com": {
+                        "headers": {"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+                    }
+                },
+            }
+        )
+    )
+
+    def mock_create(self: Any, request: Any) -> Any:
+        captured["request"] = request
+        return SimpleNamespace(id="sbx-rules-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", mock_create)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--network-policy",
+            str(policy_file),
+            "--yes",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 0, output
+    assert captured["request"].network_allowlist == ["api.example.com"]
+    assert captured["request"].network_rules == {
+        "api.example.com": HeaderRule(
+            headers={"Authorization": "Bearer ${prime.secrets.OPENAI_KEY}"}
+        )
+    }
+    assert "Header Rules: api.example.com: 1 header(s)" in output
+
+
+def test_sandbox_create_invalid_rule_never_prints_secret_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--secret",
+            "DB_PASSWORD=hunter2-plaintext",
+            "--inject-header",
+            "api.example.com",
+            "Authorization: a",
+            "--inject-header",
+            "api.example.com",
+            "authorization: b",
+            "--yes",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "hunter2-plaintext" not in output
+    assert "differ only by case" in output
+
+
+def test_sandbox_create_rejects_malformed_inject_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "create",
+            "python:3.11-slim",
+            "--inject-header",
+            "api.example.com",
+            "broken",
+            "--yes",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "expects 'Name: value'" in output
+
+
+def test_sandbox_network_inject_header_conflicts_with_policy_file_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch)
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(
+        json.dumps(
+            {
+                "allow": ["*"],
+                "rules": {"api.example.com": {"headers": {"X-Key": "v"}}},
+            }
+        )
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "network",
+            "sbx-1",
+            "--network-policy",
+            str(policy_file),
+            "--inject-header",
+            "api.example.com",
+            "Authorization: Bearer x",
+        ],
+    )
+
+    output = _flat(strip_ansi(result.output))
+    assert result.exit_code == 1
+    assert "also set in --network-policy" in output
+
+
+def test_checkpoint_list_rejects_checkpoint_id_without_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+    for args in (
+        ["--checkpoint-id", "c1"],
+        ["sandbox-1", "--checkpoint-id", "c1", "--state", "DURABLE"],
+    ):
+        result = runner.invoke(app, ["sandbox", "checkpoint", "list", *args])
+        assert result.exit_code == 1, result.output
+        assert "--checkpoint-id needs a sandbox ID" in result.output

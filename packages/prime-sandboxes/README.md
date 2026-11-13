@@ -221,17 +221,19 @@ from prime_sandboxes import APIClient, SandboxClient
 
 volumes = SandboxClient(APIClient()).volumes
 checkpoint = volumes.publish("sandbox-id", "dataset")  # waits for DURABLE
-checkpoint = volumes.publish("sandbox-id", "dataset", force=True, wait=False)
+checkpoint = volumes.publish("sandbox-id", "dataset", wait=False)
 ```
 
 By default `publish` waits for the new head checkpoint to become DURABLE and
 returns it; pass `wait=False` to get the pending checkpoint immediately and
-poll it yourself. A failed publish raises `RuntimeError` and a publish that
-never becomes DURABLE within 300 seconds raises `TimeoutError`. The server
+poll it yourself. On servers that report a checkpoint's volume-merge status
+the same wait also covers the merge: `RuntimeError` carries `merge_error`
+when the merge failed, and a publish or merge still unfinished after the
+wait budget (300 seconds by default) raises `TimeoutError`. The server
 rejects the publish with HTTP 404 when the sandbox has no writable attachment
 with that name, HTTP 400 when the mount is read-only, and HTTP 409 when
-another sandbox's publish for the same volume is already in flight; a head
-that moved since the sandbox was created is also HTTP 409 unless `force=True`.
+another sandbox's publish for the same volume is already in flight. A head
+that moved since the sandbox was created is also HTTP 409.
 `AsyncSandboxClient` exposes the same operations with `await` on its own
 `volumes` namespace; the parent client's `aclose()` closes its owned
 transport and polling work, while the namespace owns neither.
@@ -293,6 +295,30 @@ all reachable guests before releasing this SDK: older servers can ignore the
 protobuf field and execute as their default user. Existing guests must be upgraded
 or recreated before using this option.
 
+### Native Process Output Recovery
+
+`AsyncSandboxClient.open_process()` resumes interrupted output streams by session
+UUID and output sequence. Replayed chunks are deduplicated across stdout and
+stderr, and the final sequence is checked before accepting the exit code.
+
+Native sessions lease the bounded command connection pool for their lifetime,
+including reconnects. Connections are reused across commands, with capacity
+accounted for stdin and signal requests too, so blocked input cannot starve
+signals. Keep the sandbox client open until its process handles have been closed.
+
+sandboxd retains up to 4 MiB per command and 64 MiB across the guest, including
+record overhead. Connected readers apply backpressure rather than losing unread
+output. Disconnected output can be evicted; recovery then raises
+`ProcessOutputLostError` instead of returning incomplete output as success.
+Forced pipe closure also raises this error when complete output cannot be proven.
+Replay uses the existing guest-local session lifetime and does not survive a
+daemon restart or session expiration.
+
+Roll out sandboxd before releasing this SDK. Uninterrupted streams work with older
+daemons; an interruption fails explicitly when the server cannot replay output.
+Regenerate the Python protocol bindings from the platform checkout with
+`bash packages/prime-sandboxes/tools/generate-command-session.sh /path/to/platform`.
+
 ### Reattach a Live Process
 
 A live process keeps running when its handle goes away: the client that started it
@@ -309,8 +335,12 @@ process = await client.attach_process(sandbox.id, session)
 await process.write_stdin(b"next\n")
 ```
 
-Output that the process emitted while no client was attached is not replayed. A
-process that exited within sandboxd's retention window reports its exit code.
+A sandbox created from a memory checkpoint continues the processes of the sandbox
+that was paused. Attach to one with the new sandbox's id and the same `session_uuid`.
+
+With output replay, the attached handle gets the output that sandboxd retains from
+the start of the process. An older sandboxd sends only the output from the attach on.
+A process that exited within sandboxd's retention window reports its exit code.
 
 ### File Operations
 
@@ -365,12 +395,25 @@ sandbox = sandbox_client.create(CreateSandboxRequest(
 sandboxes = sandbox_client.list(
     status="RUNNING",
     labels=["experiment"],
-    page=1,
     per_page=50,
 )
 
 for s in sandboxes.sandboxes:
     print(f"{s.name}: {s.status}")
+```
+
+Lists are cursor-paginated. When `next_cursor` is set, pass it as
+`list(cursor=...)` to fetch the next page. Cursor pages return
+`total=None`; only the first page (no `cursor`) includes `total`.
+
+```python
+response = sandbox_client.list(per_page=50)
+while True:
+    for s in response.sandboxes:
+        print(f"{s.name}: {s.status}")
+    if not response.next_cursor:
+        break
+    response = sandbox_client.list(per_page=50, cursor=response.next_cursor)
 ```
 
 ### Long-Running Tasks

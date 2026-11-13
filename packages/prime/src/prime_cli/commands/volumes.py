@@ -36,7 +36,7 @@ from rich.text import Text
 
 from prime_cli import volume_objects
 from prime_cli.api.training import HostedTrainingClient, VolumeTransfer
-from prime_cli.core import APIClient, APIError, Config, NotFoundError
+from prime_cli.core import APIClient, APIError, APITimeoutError, Config, NotFoundError
 from prime_cli.volume_gateway import GatewayError, relay
 
 from ..utils import (
@@ -51,7 +51,7 @@ from ..utils import (
 from .rl import VOLUME_DEFAULT_SIZE
 
 app = PlainTyper(
-    help="Manage volumes for dedicated run outputs and SFT datasets (closed beta)",
+    help="Manage volumes for dedicated run outputs and SFT datasets",
     no_args_is_help=True,
 )
 console = get_console()
@@ -105,6 +105,13 @@ def create(
         volume = client.create_volume(name, size, team_id=team_id, cluster=cluster, warm=warm)
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
+        if isinstance(e, APITimeoutError) or "already exists" in str(e):
+            # A create the CLI gave up on still finishes server-side, so a
+            # retry then reports the name as taken (ENG-7624).
+            console.print(
+                "A create that timed out may still have gone through: "
+                f"run `prime volumes list` to check for {name!r} before retrying."
+            )
         raise typer.Exit(1)
     if output == "json":
         output_data_as_json(volume.model_dump(by_alias=True), console)
@@ -241,6 +248,43 @@ def _proxy_command(gateway: tuple[str, str], sni: str) -> str:
     return command.replace("%", "%%")
 
 
+def _identity_agent(host: str) -> str | None:
+    """The IdentityAgent the user's own ssh config sets for `host`, or None.
+    `-F` skips ~/.ssh/config, so an agent configured there (1Password,
+    Secretive) would be lost: ssh would fall back to SSH_AUTH_SOCK, find no
+    private key for a `.pub` IdentityFile and fail with publickey."""
+    try:
+        out = subprocess.run(
+            ["ssh", "-G", host],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        name, _, value = line.partition(" ")
+        if name == "identityagent" and value:
+            return value
+    return None
+
+
+def _key_hint(key: str) -> str:
+    """What to check when ssh fails before the session's shell starts."""
+    hint = (
+        f"If ssh said 'Permission denied (publickey)': {key} must match your primary "
+        "SSH key in the Platform dashboard (Dashboard -> Tokens -> SSH Keys)."
+    )
+    if key.endswith(".pub"):
+        hint += (
+            " It is a public key file, so an ssh agent must hold its private key: "
+            "set IdentityAgent in ~/.ssh/config (the 1Password agent socket, for "
+            "example) or export SSH_AUTH_SOCK."
+        )
+    return hint
+
+
 def _write_ssh_config(
     session, alias: str, host: str, user: str, port: str, key: str, gateway=None
 ) -> Path:
@@ -270,6 +314,8 @@ def _write_ssh_config(
         f'  IdentityFile "{Path(key).as_posix()}"',
         "  IdentitiesOnly yes",
     ]
+    if agent := _identity_agent(host):
+        lines.append(f'  IdentityAgent "{agent.replace("%", "%%")}"')
     if gateway:
         lines.append(f"  ProxyCommand {_proxy_command(gateway, alias)}")
     if getattr(session, "host_public_key", None):
@@ -514,6 +560,8 @@ def ssh(
         "The session stops after 30 minutes idle. Stop it now with: "
         f"prime volumes stop {escape(name)} {session.id}"
     )
+    if code == 255:  # ssh's own failure (auth, network), not the remote shell's
+        console.print(_key_hint(_shell_path(Path(key), "~")), markup=False)
     if code:
         raise typer.Exit(code)
 
@@ -590,6 +638,11 @@ def _transfer_failed(alias: str, code: int, via_gateway: bool) -> None:
     else:
         reach = f"that you are on the tailnet (host {alias} must resolve)"
     console.print(f"[red]Transfer failed.[/red] Check {reach} and the path exists.")
+    if code == 255:
+        console.print(
+            "ssh itself failed: also check that your SSH key (prime config "
+            "set-ssh-key-path) matches your primary key in Dashboard -> Tokens -> SSH Keys."
+        )
     raise typer.Exit(code)
 
 

@@ -85,6 +85,8 @@ async def test_attach_process_connects_to_the_session(monkeypatch):
         method, request = _FakeConnectClient.calls[0]
         assert method == "Connect"
         assert request.session.session_uuid == "session-1"
+        # The attached handle asks for the output sandboxd retains from the start.
+        assert request.after_sequence == 0
         assert all(method == "Connect" for method, _ in _FakeConnectClient.calls)
     finally:
         await client.aclose()

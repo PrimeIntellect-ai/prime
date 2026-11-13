@@ -17,6 +17,7 @@ from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
     DownloadTimeoutError,
+    ProcessOutputLostError,
     SandboxFileNotFoundError,
     SandboxFileTooLargeError,
     SandboxImagePullError,
@@ -45,6 +46,7 @@ from .models import (
     DeleteSandboxCheckpointsResponse,
     EgressPolicyStatus,
     FileUploadResponse,
+    HeaderRule,
     ImageArtifactType,
     ImageBuildStatus,
     ImageCoordinateState,
@@ -62,9 +64,11 @@ from .models import (
     LanNetworkMember,
     LanRule,
     LocalhostForward,
+    PausedSandbox,
     PersonalImageOwner,
     PlatformImageOwner,
     ReadFileResponse,
+    RegistryAuth,
     Sandbox,
     SandboxCheckpoint,
     SandboxEgressPolicy,
@@ -72,6 +76,7 @@ from .models import (
     SandboxStatus,
     SandboxStatusLookupError,
     SandboxStatusSnapshot,
+    Secret,
     SourceImageBuildResult,
     SSHSession,
     StartCommand,
@@ -85,7 +90,7 @@ from .models import (
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
 
-__version__ = "0.5.4"
+__version__ = "0.5.11"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -102,7 +107,10 @@ __all__ = [
     "ImageClient",
     "AsyncImageClient",
     # Models
+    "HeaderRule",
+    "Secret",
     "Sandbox",
+    "PausedSandbox",
     "SandboxCheckpoint",
     "SandboxEgressPolicy",
     "SandboxStatus",
@@ -132,6 +140,7 @@ __all__ = [
     "SandboxStatusLookupError",
     "SSHSession",
     "BuildImageRequest",
+    "RegistryAuth",
     "BuildImageResponse",
     "BulkBuildImageResponse",
     "SourceImageBuildResult",
@@ -172,4 +181,5 @@ __all__ = [
     "CommandTimeoutError",
     "UploadTimeoutError",
     "DownloadTimeoutError",
+    "ProcessOutputLostError",
 ]

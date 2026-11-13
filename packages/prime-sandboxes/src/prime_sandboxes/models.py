@@ -1,5 +1,7 @@
 """Pydantic models for Prime Sandboxes SDK."""
 
+import ipaddress
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -25,6 +27,65 @@ MAX_EGRESS_POLICY_ENTRIES = 1024
 
 # Domain entries are matched by HTTP Host or TLS SNI, read only on these ports.
 DOMAIN_RULE_PORTS = (80, 443)
+
+# Header substitution rules contract (mirrors the API implementation):
+# SECRET_REFERENCE_PREFIX introduces a "${prime.secrets.<name>}" reference in a
+# header template value; the other constants bound the rules per policy.
+SECRET_REFERENCE_PREFIX = "${prime.secrets."
+MAX_HEADER_RULE_HOSTS = 32
+MAX_HEADER_RULE_BYTES = 8192
+# Matches the node's cold-cache budget of ten secret fetches per second.
+MAX_HEADER_RULE_SECRETS = 10
+
+_SECRET_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,254}$")
+_RESERVED_RULE_HEADERS = frozenset(
+    {
+        "host",
+        ":authority",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+        "keep-alive",
+        "te",
+        "trailer",
+    }
+)
+_RESERVED_RULE_HEADER_PREFIXES = ("proxy-",)
+
+
+class HeaderRule(BaseModel):
+    """Headers to set on HTTPS requests to one rule host.
+
+    The rule host is an exact name or a ``*.`` wildcard that matches exactly
+    one label: ``*.example.com`` matches ``api.example.com``, not
+    ``example.com`` or ``a.b.example.com``. Each value is a template that may
+    contain "${prime.secrets.<name>}" references; a set header replaces any
+    same-name header the sandbox sent. After substitution, one request's rule
+    headers may total at most 32 KiB; a larger result fails the request.
+    """
+
+    headers: Dict[str, str]
+
+
+class Secret:
+    """Reference helper for platform secrets inside header-rule values.
+
+    Distinct from ``CreateSandboxRequest.secrets``, which are per-sandbox
+    environment values: a platform secret is stored once per user/team and
+    never enters the sandbox; the sandbox's node substitutes its value into
+    the HTTPS request headers named by ``network_rules``.
+    """
+
+    @classmethod
+    def fill(cls, name: str) -> str:
+        """Return the "${prime.secrets.<name>}" reference string for ``name``."""
+        if not _SECRET_NAME_PATTERN.fullmatch(name):
+            raise ValueError(
+                f"invalid secret name {name!r}; must be 1-255 uppercase letters, "
+                "digits, or underscores, starting with a letter"
+            )
+        return f"${{prime.secrets.{name}}}"
 
 
 def _validate_egress_entry(entry: str) -> None:
@@ -128,11 +189,164 @@ def validate_egress_lists(allowlist: Optional[List[str]], denylist: Optional[Lis
                 raise ValueError(f"{name}: {exc}") from exc
 
 
+def _parse_secret_references(value: str) -> List[str]:
+    """Parse one template value into its referenced secret names, in order."""
+    names: List[str] = []
+    while True:
+        start = value.find("${")
+        if start < 0:
+            return names
+        if not value.startswith(SECRET_REFERENCE_PREFIX, start):
+            raise ValueError(
+                f"unsupported interpolation at {value[start : start + 24]!r}; "
+                "only ${prime.secrets.<name>} references are allowed"
+            )
+        rest = value[start + len(SECRET_REFERENCE_PREFIX) :]
+        secret_name, terminator, tail = rest.partition("}")
+        if not terminator:
+            raise ValueError(f"unterminated reference at {value[start:]!r}")
+        if not _SECRET_NAME_PATTERN.fullmatch(secret_name):
+            raise ValueError(
+                f"invalid secret name {secret_name!r} in reference; must be "
+                "1-255 uppercase letters, digits, or underscores, "
+                "starting with a letter"
+            )
+        names.append(secret_name)
+        value = tail
+
+
+def validate_header_rules(
+    rules: Optional[Dict[str, HeaderRule]],
+) -> Optional[Dict[str, HeaderRule]]:
+    """Client-side mirror of the API's header substitution rules contract.
+
+    Rule hosts are an exact DNS name or a single leading ``*.`` wildcard
+    (matching exactly one label) without ports or paths, canonicalized to
+    lowercase with case-equivalent hosts rejected; header names are valid
+    HTTP tokens that are not reserved (Host, :authority, framing, hop-by-hop,
+    Proxy-*), and names differing only by case are rejected; values carry no CR/LF
+    and only ``${prime.secrets.<name>}`` references; one rule host's headers
+    total at most ``MAX_HEADER_RULE_BYTES`` bytes and reference at most
+    ``MAX_HEADER_RULE_SECRETS`` distinct secrets.
+    """
+    if not rules:
+        return rules
+    if len(rules) > MAX_HEADER_RULE_HOSTS:
+        raise ValueError(
+            f"header rules name {len(rules)} hosts; at most {MAX_HEADER_RULE_HOSTS} are allowed"
+        )
+
+    canonical: Dict[str, HeaderRule] = {}
+    for host, rule in rules.items():
+        if not isinstance(rule, HeaderRule):
+            rule = HeaderRule.model_validate(rule)
+        canonical_host = host.lower()
+        if canonical_host in canonical:
+            raise ValueError(f"header rule hosts {host!r} and an earlier entry differ only by case")
+        _validate_header_rule_host(host)
+        _validate_header_rule_headers(host, rule.headers)
+        canonical[canonical_host] = rule
+    return canonical
+
+
+def _validate_header_rule_host(host: str) -> None:
+    """Mirror the API's rule-host contract: DNS names only — IP literals
+    (wildcard base included) are rejected because header rules match
+    hostnames and the node refuses them; numeric labels stay valid DNS."""
+    domain = host[2:] if host.startswith("*.") else host
+    if not domain:
+        raise ValueError(f"header rule host {host!r} is empty")
+    if "*" in domain:
+        raise ValueError(
+            f"header rule host {host!r}: wildcard is only supported as the leftmost label"
+        )
+    if len(domain) > 253:
+        raise ValueError(f"header rule host {host!r} exceeds 253 characters")
+    try:
+        ipaddress.ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            f"header rule host {host!r}: IP addresses are not supported; use a DNS name"
+        )
+    for label in domain.split("."):
+        if not 1 <= len(label) <= 63:
+            raise ValueError(f"header rule host {host!r} contains an empty or oversized label")
+        if label.startswith("-") or label.endswith("-"):
+            raise ValueError(
+                f"header rule host {host!r}: labels must not start or end with a hyphen"
+            )
+        for character in label:
+            if not (character.isascii() and (character.isalnum() or character == "-")):
+                raise ValueError(
+                    f"header rule host {host!r} contains unsupported character {character!r}"
+                )
+
+
+def _validate_header_rule_headers(host: str, headers: Dict[str, str]) -> None:
+    total_bytes = 0
+    seen_names: set[str] = set()
+    secret_names: set[str] = set()
+    for name, value in headers.items():
+        if not _is_valid_header_name(name):
+            raise ValueError(f"header rule for {host!r}: {name!r} is not a valid header name")
+        lower_name = name.lower()
+        # The node canonicalizes names; case variants would pick a value nondeterministically.
+        if lower_name in seen_names:
+            raise ValueError(
+                f"header rule for {host!r}: header {name!r} and an earlier entry "
+                "differ only by case"
+            )
+        seen_names.add(lower_name)
+        if lower_name in _RESERVED_RULE_HEADERS:
+            raise ValueError(
+                f"header rule for {host!r}: {name!r} is a reserved header and cannot be set"
+            )
+        if lower_name.startswith(_RESERVED_RULE_HEADER_PREFIXES):
+            raise ValueError(
+                f"header rule for {host!r}: {name!r} uses the reserved "
+                f"{_RESERVED_RULE_HEADER_PREFIXES[0]!r} prefix and cannot be set"
+            )
+        if "\r" in value or "\n" in value:
+            raise ValueError(
+                f"header rule for {host!r}: header {name!r} value must not contain CR or LF"
+            )
+        try:
+            secret_names.update(_parse_secret_references(value))
+        except ValueError as exc:
+            raise ValueError(f"header rule for {host!r}, header {name!r}: {exc}") from exc
+
+        total_bytes += len(name.encode("utf-8")) + len(value.encode("utf-8"))
+    if total_bytes > MAX_HEADER_RULE_BYTES:
+        raise ValueError(
+            f"header rule for {host!r} exceeds {MAX_HEADER_RULE_BYTES} bytes of headers"
+        )
+    if len(secret_names) > MAX_HEADER_RULE_SECRETS:
+        raise ValueError(
+            f"header rule for {host!r} references {len(secret_names)} distinct secrets; "
+            f"at most {MAX_HEADER_RULE_SECRETS} are allowed"
+        )
+
+
+def _is_valid_header_name(name: str) -> bool:
+    """One to 255 HTTP token characters: visible ASCII minus separators."""
+    if not 1 <= len(name) <= 255:
+        return False
+    for character in name:
+        if character.isascii() and (character.isalnum() or character in "!#$%&'*+-.^_`|~"):
+            continue
+        return False
+    return True
+
+
 class SandboxEgressPolicy(BaseModel):
     """The desired egress policy: at most one list is non-null."""
 
     allowlist: Optional[List[str]] = None
     denylist: Optional[List[str]] = None
+    # Per-host HTTPS header substitution rules; absent means none.
+    rules: Optional[Dict[str, HeaderRule]] = None
 
 
 class EgressPolicyStatus(BaseModel):
@@ -267,14 +481,25 @@ class Sandbox(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class PausedSandbox(Sandbox):
+    """A sandbox whose pause was accepted, with the checkpoint the pause froze.
+
+    ``resume`` continues this sandbox. Creating a sandbox with this
+    ``checkpoint_id`` and ``restore_memory=True`` forks it, as often as needed."""
+
+    checkpoint_id: str = Field(alias="checkpointId")
+
+
 class SandboxListResponse(BaseModel):
     """Sandbox list response model"""
 
     sandboxes: List[Sandbox]
-    total: int
+    # Null in cursor mode, which pages the full history without a count
+    total: Optional[int] = None
     page: int
     per_page: int = Field(..., alias="perPage")
     has_next: bool = Field(..., alias="hasNext")
+    next_cursor: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -296,6 +521,12 @@ class SandboxCheckpoint(BaseModel):
     # 0 for grandfathered pre-measurement records; older responses omit it.
     occupied_bytes: int = 0
     error: Optional[str] = None
+    # When the platform deletes it (set by a TTL at creation); None keeps it.
+    expires_at: Optional[datetime] = None
+    # Volume-publish merge status; None on other checkpoints and on servers
+    # without volume merges (D29). "failed" carries merge_error.
+    merge: Optional[Literal["merged", "pending", "failed"]] = None
+    merge_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -411,6 +642,10 @@ class CreateSandboxRequest(BaseModel):
     name: str
     docker_image: Optional[str] = None
     checkpoint_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    # With checkpoint_id: True restores a pause checkpoint's memory, so the new
+    # sandbox continues from the paused state with the paused sandbox's shape,
+    # environment and secrets. None or False cold boots from the checkpoint's disk.
+    restore_memory: Optional[bool] = None
     # None lets the server default to amd64; checkpoint restores must omit it.
     arch: Optional[Literal["amd64", "arm64"]] = None
     start_command: Optional[StartCommand] = None
@@ -421,6 +656,8 @@ class CreateSandboxRequest(BaseModel):
     gpu_type: Optional[str] = None
     network_allowlist: Optional[List[str]] = None
     network_denylist: Optional[List[str]] = None
+    # Per-host HTTPS header substitution rules; a rule never grants egress.
+    network_rules: Optional[Dict[str, HeaderRule]] = None
     timeout_minutes: int = 60
     idle_timeout_minutes: Optional[int] = None
     environment_vars: Optional[Dict[str, str]] = None
@@ -440,6 +677,8 @@ class CreateSandboxRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_restore_source(self) -> "CreateSandboxRequest":
+        if self.restore_memory is not None and not self.checkpoint_id:
+            raise ValueError("restore_memory requires checkpoint_id")
         if self.checkpoint_id:
             if self.docker_image or self.disk_size_gb is not None:
                 raise ValueError("omit docker_image and disk_size_gb when restoring a checkpoint")
@@ -461,6 +700,7 @@ class CreateSandboxRequest(BaseModel):
     @model_validator(mode="after")
     def validate_network_lists(self) -> "CreateSandboxRequest":
         validate_egress_lists(self.network_allowlist, self.network_denylist)
+        self.network_rules = validate_header_rules(self.network_rules)
         if self.lan_tags is not None and self.lan_network_id is None:
             raise ValueError("lan_tags requires lan_network_id")
         return self
@@ -600,11 +840,20 @@ class ImageListResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RegistryAuth(BaseModel):
+    """Private-registry pull credentials for one build. Forwarded, never stored."""
+
+    server: str
+    username: str
+    password: str = Field(repr=False)
+
+
 class BuildImageRequest(BaseModel):
     """Request a linux/amd64 or linux/arm64 VM image build.
 
-    Docker Hub sources become public, org-less platform images automatically.
-    They cannot use a custom destination, team, or private visibility.
+    Docker Hub sources become public, org-less platform images automatically
+    unless registry_auth is set. They cannot use a custom destination, team,
+    or private visibility.
     """
 
     image_name: Optional[str] = None
@@ -615,6 +864,7 @@ class BuildImageRequest(BaseModel):
     team_id: Optional[str] = Field(default=None, alias="teamId")
     visibility: Optional[ImageVisibility] = None
     owner_scope: Optional[Literal["platform"]] = Field(default=None, alias="ownerScope")
+    registry_auth: Optional[RegistryAuth] = Field(default=None, alias="registryAuth")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -625,6 +875,11 @@ class BuildImageRequest(BaseModel):
             source for source in sources if source and is_docker_hub_reference(source)
         ]
         if not docker_hub_sources:
+            return self
+        if self.registry_auth is not None:
+            # Credentialed Docker Hub pulls are private images and stay owned.
+            if len(docker_hub_sources) != len([source for source in sources if source]):
+                raise ValueError("Docker Hub and non-Docker Hub sources cannot share one request")
             return self
 
         if self.image_name is not None or self.image_tag is not None:

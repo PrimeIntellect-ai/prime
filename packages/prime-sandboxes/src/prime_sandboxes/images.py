@@ -9,6 +9,7 @@ from .models import (
     BulkBuildImageResponse,
     ImageListResponse,
     ImageVisibility,
+    RegistryAuth,
     UpdateImagesRequest,
     UpdateImagesResponse,
 )
@@ -40,6 +41,13 @@ def _list_params(
     if search is not None:
         params["search"] = search
     return params
+
+
+def _start_payload(registry_auth: Optional[RegistryAuth]) -> dict:
+    payload: dict = {"context_uploaded": True}
+    if registry_auth is not None:
+        payload["registryAuth"] = registry_auth.model_dump()
+    return payload
 
 
 class ImageClient:
@@ -96,6 +104,7 @@ class ImageClient:
         visibility: Optional[ImageVisibility] = None,
         owner_scope: Optional[Literal["platform"]] = None,
         platform: Literal["linux/amd64", "linux/arm64"] = "linux/amd64",
+        registry_auth: Optional[RegistryAuth] = None,
     ) -> BuildImageResponse | BulkBuildImageResponse:
         """Build VM images directly from allowed public registry references.
 
@@ -111,14 +120,15 @@ class ImageClient:
             visibility=visibility,
             owner_scope=owner_scope,
             platform=platform,
+            registry_auth=registry_auth,
         )
         return self.initiate_build(request)
 
-    def start_build(self, build_id: str) -> dict:
+    def start_build(self, build_id: str, registry_auth: Optional[RegistryAuth] = None) -> dict:
         return self.client.request(
             "POST",
             f"/images/build/{build_id}/start",
-            json={"context_uploaded": True},
+            json=_start_payload(registry_auth),
         )
 
     def get_build_status(self, build_id: str) -> dict:
@@ -190,6 +200,7 @@ class AsyncImageClient:
         visibility: Optional[ImageVisibility] = None,
         owner_scope: Optional[Literal["platform"]] = None,
         platform: Literal["linux/amd64", "linux/arm64"] = "linux/amd64",
+        registry_auth: Optional[RegistryAuth] = None,
     ) -> BuildImageResponse | BulkBuildImageResponse:
         """Build VM images directly from allowed public registry references.
 
@@ -205,14 +216,17 @@ class AsyncImageClient:
             visibility=visibility,
             owner_scope=owner_scope,
             platform=platform,
+            registry_auth=registry_auth,
         )
         return await self.initiate_build(request)
 
-    async def start_build(self, build_id: str) -> dict:
+    async def start_build(
+        self, build_id: str, registry_auth: Optional[RegistryAuth] = None
+    ) -> dict:
         return await self.client.request(
             "POST",
             f"/images/build/{build_id}/start",
-            json={"context_uploaded": True},
+            json=_start_payload(registry_auth),
         )
 
     async def get_build_status(self, build_id: str) -> dict:

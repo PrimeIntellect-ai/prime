@@ -4,10 +4,12 @@ import shlex
 import string
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from inspect import signature
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
+import click
 import typer
 from prime_sandboxes import (
     APIClient,
@@ -17,6 +19,7 @@ from prime_sandboxes import (
     Config,
     CreateSandboxRequest,
     EgressPolicyStatus,
+    HeaderRule,
     LanNetwork,
     LanRule,
     LocalhostForward,
@@ -29,6 +32,7 @@ from prime_sandboxes import (
     UnauthorizedError,
     VolumeMount,
 )
+from pydantic import ValidationError
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
@@ -64,10 +68,10 @@ console = get_console()
 LIST_SANDBOXES_JSON_HELP = json_output_help(
     ".sandboxes[] = {id, name, image, status, resources, labels[], created_at, "
     "timeout_minutes, expires_at?}",
-    ".total = number",
-    ".page = number",
+    ".total? = number",
     ".per_page = number",
     ".has_next = boolean",
+    ".next_cursor? = string",
 )
 
 SANDBOX_DETAIL_JSON_HELP = json_output_help(
@@ -251,16 +255,20 @@ def list_sandboxes_cmd(
         "-l",
         help="Filter by labels (can specify multiple, sandboxes must have ALL)",
     ),
-    page: int = typer.Option(1, "--page", "-p", help="Page number"),
     num: int = typer.Option(50, "--num", "-n", help="Items per page"),
+    cursor: Optional[str] = typer.Option(
+        None,
+        "--cursor",
+        help="Opaque pagination cursor from a previous response's next_cursor",
+    ),
     all: bool = typer.Option(False, "--all", help="Show all sandboxes including terminated ones"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List your sandboxes (shortcut: ls)"""
     validate_output_format(output, console)
 
-    if num < 1 or page < 1:
-        console.print("[red]Error:[/red] --num and --page must be at least 1")
+    if num < 1:
+        console.print("[red]Error:[/red] --num must be at least 1")
         raise typer.Exit(1)
 
     try:
@@ -274,13 +282,14 @@ def list_sandboxes_cmd(
             team_id=team_id,
             status=status,
             labels=labels,
-            page=page,
             per_page=num,
+            cursor=cursor,
             exclude_terminated=exclude_terminated,
         )
 
+        total_label = str(sandbox_list.total) if sandbox_list.total is not None else "?"
         table = build_table(
-            f"Sandboxes (Total: {sandbox_list.total})",
+            f"Sandboxes (Total: {total_label})",
             [
                 ("ID", "cyan"),
                 ("Name", "blue"),
@@ -319,9 +328,9 @@ def list_sandboxes_cmd(
             output_data = {
                 "sandboxes": sandboxes_data,
                 "total": sandbox_list.total,
-                "page": sandbox_list.page,
                 "per_page": num,
                 "has_next": sandbox_list.has_next,
+                "next_cursor": sandbox_list.next_cursor,
             }
             output_data_as_json(output_data, console)
         else:
@@ -344,10 +353,9 @@ def list_sandboxes_cmd(
 
             console.print(table)
 
-            if sandbox_list.has_next:
+            if sandbox_list.has_next and sandbox_list.next_cursor:
                 console.print(
-                    f"\n[yellow]Showing page {page} of results. "
-                    f"Use --page {page + 1} to see more.[/yellow]"
+                    f"\n[yellow]Use --cursor {sandbox_list.next_cursor} to see more.[/yellow]"
                 )
 
     except typer.Exit:
@@ -363,7 +371,7 @@ def list_sandboxes_cmd(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -465,7 +473,7 @@ def get(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -744,15 +752,32 @@ def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
         )
 
 
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_duration(value: str) -> int:
+    """'90', '30m', '12h' or '7d' as seconds."""
+    raw = value.strip().lower()
+    unit = _DURATION_UNITS.get(raw[-1:], None)
+    number = raw[:-1] if unit else raw
+    if not number.isdigit() or int(number) <= 0:
+        raise typer.BadParameter(f"invalid duration {value!r}; use e.g. 30m, 12h, 7d")
+    return int(number) * (unit or 1)
+
+
 @checkpoint_app.command("create")
 def checkpoint_create(
     sandbox_id: str,
+    ttl: Optional[str] = typer.Option(
+        None, "--ttl", help="Delete the checkpoint after this long, e.g. 12h or 7d"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Request a filesystem checkpoint of a running sandbox."""
     validate_output_format(output, console)
+    ttl_seconds = _parse_duration(ttl) if ttl else None
     try:
-        result = SandboxClient(APIClient()).checkpoint(sandbox_id)
+        result = SandboxClient(APIClient()).checkpoint(sandbox_id, ttl_seconds=ttl_seconds)
         _print_checkpoint(result, output)
     except APIError as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
@@ -761,16 +786,42 @@ def checkpoint_create(
 
 @checkpoint_app.command("list")
 def checkpoint_list(
-    sandbox_id: str,
+    sandbox_id: Optional[str] = typer.Argument(
+        None, help="Sandbox ID; omit to list every checkpoint of your account or team"
+    ),
     checkpoint_id: Optional[str] = typer.Option(
         None, "--checkpoint-id", help="Show only this checkpoint"
     ),
+    team_id: Optional[str] = typer.Option(
+        None, "--team-id", help="Team ID (uses config team_id if omitted)"
+    ),
+    state: Optional[List[str]] = typer.Option(
+        None, "--state", help="Only this state (repeatable), e.g. DURABLE or FAILED"
+    ),
+    older_than: Optional[str] = typer.Option(
+        None, "--older-than", help="Only checkpoints older than this, e.g. 7d"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List a sandbox's filesystem checkpoints and their state."""
+    """List checkpoints of one sandbox, or of your whole account (incl. deleted sandboxes)."""
     validate_output_format(output, console)
+    if checkpoint_id and (not sandbox_id or state or older_than):
+        console.print(
+            "[red]Error:[/red] --checkpoint-id needs a sandbox ID and no --state/--older-than; "
+            "use 'prime sandbox checkpoint get ID' to look one up."
+        )
+        raise typer.Exit(1)
+    client = SandboxClient(APIClient())
     try:
-        results = SandboxClient(APIClient()).list_checkpoints(sandbox_id, checkpoint_id)
+        if sandbox_id and not (state or older_than):
+            results = client.list_checkpoints(sandbox_id, checkpoint_id)
+        else:
+            results = client.list_all_checkpoints(
+                team_id=team_id or client.client.config.team_id,
+                sandbox_id=sandbox_id,
+                states=[s.upper() for s in state] if state else None,
+                created_before=_older_than(older_than),
+            )
     except APIError as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
@@ -780,11 +831,14 @@ def checkpoint_list(
     if not results:
         console.print("No checkpoints found.")
         return
+    # One sandbox: show lineage (Parent); account-wide: which sandbox it came from.
+    # Expires only when some checkpoint has a TTL, to keep the table narrow.
+    show_expiry = any(c.expires_at for c in results)
     table = build_table(
-        f"Checkpoints: {escape(sandbox_id)}",
+        f"Checkpoints: {escape(sandbox_id or 'all sandboxes')}",
         [
             ("ID", "cyan"),
-            ("Parent", "white"),
+            ("Parent" if sandbox_id else "Sandbox", "white"),
             ("State", "white"),
             ("Depth", "white"),
             # Size is the quota measure (occupied bytes); Stored is the
@@ -792,21 +846,30 @@ def checkpoint_list(
             ("Size", "white"),
             ("Stored", "white"),
             ("Age", "white"),
+            *([("Expires", "white")] if show_expiry else []),
             ("Error", "red"),
         ],
     )
     for c in results:
+        expiry = [c.expires_at.strftime("%Y-%m-%d %H:%M UTC") if c.expires_at else "-"]
         table.add_row(
             escape(c.id),
-            escape(c.parent_id or "-"),
+            escape((c.parent_id or "-") if sandbox_id else c.sandbox_id),
             escape(c.state),
             str(c.depth),
             f"{c.occupied_bytes / 1024**2:.1f} MiB",
             f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
             human_age(c.created_at),
+            *(expiry if show_expiry else []),
             escape(c.error or ""),
         )
     console.print(table)
+
+
+def _older_than(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    return datetime.now(timezone.utc) - timedelta(seconds=_parse_duration(value))
 
 
 @checkpoint_app.command("get")
@@ -828,6 +891,10 @@ def checkpoint_get(
     # which is never restorable as a sandbox rootfs, so no restorable hint.
     console.print(f"Checkpoint ID: [cyan]{escape(checkpoint.id)}[/cyan]")
     console.print(f"State: {escape(checkpoint.state)}")
+    if checkpoint.merge is not None:
+        console.print(f"Merge: {escape(checkpoint.merge)}")
+        if checkpoint.merge_error:
+            console.print(f"Merge error: {escape(checkpoint.merge_error)}")
     console.print(f"Size: {checkpoint.occupied_bytes / 1024**2:.1f} MiB")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
@@ -841,30 +908,65 @@ def checkpoint_delete(
     sandbox_id: Optional[str] = typer.Option(
         None, "--sandbox", "-s", help="Delete every checkpoint of this sandbox"
     ),
+    delete_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Delete every checkpoint of your account or team (incl. deleted sandboxes)",
+    ),
+    team_id: Optional[str] = typer.Option(
+        None, "--team-id", help="With --all: team ID (uses config team_id if omitted)"
+    ),
+    state: Optional[List[str]] = typer.Option(
+        None, "--state", help="With --all: only DURABLE or FAILED (repeatable)"
+    ),
+    older_than: Optional[str] = typer.Option(
+        None, "--older-than", help="With --all: only checkpoints older than this, e.g. 7d"
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Delete checkpoints by ID, or all of a sandbox's with --sandbox.
+    """Delete checkpoints by ID, all of a sandbox's with --sandbox, or all with --all.
 
     Deleting stops storage billing. Data is kept while descendant checkpoints
     still need it, without charges.
     """
     validate_output_format(output, console)
-    if bool(checkpoint_ids) == bool(sandbox_id):
-        console.print("[red]Error:[/red] Pass checkpoint IDs or --sandbox, not both.")
+    if sum((bool(checkpoint_ids), bool(sandbox_id) and not delete_all, delete_all)) != 1:
+        console.print("[red]Error:[/red] Pass checkpoint IDs, --sandbox, or --all.")
         raise typer.Exit(1)
     parts = (s.strip() for arg in checkpoint_ids or [] for s in arg.split(","))
     ids = [i for i in dict.fromkeys(parts) if i]
-    target = (
-        f"all checkpoints of sandbox {sandbox_id}" if sandbox_id else f"{len(ids)} checkpoint(s)"
-    )
+    client = SandboxClient(APIClient())
+    resolved_team = team_id or client.client.config.team_id
+    if delete_all:
+        scope = f"team {resolved_team}" if resolved_team else "your personal account"
+        filters = "".join(
+            [
+                f" of sandbox {sandbox_id}" if sandbox_id else "",
+                f" in state {', '.join(state)}" if state else "",
+                f" older than {older_than}" if older_than else "",
+            ]
+        )
+        target = f"ALL checkpoints{filters} in {scope}"
+    elif sandbox_id:
+        target = f"all checkpoints of sandbox {sandbox_id}"
+    else:
+        target = f"{len(ids)} checkpoint(s)"
     if not confirm_or_skip(f"Delete {target}?", yes):
         return
-    client = SandboxClient(APIClient())
     deleted: List[str] = []
     errors: List[Dict[str, str]] = []
     try:
-        if sandbox_id:
+        if delete_all:
+            result = client.delete_all_checkpoints(
+                team_id=resolved_team,
+                sandbox_id=sandbox_id,
+                states=[s.upper() for s in state] if state else None,
+                created_before=_older_than(older_than),
+            )
+            deleted = result.deleted
+            errors = [e.model_dump() for e in result.errors]
+        elif sandbox_id:
             result = client.delete_sandbox_checkpoints(sandbox_id)
             deleted = result.deleted
             errors = [e.model_dump() for e in result.errors]
@@ -898,21 +1000,38 @@ def checkpoint_restore(
     checkpoint_id: str,
     name: Optional[str] = typer.Option(None, help="Name for the new sandbox"),
     team_id: Optional[str] = typer.Option(None, help="Team ID (uses config team_id if omitted)"),
-    cpu_cores: float = typer.Option(1.0, help="Number of CPU cores"),
-    memory_gb: float = typer.Option(1.0, help="Memory in GB"),
+    cpu_cores: Optional[float] = typer.Option(
+        None, help="Number of CPU cores [default: 1.0; with --memory, the paused sandbox's]"
+    ),
+    memory_gb: Optional[float] = typer.Option(
+        None, help="Memory in GB [default: 1.0; with --memory, the paused sandbox's]"
+    ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
+    memory: bool = typer.Option(
+        False,
+        "--memory",
+        help=(
+            "Restore a pause checkpoint's memory too, forking the paused sandbox: the new "
+            "sandbox continues from the paused state with its shape, environment and secrets"
+        ),
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Create a new sandbox from a durable filesystem checkpoint."""
+    """Create a new sandbox from a checkpoint's disk, or with --memory fork a paused sandbox."""
     sandbox_name = name or f"restore-{checkpoint_id[:8]}"
     try:
+        shape = {
+            field: value
+            for field, value in (("cpu_cores", cpu_cores), ("memory_gb", memory_gb))
+            if value is not None
+        }
         request = CreateSandboxRequest(
             name=sandbox_name,
             checkpoint_id=checkpoint_id,
+            restore_memory=True if memory else None,
             team_id=team_id,
-            cpu_cores=cpu_cores,
-            memory_gb=memory_gb,
             timeout_minutes=timeout_minutes,
+            **shape,
         )
         if not confirm_or_skip(
             f"Create sandbox {sandbox_name} from checkpoint {checkpoint_id}?", yes, default=True
@@ -1036,6 +1155,28 @@ def create(
             "Mutually exclusive with --network-allow."
         ),
     ),
+    # List[Any] boundary annotation: typer rejects list-of-tuple annotations;
+    # click owns the two-argument arity through click_type.
+    inject_header: Optional[List[Any]] = typer.Option(
+        None,
+        "--inject-header",
+        click_type=click.Tuple([str, str]),
+        help=(
+            "Repeatable. Set an HTTPS request header for egress to a host, e.g. "
+            "--inject-header api.example.com 'Authorization: Bearer "
+            "${prime.secrets.OPENAI_KEY}'. A '*.' host matches exactly one label. "
+            "Secret references resolve on the sandbox's node, never inside the sandbox."
+        ),
+    ),
+    network_policy: Optional[str] = typer.Option(
+        None,
+        "--network-policy",
+        help=(
+            "JSON file with the egress policy: optional 'allow' and 'deny' "
+            "destination lists (exactly one, as with the flags) and 'rules' "
+            "mapping hosts to headers."
+        ),
+    ),
     timeout_minutes: int = typer.Option(60, help="Timeout in minutes"),
     idle_timeout_minutes: Optional[int] = typer.Option(
         None,
@@ -1071,6 +1212,25 @@ def create(
         None,
         "--volume",
         help="Attach a volume as NAME:/mount/path[:ro]. Can be specified multiple times.",
+    ),
+    gang: int = typer.Option(
+        1,
+        "--gang",
+        min=1,
+        max=12,
+        help=(
+            "Create this many identical sandboxes together on one node, all or nothing. "
+            "Gang totals are capped at 48 CPU cores, 48 GB memory, 1000 GB disk, "
+            "and 8 GPUs."
+        ),
+    ),
+    gang_wait: bool = typer.Option(
+        True,
+        "--wait/--no-wait",
+        help=(
+            "With --gang, wait until every sandbox runs. If any fails or the wait "
+            "times out, delete the whole gang, including sandboxes already running."
+        ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
@@ -1176,6 +1336,21 @@ def create(
             )
             raise typer.Exit(1)
 
+        try:
+            network_allow, network_deny, network_rules = _resolve_network_policy_lists(
+                allow=network_allow,
+                deny=network_deny,
+                inject_header=inject_header,
+                network_policy=network_policy,
+                require_destinations=False,
+            )
+        except ValueError as exc:
+            console.print(f"[red]Error:[/red] {escape(str(exc))}")
+            raise typer.Exit(1)
+
+        if network_rules is not None:
+            request_kwargs["network_rules"] = network_rules
+
         resolved_start_command: StartCommand | None
         if command:
             resolved_start_command = StartCommand(
@@ -1226,12 +1401,21 @@ def create(
             console.print(
                 f"Egress Denylist: {', '.join(network_deny) if network_deny else '(allow all)'}"
             )
+        if network_rules:
+            rules_summary = ", ".join(
+                f"{host}: {len(rule.headers)} header(s)"
+                for host, rule in sorted(network_rules.items())
+            )
+            console.print(f"Header Rules: {rules_summary}")
         console.print(f"Timeout: {timeout_minutes} minutes")
         # Only show the idle timeout in the summary when the SDK actually
         # accepted it; otherwise we'd display a value the backend never sees.
         if idle_timeout_minutes is not None and "idle_timeout_minutes" in request_kwargs:
             console.print(f"Idle Timeout: {idle_timeout_minutes} minutes")
-        console.print(f"Team: {team_id or 'Personal'}")
+        # SandboxClient.create auto-populates the request's team from
+        # config (env > file) when the flag is absent; mirror it here.
+        resolved_team_id = team_id or base_client.config.team_id
+        console.print(f"Team: {resolved_team_id or 'Personal'}")
         console.print(f"Region: {region or 'Backend default'}")
         if volume_mounts:
             mounts_summary = ", ".join(
@@ -1246,6 +1430,30 @@ def create(
         if secrets_vars:
             obfuscated_secrets = obfuscate_secrets(secrets_vars)
             console.print(f"Secrets: {obfuscated_secrets}")
+
+        if gang > 1:
+            console.print(f"Gang: {gang} sandboxes on one node")
+            if not confirm_or_skip("\nDo you want to create this gang?", yes, default=True):
+                console.print("\nSandbox creation cancelled")
+                return
+            requests = [request.model_copy(update={"name": f"{name}-{i}"}) for i in range(gang)]
+            with console.status("[bold blue]Creating sandbox gang...", spinner="dots"):
+                sandboxes = sandbox_client.create_gang(requests)
+            console.print(f"\n[green]Created {len(sandboxes)} sandboxes:[/green]")
+            for created in sandboxes:
+                console.print(f"  {created.id}  {created.name}")
+            if not gang_wait:
+                return
+            ids = [created.id for created in sandboxes]
+            try:
+                waiting = "[bold blue]Waiting for the gang to start..."
+                with console.status(waiting, spinner="dots"):
+                    sandbox_client.wait_for_gang(ids)
+            except RuntimeError as e:
+                console.print(f"[red]Gang failed:[/red] {escape(str(e))}")
+                raise typer.Exit(1)
+            console.print("[green]Every sandbox in the gang is running.[/green]")
+            return
 
         if confirm_or_skip("\nDo you want to create this sandbox?", yes, default=True):
             with console.status("[bold blue]Creating sandbox...", spinner="dots"):
@@ -1277,10 +1485,24 @@ def create(
     except APIError as e:
         console.print(f"[red]Error:[/red] {str(e)}")
         raise typer.Exit(1)
+    except ValidationError as e:
+        console.print(f"[red]Error:[/red] {escape(_validation_error_message(e))}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
+
+
+def _validation_error_message(exc: ValidationError) -> str:
+    """Summarize a request validation error without its input values, which
+    can carry --secret values and header templates."""
+    messages = []
+    for error in exc.errors():
+        message = error["msg"].removeprefix("Value error, ")
+        location = ".".join(str(part) for part in error["loc"])
+        messages.append(f"{location}: {message}" if location else message)
+    return "; ".join(messages)
 
 
 def _preview_bulk_delete_count(
@@ -1298,7 +1520,6 @@ def _preview_bulk_delete_count(
     try:
         response = sandbox_client.list(
             per_page=1,
-            page=1,
             team_id=team_id,
             user_id=user_id,
             labels=labels or None,
@@ -1579,7 +1800,7 @@ def delete(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -1592,7 +1813,7 @@ def network(
         help=(
             "Replace the allowed destinations with a comma-separated list of "
             "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
-            "Use '*' to allow all."
+            "Use '*' to allow all. Required together with header rules."
         ),
     ),
     deny: Optional[str] = typer.Option(
@@ -1601,36 +1822,57 @@ def network(
         help=(
             "Replace the denied destinations with a comma-separated list of "
             "domains/IPv4 CIDRs, optionally with :port or :low-high (domains: 80 or 443). "
-            "Use '*' to deny all."
+            "Use '*' to deny all. Required together with header rules."
+        ),
+    ),
+    # List[Any] boundary annotation: typer rejects list-of-tuple annotations;
+    # click owns the two-argument arity through click_type.
+    inject_header: Optional[List[Any]] = typer.Option(
+        None,
+        "--inject-header",
+        click_type=click.Tuple([str, str]),
+        help=(
+            "Repeatable. Set an HTTPS request header for egress to a host, e.g. "
+            "--inject-header api.example.com 'Authorization: Bearer "
+            "${prime.secrets.OPENAI_KEY}'. A '*.' host matches exactly one label. "
+            "Secret references resolve on the sandbox's node, never inside the sandbox."
+        ),
+    ),
+    network_policy: Optional[str] = typer.Option(
+        None,
+        "--network-policy",
+        help=(
+            "JSON file with the complete egress policy: optional 'allow' and "
+            "'deny' destination lists (exactly one) and 'rules' mapping hosts "
+            "to headers."
         ),
     ),
 ) -> None:
     """Show or replace the egress rules of a VM sandbox (default subcommand)."""
-    selections = [allow is not None, deny is not None]
-    if sum(selections) > 1:
-        console.print("[red]Error:[/red] provide at most one of --allow or --deny")
-        raise typer.Exit(1)
-
     try:
+        allow_entries, deny_entries, rules = _resolve_network_policy_lists(
+            allow=_parse_network_destinations(allow, "--allow") if allow is not None else None,
+            deny=_parse_network_destinations(deny, "--deny") if deny is not None else None,
+            inject_header=inject_header,
+            network_policy=network_policy,
+            require_destinations=True,
+        )
+
         base_client = APIClient()
         sandbox_client = SandboxClient(base_client)
 
-        if not any(selections):
+        if allow_entries is None and deny_entries is None:
             with console.status("[bold blue]Fetching network rules...", spinner="dots"):
                 status = sandbox_client.get_network(sandbox_id)
         else:
-            allow_entries = (
-                _parse_network_destinations(allow, "--allow") if allow is not None else None
-            )
-            deny_entries = _parse_network_destinations(deny, "--deny") if deny is not None else None
             with console.status("[bold blue]Updating network rules...", spinner="dots"):
                 status = sandbox_client.set_network(
-                    sandbox_id,
-                    allow=allow_entries,
-                    deny=deny_entries,
+                    sandbox_id, allow=allow_entries, deny=deny_entries, rules=rules
                 )
 
-        _print_network_status(sandbox_id, status, updated=any(selections))
+        _print_network_status(
+            sandbox_id, status, updated=allow_entries is not None or deny_entries is not None
+        )
         if not status.applied:
             console.print(
                 "[yellow]⚠ Network rules were saved but are not active yet. "
@@ -1651,6 +1893,111 @@ def network(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+
+
+def _resolve_network_policy_lists(
+    *,
+    allow: Optional[List[str]],
+    deny: Optional[List[str]],
+    inject_header: Optional[List[Any]],
+    network_policy: Optional[str],
+    require_destinations: bool,
+) -> Tuple[Optional[List[str]], Optional[List[str]], Optional[Dict[str, HeaderRule]]]:
+    """Merge destination flags and --network-policy into one egress policy.
+
+    The policy is always a complete replacement, never a merge: flag and file
+    allow/deny selections conflict instead of combining, and header rules
+    combine only within themselves (file rules plus --inject-header entries).
+    With ``require_destinations`` (the live replace command), header rules must
+    travel with an explicit allow/deny selection.
+    """
+    if allow is not None and deny is not None:
+        raise ValueError("provide at most one of --allow and --deny")
+
+    policy_file: Dict[str, Any] = {}
+    if network_policy is not None:
+        policy_file = _load_network_policy_file(network_policy)
+        if policy_file.get("allow") is not None and policy_file.get("deny") is not None:
+            raise ValueError(f"{network_policy}: provide at most one of allow and deny")
+
+    file_allow = policy_file.get("allow")
+    file_deny = policy_file.get("deny")
+    if allow is not None and file_allow is not None:
+        raise ValueError("provide at most one of --allow and --network-policy allow")
+    if deny is not None and file_deny is not None:
+        raise ValueError("provide at most one of --deny and --network-policy deny")
+    if network_policy is not None and not (
+        file_allow is not None or file_deny is not None or policy_file.get("rules")
+    ):
+        raise ValueError(f"{network_policy}: must contain at least one of allow, deny, rules")
+
+    allow_list = allow if allow is not None else file_allow
+    deny_list = deny if deny is not None else file_deny
+    if allow_list is not None and not isinstance(allow_list, list):
+        raise ValueError(f"{network_policy}: allow must be a list of destinations")
+    if deny_list is not None and not isinstance(deny_list, list):
+        raise ValueError(f"{network_policy}: deny must be a list of destinations")
+
+    rules: Optional[Dict[str, HeaderRule]] = None
+    file_rules = policy_file.get("rules")
+    inject_rules = _parse_header_injections(inject_header or [])
+    if file_rules is not None and not isinstance(file_rules, dict):
+        raise ValueError(f"{network_policy}: rules must map hosts to headers")
+    if file_rules or inject_rules:
+        try:
+            rules = {
+                host: HeaderRule.model_validate(rule) for host, rule in (file_rules or {}).items()
+            }
+        except ValidationError as exc:
+            raise ValueError(f"{network_policy}: {_validation_error_message(exc)}") from None
+        for host, rule in inject_rules.items():
+            if host in rules:
+                raise ValueError(f"--inject-header for {host!r} also set in --network-policy")
+            rules[host] = rule
+    if require_destinations and rules is not None and allow_list is None and deny_list is None:
+        raise ValueError(
+            "the egress replacement is complete: pass --allow or --deny "
+            "(or --network-policy carrying them) alongside the header rules"
+        )
+    return allow_list, deny_list, rules
+
+
+def _parse_header_injections(entries: Optional[List[Any]]) -> Dict[str, HeaderRule]:
+    """Build header substitution rules from repeatable
+    ``--inject-header HOST 'Name: value'`` flags.
+
+    Repeated flags for one host merge their headers; a duplicate header name
+    for the same host is an error rather than a silent override.
+    """
+    rules: Dict[str, HeaderRule] = {}
+    for host, header in entries or []:
+        name, separator, value = header.partition(":")
+        if not separator or not name.strip():
+            raise ValueError(f"--inject-header for {host!r} expects 'Name: value'")
+        rule = rules.setdefault(host, HeaderRule(headers={}))
+        header_name = name.strip()
+        if header_name in rule.headers:
+            raise ValueError(f"--inject-header for {host!r}: header {header_name!r} set twice")
+        rule.headers[header_name] = value.strip()
+    return rules
+
+
+def _load_network_policy_file(path: str) -> Dict[str, Any]:
+    """Load ``--network-policy``: a JSON object with optional ``allow``,
+    ``deny``, and ``rules`` keys, describing the complete egress policy."""
+    file = Path(path)
+    if not file.is_file():
+        raise ValueError(f"--network-policy: no such file: {path}")
+    try:
+        data = json.loads(file.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path}:{exc.lineno}: invalid JSON: {exc.msg}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: the network policy must be a JSON object")
+    unknown = sorted(set(data) - {"allow", "deny", "rules"})
+    if unknown:
+        raise ValueError(f"{path}: unknown network policy keys: {', '.join(unknown)}")
+    return data
 
 
 def _parse_network_destinations(value: str, option: str) -> List[str]:
@@ -1686,6 +2033,12 @@ def _print_network_status(
 
     label, value = _network_policy_summary(status)
     console.print(f"  [cyan]{label}:[/cyan] {escape(value)}")
+    rules = getattr(status.policy, "rules", None)
+    if rules:
+        summary = ", ".join(
+            f"{host}: {len(rule.headers)} header(s)" for host, rule in sorted(rules.items())
+        )
+        console.print(f"  [cyan]Header rules:[/cyan] {escape(summary)}")
 
 
 def _request_pause_or_resume(sandbox_id: str, resume: bool) -> None:
@@ -1702,6 +2055,12 @@ def _request_pause_or_resume(sandbox_id: str, resume: bool) -> None:
         f"(status {escape(sandbox.status)}); it becomes {target} once the node finishes. "
         f"Check with 'prime sandbox get {escape(sandbox_id)}'."
     )
+    checkpoint_id = getattr(sandbox, "checkpoint_id", None)
+    if not resume and checkpoint_id:
+        console.print(
+            f"Pause checkpoint: [cyan]{escape(checkpoint_id)}[/cyan]. Fork it with "
+            f"'prime sandbox checkpoint restore {escape(checkpoint_id)} --memory'."
+        )
 
 
 @app.command(no_args_is_help=True)
@@ -1745,7 +2104,7 @@ def logs(sandbox_id: str) -> None:
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -1876,7 +2235,7 @@ def run(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -1934,7 +2293,7 @@ def upload_file(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 
@@ -1995,7 +2354,7 @@ def download_file(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        console.print_exception(show_locals=True)
+        console.print_exception(show_locals=False)
         raise typer.Exit(1)
 
 

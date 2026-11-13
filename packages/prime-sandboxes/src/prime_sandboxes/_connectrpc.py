@@ -1,5 +1,6 @@
 """Connect RPC runtime compatibility for the SDK's Google protobuf messages."""
 
+import asyncio
 from importlib.metadata import PackageNotFoundError, version
 
 
@@ -22,9 +23,28 @@ def _reject_legacy_connect_python(legacy_version: str | None) -> None:
 
 _reject_legacy_connect_python(_legacy_connect_python_version())
 
+from connectrpc.code import Code  # noqa: E402
 from connectrpc.compat import google_protobuf_binary_codec  # noqa: E402
+from connectrpc.errors import ConnectError  # noqa: E402
 
 GOOGLE_PROTOBUF_BINARY_CODEC = google_protobuf_binary_codec()
+
+
+def raise_if_cancelled(error: BaseException) -> None:
+    """Re-raise the CancelledError connectrpc wrapped as ConnectError(CANCELED).
+
+    connectrpc's async client converts a cancelled awaiting task into
+    ConnectError(CANCELED) with the CancelledError as __cause__. Treating that
+    as an RPC failure lets retry loops swallow the cancellation. A CANCELED the
+    server sent has no such cause and stays an error.
+    """
+    if (
+        isinstance(error, ConnectError)
+        and error.code == Code.CANCELED
+        and isinstance(error.__cause__, asyncio.CancelledError)
+    ):
+        raise error.__cause__
+
 
 # Response-body read faults raised inside pyqwest's Rust core (string set
 # verified against the installed pyqwest 0.8.0 extension binary). They reach

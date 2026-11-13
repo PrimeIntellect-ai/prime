@@ -22,7 +22,12 @@ class _CommandSpecFactory(Protocol):
 
 class _CommandSessionStartRequestFactory(Protocol):
     def __call__(
-        self, *, command: _CommandSpecLike, stdin: bool, session_uuid: str | None = None
+        self,
+        *,
+        command: _CommandSpecLike,
+        stdin: bool,
+        session_uuid: str | None = None,
+        after_sequence: int | None = None,
     ) -> Message: ...
 
 
@@ -43,7 +48,7 @@ class _CommandSessionSendSignalRequestFactory(Protocol):
 
 
 class _CommandSessionConnectRequestFactory(Protocol):
-    def __call__(self, *, session: Message) -> Message: ...
+    def __call__(self, *, session: Message, after_sequence: int | None = None) -> Message: ...
 
 
 class _CommandSessionInfoLike(Protocol):
@@ -57,6 +62,7 @@ class _CommandSessionListResponseLike(Protocol):
 
 
 class _CommandSessionDataEventLike(Protocol):
+    sequence: int
     stdout: bytes
     stderr: bytes
     pty: bytes
@@ -66,6 +72,7 @@ class _CommandSessionDataEventLike(Protocol):
 
 class _CommandSessionEndEventLike(Protocol):
     exit_code: int
+    output_sequence: int
 
 
 class _CommandSessionEventLike(Protocol):
@@ -78,6 +85,7 @@ class _CommandSessionEventLike(Protocol):
 
 class _CommandSessionStartEventLike(Protocol):
     pid: int
+    output_replay: bool
 
 
 class _CommandSessionStartResponseLike(Protocol):
@@ -193,7 +201,15 @@ COMMAND_SESSION_LIST_RPC_METHOD = MethodInfo(
 # FAILED_PRECONDITION (a Start reusing the session_uuid with a different spec —
 # a guard for a future non-identical retry; today's reconnect resends the
 # identical request, so the server cannot answer it with a spec conflict).
-_STREAM_FATAL_CODES = frozenset({Code.NOT_FOUND, Code.FAILED_PRECONDITION})
+_STREAM_FATAL_CODES = frozenset(
+    {
+        Code.NOT_FOUND,
+        Code.FAILED_PRECONDITION,
+        Code.OUT_OF_RANGE,
+        Code.INVALID_ARGUMENT,
+        Code.DATA_LOSS,
+    }
+)
 
 # Link faults a unary control RPC may retry; pyqwest body-read faults surface
 # as ConnectError INTERNAL and are matched by message marker instead.
@@ -222,6 +238,7 @@ def build_command_session_start_request(
     env: Optional[Dict[str, str]],
     stdin: bool = False,
     session_uuid: str | None = None,
+    after_sequence: int | None = None,
     user: str | None = None,
 ) -> Message:
     command_spec = _COMMAND_SPEC_FACTORY(
@@ -241,6 +258,7 @@ def build_command_session_start_request(
         command=command_spec,
         stdin=stdin,
         session_uuid=session_uuid,
+        after_sequence=after_sequence,
     )
 
 
@@ -248,9 +266,12 @@ def build_command_session_list_request() -> Message:
     return _COMMAND_SESSION_LIST_REQUEST_TYPE()
 
 
-def build_command_session_connect_request(*, session_uuid: str) -> Message:
+def build_command_session_connect_request(
+    *, session_uuid: str, after_sequence: int | None = None
+) -> Message:
     return _COMMAND_SESSION_CONNECT_REQUEST_FACTORY(
-        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid)
+        session=_COMMAND_SESSION_SELECTOR_FACTORY(session_uuid=session_uuid),
+        after_sequence=after_sequence,
     )
 
 

@@ -2,6 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 from prime_cli.commands import env
+from prime_cli.utils.unmet_requirements import unmet_requirements
 from typer.testing import CliRunner
 
 INDEX_URL = "https://hub.primeintellect.ai/primeintellect/simple/"
@@ -137,3 +138,101 @@ def test_info_displays_scoped_install_index(monkeypatch):
     output = "".join(result.output.split())
     assert SCOPED_INDEX_URL in output
     assert INDEX_URL not in output
+
+
+def _hub_client(monkeypatch):
+    client = Mock()
+    client.get.return_value = {
+        "data": {"simple_index_url": INDEX_URL, "url_dependencies": [], "visibility": "PUBLIC"}
+    }
+    monkeypatch.setattr(env, "APIClient", lambda **kwargs: client)
+    monkeypatch.setattr(env.shutil, "which", lambda tool: f"/bin/{tool}")
+    return client
+
+
+@pytest.mark.parametrize(
+    ("slug", "installed", "installs"),
+    [
+        ("primeintellect/deep-swe", True, False),
+        ("primeintellect/deep-swe", False, True),
+        ("primeintellect/deep-swe@0.1.0", True, True),
+    ],
+)
+def test_target_keeps_an_installed_environment_unless_pinned(
+    monkeypatch, tmp_path, slug, installed, installs
+):
+    _hub_client(monkeypatch)
+    monkeypatch.setattr(env, "_workspace_has_package", lambda package: installed)
+    execute, fill = Mock(), Mock()
+    monkeypatch.setattr(env, "execute_install_command", execute)
+    monkeypatch.setattr(env, "_install_missing_requirements", fill)
+
+    result = CliRunner().invoke(env.app, ["install", slug, "--target", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert execute.called is installs
+    if installs:
+        command = execute.call_args.args[0]
+        assert command[-3:] == ["--target", str(tmp_path), "--no-deps"]
+        fill.assert_called_once_with(tmp_path)
+
+
+def test_a_failed_install_exits_non_zero(monkeypatch):
+    _hub_client(monkeypatch)
+    monkeypatch.setattr(env, "execute_install_command", Mock(side_effect=Exception("boom")))
+
+    result = CliRunner().invoke(env.app, ["install", "primeintellect/deep-swe"])
+
+    assert result.exit_code == 1, result.output
+
+
+def _distribution(target, name, *requires):
+    dist = target / f"{name}-1.0.dist-info"
+    dist.mkdir()
+    lines = "".join(f"Requires-Dist: {line}\n" for line in requires)
+    (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n{lines}")
+
+
+def test_unmet_requirements_are_the_ones_the_interpreter_lacks(monkeypatch, tmp_path):
+    _distribution(
+        tmp_path,
+        "probe",
+        "pytest>=1",
+        "absent-package==1.0",
+        'other-absent; extra == "dev"',
+        "helper[fast]",
+    )
+    _distribution(
+        tmp_path, "helper", 'fast-absent; extra == "fast"', 'slow-absent; extra == "slow"'
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    assert unmet_requirements(str(tmp_path)) == ["absent-package==1.0", "fast-absent"]
+
+
+def test_missing_requirements_install_layer_by_layer_without_dependencies(monkeypatch, tmp_path):
+    marked = 'absent>=1; python_version >= "3.10"'
+    monkeypatch.setattr(env, "_unmet_requirements", Mock(side_effect=[[marked], ["leaf"], []]))
+    execute = Mock()
+    monkeypatch.setattr(env, "execute_install_command", execute)
+
+    env._install_missing_requirements(tmp_path)
+
+    assert [call.args[0][-1] for call in execute.call_args_list] == [marked, "leaf"]
+    assert all("--no-deps" in call.args[0] for call in execute.call_args_list)
+
+
+def test_a_requirement_still_unmet_after_installing_it_is_a_conflict(monkeypatch, tmp_path):
+    monkeypatch.setattr(env, "_unmet_requirements", Mock(return_value=["numpy<2"]))
+    monkeypatch.setattr(env, "execute_install_command", Mock())
+
+    with pytest.raises(RuntimeError, match="numpy<2"):
+        env._install_missing_requirements(tmp_path)
+
+
+def test_target_fails_on_an_invalid_id(monkeypatch, tmp_path):
+    _hub_client(monkeypatch)
+
+    result = CliRunner().invoke(env.app, ["install", "owner/", "--target", str(tmp_path)])
+
+    assert result.exit_code == 1, result.output

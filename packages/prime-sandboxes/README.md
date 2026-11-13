@@ -319,6 +319,29 @@ daemons; an interruption fails explicitly when the server cannot replay output.
 Regenerate the Python protocol bindings from the platform checkout with
 `bash packages/prime-sandboxes/tools/generate-command-session.sh /path/to/platform`.
 
+### Reattach a Live Process
+
+A live process keeps running when its handle goes away: the client that started it
+can exit, and the sandbox can be paused and resumed. Another client attaches to it
+by its `session_uuid`:
+
+```python
+process = await client.open_process(sandbox.id, "python3 -u worker.py")
+session = process.session_uuid  # store it somewhere the next client can read
+await process.detach()  # release the stream; unlike aclose(), it sends no signal
+
+# Later, from any client:
+process = await client.attach_process(sandbox.id, session)
+await process.write_stdin(b"next\n")
+```
+
+A sandbox created from a memory checkpoint continues the processes of the sandbox
+that was paused. Attach to one with the new sandbox's id and the same `session_uuid`.
+
+With output replay, the attached handle gets the output that sandboxd retains from
+the start of the process. An older sandboxd sends only the output from the attach on.
+A process that exited within sandboxd's retention window reports its exit code.
+
 ### File Operations
 
 ```python

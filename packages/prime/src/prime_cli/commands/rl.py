@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+import shlex
 import time
 from contextlib import nullcontext
 from decimal import Decimal
@@ -1016,6 +1017,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
 
     return {
         "id": run.id,
+        "name": run.name or "-",
         "status": run.status,
         "model": run.base_model or "-",
         "environments": envs_display,
@@ -1608,6 +1610,87 @@ def request_models() -> None:
     console.print("[green]Request submitted. Thanks![/green]")
 
 
+def _list_scope_line(
+    team_flag: Optional[str], team_id: Optional[str], config: Config, mine: bool
+) -> str:
+    """One line naming the scope the listing actually covers.
+
+    `prime train list` and the Model Factory table on the console look
+    like the same question but scope on different axes: this listing is
+    the TEAM's run history across every cluster and every status, while
+    the console table is every running/queued workload on the team's
+    HARDWARE (other teams' runs on that cluster included). Without the
+    scope spelled out, a run visible on one and not the other reads as
+    data loss rather than a different query.
+
+    The team label is caller-controlled (a `--team` value or the stored
+    team name), and the footer prints into a markup-enabled string, so
+    it is escaped here rather than at each call site.
+    """
+    if not team_id:
+        scope = "your personal runs + your teams"
+    elif team_flag:
+        scope = f"team {rich_escape(team_flag)}"
+    elif config.team_id_from_env:
+        scope = f"team {rich_escape(team_id)} (from PRIME_TEAM_ID)"
+    else:
+        scope = f"team {rich_escape(config.team_name or team_id)}"
+    return " · ".join([scope, "yours only" if mine else "all members", "all clusters"])
+
+
+def _print_list_footer(
+    team_flag: Optional[str],
+    team_id: Optional[str],
+    config: Config,
+    mine: bool,
+    page: int,
+    num: int,
+    total_count: int,
+    server_limit: Optional[int] = None,
+    server_total_pages: Optional[int] = None,
+) -> None:
+    """Scope, position and the pointer to the live cluster view.
+
+    Printed for empty listings too - a scopeless "No Hosted Training
+    runs found" is the case the scope line exists to explain.
+
+    Page arithmetic prefers the server's own `limit`/`total_pages` over
+    the requested `--num`: the response is authoritative about how it
+    was actually paginated, so a backend that serves a different page
+    size can never leave the footer claiming a last page that isn't.
+    The local calculation remains for the legacy un-paginated backend,
+    which sends no metadata to honor.
+    """
+    console.print(f"\n[dim]Scope: {_list_scope_line(team_flag, team_id, config, mine)}[/dim]")
+    if total_count:
+        per_page = server_limit or num
+        total_pages = (
+            server_total_pages if server_total_pages else max(1, -(-total_count // per_page))
+        )
+        if total_count > page * per_page:
+            console.print(
+                f"[yellow]Page {page}/{total_pages} of {total_count} run(s). "
+                f"Use --page {page + 1} to see more.[/yellow]"
+            )
+        else:
+            console.print(f"[dim]Page {page}/{total_pages} of {total_count} run(s).[/dim]")
+    # The listing is newest-first, so a long-running job drops off page
+    # 1 as soon as newer runs are submitted - the common reason a run
+    # visible on the console appears "missing" here.
+    #
+    # `factory workloads` resolves its own team as `--team or
+    # Config().team_id`, so an unqualified hint after `list --team X`
+    # would point at the configured team instead - recreating the very
+    # scope mismatch this footer exists to explain. Carry the override.
+    hint = "prime factory workloads"
+    if team_flag:
+        hint += f" --team {shlex.quote(team_flag)}"
+    console.print(
+        "[dim]Live cluster workloads (all teams, running/queued): "
+        f"[bold]{rich_escape(hint)}[/bold][/dim]"
+    )
+
+
 def _list_runs_impl(
     team: Optional[str], num: int, page: int, output: str, mine: bool = False
 ) -> None:
@@ -1670,10 +1753,28 @@ def _list_runs_impl(
                 console.print("[yellow]No more results.[/yellow]")
             else:
                 console.print("[yellow]No Hosted Training runs found.[/yellow]")
+            # An empty listing is exactly when the scope matters most:
+            # "no runs" under a stale PRIME_TEAM_ID looks identical to
+            # "no runs" at all. Print the footer here too.
+            _print_list_footer(
+                team,
+                team_id,
+                config,
+                mine,
+                page,
+                num,
+                total_count,
+                server_limit=run_page.limit,
+                server_total_pages=run_page.total_pages,
+            )
             return
 
         table = Table(title="Hosted Training Runs")
         table.add_column("ID", style="cyan", no_wrap=True)
+        # The console labels a run by its name and falls back to
+        # `dedicated-<id>`; without the name here there is no column the
+        # two views share to line a row up by.
+        table.add_column("Name")
         table.add_column("Status", style="bold")
         table.add_column("Model", style="magenta")
         table.add_column("Environments", style="green")
@@ -1686,6 +1787,10 @@ def _list_runs_impl(
             status_color = _get_status_color(run.status)
             table.add_row(
                 formatted["id"],
+                # A user-chosen name reaches Rich as markup unless it is
+                # escaped: an unmatched "[/bold]" raises MarkupError and
+                # one run would break the listing for the whole team.
+                rich_escape(formatted["name"][:30]),
                 f"[{status_color}]{formatted['status']}[/{status_color}]",
                 formatted["model"][:30],
                 formatted["environments"],
@@ -1695,14 +1800,17 @@ def _list_runs_impl(
             )
 
         console.print(table)
-
-        if total_count > page * num:
-            console.print(
-                f"\n[yellow]Showing page {page} of results. "
-                f"Use --page {page + 1} to see more.[/yellow]"
-            )
-        else:
-            console.print(f"\n[dim]Total: {total_count} run(s)[/dim]")
+        _print_list_footer(
+            team,
+            team_id,
+            config,
+            mine,
+            page,
+            num,
+            total_count,
+            server_limit=run_page.limit,
+            server_total_pages=run_page.total_pages,
+        )
 
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -1760,6 +1868,8 @@ def get_run(
         status_color = _get_status_color(run.status)
 
         console.print(f"[bold]Run {run_id}[/bold]\n")
+        if run.name:
+            console.print(f"  Name: {rich_escape(run.name)}")
         status_text = run.status
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"

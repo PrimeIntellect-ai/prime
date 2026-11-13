@@ -14,7 +14,8 @@ from prime_sandboxes.sandbox import AsyncSandboxClient
 
 
 class _FakeConnectClient:
-    """Start streams a pid and output then idles; Connect replays the session's end."""
+    """Start streams a pid and output then idles; Connect replays the session's output
+    and end, as a sandboxd with output replay does."""
 
     calls: list[tuple[str, Any]] = []
 
@@ -31,9 +32,9 @@ class _FakeConnectClient:
                 yield _start_event(42)
                 yield _stdout_event(b"started\n")
                 await asyncio.Event().wait()
-            yield _start_event(42, pb.ConnectResponse)
-            yield _stdout_event(b"attached\n", pb.ConnectResponse)
-            yield _end_event(3, pb.ConnectResponse)
+            yield _start_event(42, pb.ConnectResponse, output_replay=True)
+            yield _stdout_event(b"attached\n", pb.ConnectResponse, sequence=1)
+            yield _end_event(3, pb.ConnectResponse, output_sequence=1)
 
         return events()
 

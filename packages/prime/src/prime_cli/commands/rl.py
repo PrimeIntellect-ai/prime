@@ -555,10 +555,18 @@ def _schema_input(config: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in config.items() if k != "name"}
 
 
-def _supports_local_validation(mode: Optional[str], config: Dict[str, Any]) -> bool:
+def _compiles_online_eval(
+    mode: Optional[str], config: Dict[str, Any], preparation: Dict[str, Any]
+) -> bool:
+    """Whether Platform deploys this config's online evals from the locally
+    compiled artifact. A supervised run's [eval], [inference] and
+    [weight_broadcast] need a Platform that runs them from components; older
+    ones validate those blocks themselves on submission."""
     from ..utils.training_compiler import SFT_ONLINE_EVAL_KEYS
 
-    return mode != "sft" or not SFT_ONLINE_EVAL_KEYS & config.keys()
+    if mode in (None, "rl") or not SFT_ONLINE_EVAL_KEYS & config.keys():
+        return True
+    return preparation.get("supervised_online_eval_supported") is True
 
 
 def _dispatch_dedicated_run(
@@ -711,16 +719,19 @@ def _dispatch_dedicated_run(
                 selection["sourceRef"] = resolved_source_ref
             preparation = None
             unavailable: Optional[Exception] = None
-            if _supports_local_validation(mode, config_payload):
-                try:
-                    preparation = client.prepare_local_validation(selection)
-                # A Platform without /prepare answers 405: the path matches
-                # DELETE /training/runs/{run_id}.
-                except (NotFoundError, MethodNotAllowedError):
-                    pass
-                except (ServerError, APITimeoutError) as exc:
-                    unavailable = exc
-            if preparation is not None and preparation.get("submission_supported") is True:
+            try:
+                preparation = client.prepare_local_validation(selection)
+            # A Platform without /prepare answers 405: the path matches
+            # DELETE /training/runs/{run_id}.
+            except (NotFoundError, MethodNotAllowedError):
+                pass
+            except (ServerError, APITimeoutError) as exc:
+                unavailable = exc
+            if (
+                preparation is not None
+                and preparation.get("submission_supported") is True
+                and _compiles_online_eval(mode, config_payload, preparation)
+            ):
                 if preparation.get("mode") != selection["mode"]:
                     raise CompilationError("Preparation returned a different training mode.")
                 try:
@@ -1159,7 +1170,7 @@ def validate_training_config(
             console.print(
                 "Environment plugins and deployment policy remain deferred; no run submitted."
             )
-            if not _supports_local_validation(mode, config):
+            if not _compiles_online_eval(mode, config, preparation):
                 console.print(
                     rich_escape(
                         "Online eval ([eval], [inference], [weight_broadcast]) is validated by "

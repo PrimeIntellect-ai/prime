@@ -88,6 +88,22 @@ class Secret:
         return f"${{prime.secrets.{name}}}"
 
 
+class PlatformSecret(BaseModel):
+    """A platform secret, owned by exactly one of user/team scope.
+
+    Metadata only: the API never returns a secret's value.
+    """
+
+    id: str
+    name: str
+    description: Optional[str] = None
+    is_file: Optional[bool] = Field(None, alias="isFile")
+    user_id: Optional[str] = Field(None, alias="userId")
+    team_id: Optional[str] = Field(None, alias="teamId")
+    created_at: Optional[datetime] = Field(None, alias="createdAt")
+    updated_at: Optional[datetime] = Field(None, alias="updatedAt")
+
+
 def _validate_egress_entry(entry: str) -> None:
     """Client-side mirror of the API's egress entry contract.
 

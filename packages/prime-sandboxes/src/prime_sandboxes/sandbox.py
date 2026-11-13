@@ -111,6 +111,7 @@ from .rpc_command_session import (
     collect_command_session_start_event,
     is_transient_control_fault,
 )
+from .secrets import AsyncSecrets, Secrets
 from .volumes import AsyncVolumes, Volumes
 
 # Connection-level errors: request never reached the server, so retry is safe
@@ -2395,6 +2396,7 @@ class SandboxClient:
         self._sandbox_status_batch_supported: Optional[bool] = None
         self._background_job_status_batch_supported: Optional[bool] = None
         self.volumes = Volumes(self)
+        self.secrets = Secrets(self)
 
     @staticmethod
     @_gateway_post_retry
@@ -4240,6 +4242,7 @@ class AsyncSandboxClient:
         self._background_job_status_batch_supported: Optional[bool] = None
         self._close_task: Optional[asyncio.Task[None]] = None
         self.volumes = AsyncVolumes(self)
+        self.secrets = AsyncSecrets(self)
 
     def _get_gateway_client(self) -> httpx.AsyncClient:
         """Get or create the shared gateway client for connection pooling

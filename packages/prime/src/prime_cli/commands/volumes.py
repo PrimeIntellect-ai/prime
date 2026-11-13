@@ -143,15 +143,16 @@ def list_volumes(
     """
     validate_output_format(output, console)
     client, team_id = _client()
-    user_id = Config().user_id if only_mine and team_id else None
-    if only_mine and team_id and not user_id:
-        console.print(
-            "[red]Error:[/red] Cannot filter by user - no user_id configured. "
-            "Run [bold]prime whoami[/bold] to refresh your config, "
-            "or pass --all-users to list the whole team's volumes."
-        )
-        raise typer.Exit(1)
     try:
+        user_id = None
+        if only_mine and team_id:
+            # Resolve the caller with the same credentials as the volume request;
+            # a cached user_id may belong to a different key or account context.
+            identity = client.client.get("/user/whoami")
+            data = identity.get("data")
+            user_id = data.get("id") if isinstance(data, dict) else None
+            if not isinstance(user_id, str) or not user_id.strip():
+                raise APIError("Cannot determine the authenticated user from the API response.")
         volumes = client.list_volumes(team_id=team_id)
         # Omitting teamId would list only personal volumes, hiding the ones
         # you created for your team. The API has no creator filter, so keep

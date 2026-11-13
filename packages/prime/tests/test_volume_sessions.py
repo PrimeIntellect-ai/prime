@@ -5,12 +5,14 @@ Hermetic: a fake HostedTrainingClient; no network.
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from prime_cli.api.training import HostedTrainingClient, Volume, VolumeSession
 from prime_cli.commands import volumes
-from prime_cli.core import APIError
+from prime_cli.core import APIClient, APIError, Config
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
 from typer.testing import CliRunner
@@ -55,8 +57,10 @@ def _session(**over) -> VolumeSession:
 
 def _client(monkeypatch, **methods):
     """Install a fake client; `methods` are the client calls to expose."""
-    monkeypatch.setattr(volumes, "_client", lambda: (SimpleNamespace(**methods), "team1"))
-    monkeypatch.setattr(volumes, "Config", lambda: SimpleNamespace(user_id="user_123"))
+    api = SimpleNamespace(get=lambda path: {"data": {"id": "user_123"}})
+    client = SimpleNamespace(client=api, **methods)
+    monkeypatch.setattr(volumes, "_client", lambda: (client, "team1"))
+    return client
 
 
 def test_client_sessions_wire_contract():
@@ -400,8 +404,8 @@ def test_volumes_list_all_users_includes_teammates_without_identity(monkeypatch,
         calls.append(kwargs)
         return [_volume(), _volume(name="teammate-volume", createdBy="someone_else")]
 
-    _client(monkeypatch, list_volumes=list_volumes)
-    monkeypatch.setattr(volumes, "Config", lambda: SimpleNamespace(user_id=None))
+    client = _client(monkeypatch, list_volumes=list_volumes)
+    client.client.get = lambda *a, **kw: pytest.fail("--all-users must not fetch user identity")
     result = _run("list", "--all-users", *args)
     assert result.exit_code == 0, _text(result)
     assert calls == [{"team_id": "team1"}]
@@ -409,14 +413,30 @@ def test_volumes_list_all_users_includes_teammates_without_identity(monkeypatch,
     assert "teammate-volume" in _text(result)
 
 
-def test_volumes_list_without_identity_never_falls_back_to_team_listing(monkeypatch):
+@pytest.mark.parametrize(
+    "identity", [{}, {"data": None}, {"data": {}}, {"data": {"id": 3}}, {"data": {"id": " "}}]
+)
+def test_volumes_list_without_identity_never_falls_back_to_team_listing(monkeypatch, identity):
     calls = []
-    _client(monkeypatch, list_volumes=lambda **kw: calls.append(kw) or [_volume()])
-    monkeypatch.setattr(volumes, "Config", lambda: SimpleNamespace(user_id=None))
+    client = _client(monkeypatch, list_volumes=lambda **kw: calls.append(kw) or [_volume()])
+    client.client.get = lambda path: identity
     result = _run("list")
     assert result.exit_code == 1
-    assert "prime whoami" in _text(result)
-    assert "--all-users" in _text(result)
+    assert "Cannot determine the authenticated user" in _text(result)
+    assert calls == []
+
+
+def test_volumes_list_identity_api_error_exits_without_listing(monkeypatch):
+    calls = []
+    client = _client(monkeypatch, list_volumes=lambda **kw: calls.append(kw) or [_volume()])
+
+    def fail(path):
+        raise APIError("Identity lookup failed")
+
+    client.client.get = fail
+    result = _run("list")
+    assert result.exit_code == 1
+    assert "Identity lookup failed" in _text(result)
     assert calls == []
 
 
@@ -431,7 +451,6 @@ def test_volumes_list_personal_context_relies_on_api_user_scope(monkeypatch):
     monkeypatch.setattr(
         volumes, "_client", lambda: (SimpleNamespace(list_volumes=list_volumes), None)
     )
-    monkeypatch.setattr(volumes, "Config", lambda: SimpleNamespace(user_id=None))
     result = _run("list", "-o", "json")
     assert result.exit_code == 0, _text(result)
     assert calls == [{"team_id": None}]
@@ -446,3 +465,71 @@ def test_volumes_list_empty_after_creator_filter(monkeypatch):
     result = _run("list", "-o", "json")
     assert result.exit_code == 0, _text(result)
     assert json.loads(_text(result)) == []
+
+
+@pytest.mark.parametrize(
+    "cached_user_id, key_override, context",
+    [
+        ("stale-user", None, False),
+        ("stale-user", "override-key", False),
+        (None, "override-key", False),
+        (None, None, True),
+        ("stale-user", "override-key", True),
+    ],
+)
+def test_volumes_list_uses_authenticated_identity_without_changing_config(
+    monkeypatch, tmp_path, cached_user_id, key_override, context
+):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for name in ("PRIME_CONTEXT", "PRIME_API_KEY", "PRIME_TEAM_ID", "PRIME_USER_ID"):
+        monkeypatch.delenv(name, raising=False)
+    config = Config()
+    config.set_api_key("saved-key")
+    config.set_team("team1")
+    config.set_user_id(cached_user_id)
+    if context:
+        config.save_environment("volume-test")
+    before = {path: path.read_bytes() for path in config.config_dir.rglob("*.json")}
+    if key_override:
+        monkeypatch.setenv("PRIME_API_KEY", key_override)
+    if cached_user_id:
+        # An explicit user-id override must not change which token owner is "mine".
+        monkeypatch.setenv("PRIME_USER_ID", "stale-user")
+    expected_key = key_override or "saved-key"
+    requests = []
+
+    def respond(request):
+        requests.append(
+            (request.url.path, request.headers["authorization"], dict(request.url.params))
+        )
+        if request.url.path == "/api/v1/user/whoami":
+            return httpx.Response(200, json={"data": {"id": "token-owner"}})
+        assert request.url.path == "/api/v1/training/volumes"
+        return httpx.Response(
+            200,
+            json={
+                "volumes": [
+                    _volume(name="token-owned", createdBy="token-owner").model_dump(by_alias=True),
+                    _volume(name="stale-owned", createdBy="stale-user").model_dump(by_alias=True),
+                ]
+            },
+        )
+
+    real_init = APIClient.__init__
+
+    def mock_transport(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        headers = self.client.headers
+        self.client.close()
+        self.client = httpx.Client(headers=headers, transport=httpx.MockTransport(respond))
+
+    monkeypatch.setattr(APIClient, "__init__", mock_transport)
+    args = ["-c", "volume-test"] if context else []
+    result = CliRunner().invoke(app, [*args, "volumes", "list", "-o", "json"], env=ENV)
+    assert result.exit_code == 0, _text(result)
+    assert [v["name"] for v in json.loads(_text(result))] == ["token-owned"]
+    assert requests == [
+        ("/api/v1/user/whoami", f"Bearer {expected_key}", {}),
+        ("/api/v1/training/volumes", f"Bearer {expected_key}", {"teamId": "team1"}),
+    ]
+    assert {path: path.read_bytes() for path in config.config_dir.rglob("*.json")} == before

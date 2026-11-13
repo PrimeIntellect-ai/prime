@@ -6,7 +6,6 @@ import functools
 import json
 import math
 import os
-import random
 import re
 import shlex
 import sys
@@ -54,6 +53,12 @@ from tenacity import (
 )
 
 from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC, raise_if_cancelled
+from ._polling import (
+    CHECKPOINT_POLL_FAST_DELAY,
+    CHECKPOINT_POLL_FAST_WINDOW,
+    _creation_poll_delay,
+    _jittered_poll_delay,
+)
 from .core import APIClient, APIError, AsyncAPIClient
 from .core.client import _RateLimitAwareWait
 from .exceptions import (
@@ -547,20 +552,6 @@ STATUS_BATCH_WINDOW_SECONDS = 0.025
 BACKGROUND_JOB_POLL_MAX_DELAY = 20.0
 BACKGROUND_JOB_POLL_BACKOFF_FACTOR = 1.5
 
-# Creation status-poll pacing. Sandbox creation is polled with exponential
-# backoff plus jitter rather than at a fixed interval
-CREATION_POLL_INITIAL_DELAY = 1.0
-CREATION_POLL_MAX_DELAY = 10.0
-CREATION_POLL_BACKOFF_FACTOR = 1.5
-# Fraction of the computed delay applied as +/- jitter.
-CREATION_POLL_JITTER = 0.25
-
-# Checkpoint-wait pacing. Checkpoint uploads and volume merges are short
-# server phases (a small merge runs ~4s end to end), so waiting clients poll
-# at a fixed fast cadence for the first seconds of a phase and only then fall
-# back to the creation backoff law.
-CHECKPOINT_POLL_FAST_DELAY = 1.0
-CHECKPOINT_POLL_FAST_WINDOW = 10.0
 # Legacy fixed schedule (1s for the first 5 polls, then 2s) that `max_attempts`
 # used to describe. Retained only to derive the same wall-clock budget.
 _LEGACY_FAST_POLLS = 5
@@ -1633,21 +1624,6 @@ class _AsyncBackgroundJobOutputCoordinator:
             if not self._close_task.cancelled():
                 self._close_task.exception()
             raise
-
-
-def _jittered_poll_delay(delay: float) -> float:
-    """Apply the poll jitter law to a base delay."""
-    jitter = delay * CREATION_POLL_JITTER
-    return max(0.0, delay + random.uniform(-jitter, jitter))
-
-
-def _creation_poll_delay(poll_index: int) -> float:
-    """Jittered exponential backoff delay for the Nth creation status poll."""
-    delay = min(
-        CREATION_POLL_INITIAL_DELAY * (CREATION_POLL_BACKOFF_FACTOR**poll_index),
-        CREATION_POLL_MAX_DELAY,
-    )
-    return _jittered_poll_delay(delay)
 
 
 def _creation_timeout_seconds(max_attempts: int) -> float:

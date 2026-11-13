@@ -21,6 +21,7 @@ from prime_sandboxes import (
     UnauthorizedError,
     Volume,
     VolumeMount,
+    VolumeSyncFailedError,
 )
 from rich.markup import escape
 
@@ -622,3 +623,79 @@ def _print_publish_result(checkpoint, name: str) -> None:
             "contents do not include this data until it is. Check with "
             f"'prime sandbox checkpoint get {escape(checkpoint.id)}'."
         )
+
+
+@app.command()
+def sync(
+    name: str = typer.Argument(..., help="Volume name to sync"),
+    sandbox_id: str = typer.Option(
+        ..., "--sandbox", help="ID of the sandbox whose volume attachment is synced"
+    ),
+    discard: bool = typer.Option(
+        False,
+        "--discard",
+        help="Drop this sandbox's unpublished volume writes instead of publishing them",
+    ),
+    no_wait: bool = typer.Option(
+        False, "--no-wait", help="Do not wait for the sync to finish"
+    ),
+) -> None:
+    """Sync a sandbox's attached volume to the volume's committed head."""
+    try:
+        result = _sandbox_client().volumes.sync(
+            sandbox_id, name, discard=discard, wait=not no_wait
+        )
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        # 404 not attached, 409 not RUNNING or merges disabled, 400 not VM.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except TimeoutError as e:
+        # The SDK wait budget expired; the sync may still finish.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        console.print(
+            "The sync may still complete. Re-run this command to wait for it."
+        )
+        raise typer.Exit(1)
+    except VolumeSyncFailedError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+
+    # The wait mode returns only DONE (a FAILED sync raised above), but
+    # --no-wait can receive a terminal state in the POST response itself.
+    if result.state == "FAILED":
+        console.print(
+            "[red]Error:[/red] volume sync failed (state FAILED); "
+            "see the sandbox's volume sync logs"
+        )
+        raise typer.Exit(1)
+    if result.state == "DONE":
+        console.print(
+            f"[green]✓[/green] Synced volume {escape(name)} in sandbox "
+            f"{escape(sandbox_id)} to its committed head"
+        )
+        if result.head_id:
+            console.print(f"Head checkpoint: [cyan]{escape(result.head_id)}[/cyan]")
+        else:
+            console.print("Head checkpoint: [yellow]unknown[/yellow]")
+        return
+
+    # --no-wait with a non-terminal state: the sync runs on; a repeated
+    # request returns the same in-flight sync, so re-running this command
+    # waits for it.
+    console.print(f"Sync ID: [cyan]{escape(result.sync_id or '-')}[/cyan]")
+    console.print(f"State: {escape(result.state or '-')}")
+    console.print(
+        "[yellow]The sync has not finished; the volume's committed head "
+        "applies to this sandbox once it does. Re-run this command to "
+        "wait for it.[/yellow]"
+    )

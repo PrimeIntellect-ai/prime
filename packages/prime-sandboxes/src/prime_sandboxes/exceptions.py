@@ -52,6 +52,22 @@ class SandboxNotRunningError(RuntimeError):
         super().__init__(msg)
 
 
+class VolumeSyncFailedError(RuntimeError):
+    """Raised when a volume sync ends FAILED instead of DONE.
+
+    The sync response carries no error detail; the sandbox's volume sync
+    logs hold the reason.
+    """
+
+    def __init__(self, sandbox_id: str, name: str):
+        self.sandbox_id = sandbox_id
+        self.volume_name = name
+        super().__init__(
+            f"Volume sync of '{name}' in sandbox {sandbox_id} failed (state FAILED); "
+            "see the sandbox's volume sync logs"
+        )
+
+
 class CommandTimeoutError(RuntimeError):
     """Raised when a command execution times out."""
 

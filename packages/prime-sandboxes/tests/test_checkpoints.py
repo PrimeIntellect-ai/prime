@@ -252,6 +252,7 @@ async def wait_for_checkpoint(client, timeout_seconds=300):
 
 @pytest.fixture
 def checkpoint_clock(monkeypatch):
+    from prime_sandboxes import _polling
     from prime_sandboxes import sandbox as module
 
     sleeps = []
@@ -267,7 +268,8 @@ def checkpoint_clock(monkeypatch):
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(module.time, "sleep", sleep)
     monkeypatch.setattr(module.asyncio, "sleep", async_sleep)
-    monkeypatch.setattr(module.random, "uniform", lambda low, high: 0.0)
+    # The shared poll-delay helpers moved into _polling.
+    monkeypatch.setattr(_polling.random, "uniform", lambda low, high: 0.0)
     return sleeps
 
 

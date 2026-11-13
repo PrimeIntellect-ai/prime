@@ -2,7 +2,8 @@
 
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlencode
 
 import typer
 from rich.console import Console
@@ -65,6 +66,35 @@ def get_eval_viewer_url(evaluation_id: str) -> str:
     """Build the dashboard URL for an evaluation."""
     frontend_url = Config().frontend_url.rstrip("/")
     return f"{frontend_url}/dashboard/evaluations/{evaluation_id}"
+
+
+def get_traces_viewer_url(
+    run_id: str,
+    *,
+    episode_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    step: Optional[int] = None,
+    frontend_url: Optional[str] = None,
+) -> str:
+    """Build the dashboard Prime Traces viewer URL for a run, or one trace in it.
+
+    Mirrors the platform frontend's `dashboard/training/viewer/[runId]/traces`
+    route and its `useRolloutUrlState` query keys. The viewer opens a trace only
+    by its episode, so without `episode_id` this links the run page. The team is
+    not in the URL: the page shows the team selected in the account switcher.
+    """
+    base = (frontend_url or Config().frontend_url).rstrip("/")
+    url = f"{base}/dashboard/training/viewer/{quote(run_id, safe='')}/traces"
+    if episode_id is None:
+        return url
+    query: Dict[str, Any] = {"episodeId": episode_id}
+    if trace_id is not None:
+        query["traceId"] = trace_id
+    query["viewerLayout"] = "viewer"
+    if step is not None:
+        # The page lists one training step at a time, the latest by default.
+        query["step"] = step
+    return f"{url}?{urlencode(query, quote_via=quote)}"
 
 
 # Common status color mappings

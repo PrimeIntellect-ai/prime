@@ -5042,10 +5042,12 @@ class AsyncSandboxClient:
         waits for the exit code, and can signal the process. If the stream drops before
         the first StartEvent, the SDK retries Start with the same session_uuid
         (create-or-attach); after it, the SDK re-attaches with Connect by
-        session selector. Either way sandboxd re-announces the StartEvent and,
-        for a session that exited within its retention window, replays the
-        retained EndEvent — an exit missed while detached is still observed.
-        Output emitted while detached is not replayed.
+        session selector and last received output sequence. sandboxd replays
+        retained output and exit status, including output emitted while detached.
+        Expired output, incomplete pipe closure, or interruption on a server
+        without replay raises ProcessOutputLostError instead of succeeding with
+        incomplete output. Deploy replay-capable sandboxd before this SDK.
+        Close process handles before closing their parent sandbox client.
         """
         if timeout is not None and timeout <= 0:
             raise ValueError("timeout must be a positive number of seconds")
@@ -5071,28 +5073,38 @@ class AsyncSandboxClient:
             env=env,
             stdin=True,
             session_uuid=session_uuid,
+            after_sequence=0,
             user=user,
         )
-        # Each live process gets its own transport: the session stream occupies one
-        # HTTP/2 stream for the process's whole lifetime, and the gateway caps
-        # concurrent streams per connection. On the shared default transport, enough
-        # concurrent live processes exhaust that cap and every later gateway RPC
-        # (stdin, signals, new sessions) queues until its deadline. The process's
-        # control RPCs reuse the same transport so they cannot starve either.
-        transport = _live_process_transport()
-        http_client = HTTPClient(transport=transport)
-        rpc_client = ConnectClient(
-            base_url,
-            codec=GOOGLE_PROTOBUF_BINARY_CODEC,
-            send_compression=None,
-            http_client=http_client,
-        )
-        stream = rpc_client.execute_server_stream(
-            request=request,
-            method=COMMAND_SESSION_START_RPC_METHOD,
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
+        # Lease one slot for the process lifetime, including reconnects. The
+        # command pool limits long-lived streams per connection and leaves room
+        # for control RPCs, without opening a connection for every command.
+        leases = contextlib.ExitStack()
+        if _is_tls_gateway(base_url):
+            transport = None
+            http_client = leases.enter_context(self._command_pool.lease())
+        else:
+            # Plaintext command-session endpoints do not necessarily speak HTTP/2.
+            transport = _live_process_transport()
+            http_client = HTTPClient(transport=transport)
+        try:
+            rpc_client = ConnectClient(
+                base_url,
+                codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                send_compression=None,
+                http_client=http_client,
+            )
+            stream = rpc_client.execute_server_stream(
+                request=request,
+                method=COMMAND_SESSION_START_RPC_METHOD,
+                headers=headers,
+                timeout_ms=timeout_ms,
+            )
+        except BaseException:
+            leases.close()
+            if transport is not None:
+                await transport.aclose()
+            raise
 
         async def write_stdin(data: bytes) -> None:
             input_uuid = _canonical_uuid_key()
@@ -5104,7 +5116,6 @@ class AsyncSandboxClient:
                 COMMAND_SESSION_SEND_INPUT_RPC_METHOD,
                 _PROCESS_INPUT_TIMEOUT_MS,
                 "stdin",
-                http_client=http_client,
             )
 
         async def send_signal(signal: Literal["terminate", "kill"]) -> None:
@@ -5117,17 +5128,18 @@ class AsyncSandboxClient:
                 COMMAND_SESSION_SEND_SIGNAL_RPC_METHOD,
                 _PROCESS_SIGNAL_TIMEOUT_MS,
                 "signal",
-                http_client=http_client,
             )
 
-        async def reconnect(started: bool) -> AsyncIterator[Message]:
+        async def reconnect(started: bool, after_sequence: int) -> AsyncIterator[Message]:
             # Before a StartEvent it is unknown whether the process was ever
             # spawned, so retry Start (create-or-attach); afterwards Connect
-            # re-attaches, replaying the EndEvent if the process has exited.
+            # re-attaches from the last output cursor, including after exit.
             # `started` is fixed for this invocation, so pick once.
             if started:
                 method = COMMAND_SESSION_CONNECT_RPC_METHOD
-                reattach_request = build_command_session_connect_request(session_uuid=session_uuid)
+                reattach_request = build_command_session_connect_request(
+                    session_uuid=session_uuid, after_sequence=after_sequence
+                )
             else:
                 method = COMMAND_SESSION_START_RPC_METHOD
                 reattach_request = request
@@ -5161,14 +5173,19 @@ class AsyncSandboxClient:
                 finally:
                     await client.close()
 
-        return await AsyncSandboxProcess._create(
-            rpc_client,
-            stream,
-            write_stdin,
-            send_signal,
-            transport=transport,
-            reconnect=reconnect,
-        )
+        try:
+            return await AsyncSandboxProcess._create(
+                rpc_client,
+                stream,
+                write_stdin,
+                send_signal,
+                transport=transport,
+                reconnect=reconnect,
+                release_transport=leases.close,
+            )
+        except BaseException:
+            leases.close()
+            raise
 
     async def _execute_process_control_rpc(
         self,
@@ -5177,7 +5194,6 @@ class AsyncSandboxClient:
         method: MethodInfo[_RequestMessage, _ResponseMessage],
         timeout_ms: int,
         operation: str,
-        http_client: Optional[HTTPClient] = None,
     ) -> None:
         """Run one live-process control RPC with current sandbox auth.
 
@@ -5197,37 +5213,45 @@ class AsyncSandboxClient:
             gateway_url = auth["gateway_url"].rstrip("/")
             base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
             headers = {"Authorization": f"Bearer {auth['token']}"}
-            rpc_client = ConnectClient(
-                base_url,
-                codec=GOOGLE_PROTOBUF_BINARY_CODEC,
-                send_compression=None,
-                http_client=http_client,
-            )
-            try:
-                # Every attempt resends `request` unchanged; only auth refreshes.
-                await rpc_client.execute_unary(
-                    request=request,
-                    method=method,
-                    headers=headers,
-                    timeout_ms=timeout_ms,
+            # Meter control calls too: blocked stdin writes must never fill the
+            # unaccounted headroom and prevent a signal from unblocking them.
+            with contextlib.ExitStack() as leases:
+                http_client = _lease_command_client(self._command_pool, leases, base_url)
+                rpc_client = ConnectClient(
+                    base_url,
+                    codec=GOOGLE_PROTOBUF_BINARY_CODEC,
+                    send_compression=None,
+                    http_client=http_client,
                 )
-                return
-            except ConnectError as error:
-                raise_if_cancelled(error)
-                if error.code == Code.UNAUTHENTICATED and await self._should_retry_401(
-                    sandbox_id, reauthed
-                ):
-                    reauthed = True
-                    continue
-                failures += 1
-                if failures < _PROCESS_CONTROL_RPC_ATTEMPTS and is_transient_control_fault(error):
-                    await asyncio.sleep(_PROCESS_CONTROL_RETRY_INITIAL_DELAY * 2 ** (failures - 1))
-                    continue
-                raise APIError(
-                    f"process {operation} RPC failed ({error.code.value}): {error.message}"
-                ) from error
-            finally:
-                await rpc_client.close()
+                try:
+                    # Every attempt resends `request` unchanged; only auth refreshes.
+                    await rpc_client.execute_unary(
+                        request=request,
+                        method=method,
+                        headers=headers,
+                        timeout_ms=timeout_ms,
+                    )
+                    return
+                except ConnectError as error:
+                    raise_if_cancelled(error)
+                    if error.code == Code.UNAUTHENTICATED and await self._should_retry_401(
+                        sandbox_id, reauthed
+                    ):
+                        reauthed = True
+                        continue
+                    failures += 1
+                    if failures < _PROCESS_CONTROL_RPC_ATTEMPTS and is_transient_control_fault(
+                        error
+                    ):
+                        await asyncio.sleep(
+                            _PROCESS_CONTROL_RETRY_INITIAL_DELAY * 2 ** (failures - 1)
+                        )
+                        continue
+                    raise APIError(
+                        f"process {operation} RPC failed ({error.code.value}): {error.message}"
+                    ) from error
+                finally:
+                    await rpc_client.close()
 
     def _new_command_http_client(self) -> HTTPClient:
         transport = _command_transport()

@@ -92,6 +92,21 @@ prime traces list --runs --run-type train
 prime traces get run_9f3k2m --runs -o json
 ```
 
+## View in the dashboard
+
+`prime traces get` prints a dashboard viewer link, and its JSON output, like
+`prime traces list -o json`, carries it as `url`. `prime traces upload` prints
+one link per run in the file. The viewer lists traces by run, so a trace without
+a run has no link (`url: null`).
+
+```text
+https://app.primeintellect.ai/dashboard/training/viewer/{run_id}/traces?episodeId={episode_id}&traceId={trace_id}&viewerLayout=viewer
+```
+
+A trace that records a training step adds `&step={run_step}`; one without an
+episode links the run page. The page shows the team selected in the dashboard's account switcher; the team
+is not part of the link.
+
 ## Search indexed content
 
 Case-sensitive literal search within one run. Requires SDK 0.0.5+ and a server

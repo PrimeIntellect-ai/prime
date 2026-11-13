@@ -217,7 +217,9 @@ async def test_process_recovery_retries_start_and_refreshes_rejected_auth(monkey
                     raise ConnectError(Code.UNAUTHENTICATED, "expired token")
                 yield command_session_pb2.StartResponse(
                     event=command_session_pb2.CommandSessionEvent(
-                        start=command_session_pb2.CommandSessionEvent.StartEvent(pid=42)
+                        start=command_session_pb2.CommandSessionEvent.StartEvent(
+                            pid=42, output_replay=True
+                        )
                     )
                 )
                 yield command_session_pb2.StartResponse(
@@ -371,3 +373,155 @@ def test_sync_connect_execution_maps_deadline_to_timeout(monkeypatch):
         )
 
     assert "timed out" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_native_sessions_and_controls_share_bounded_command_pool(monkeypatch):
+    """Long-lived streams reserve pool slots through exit, with control RPC headroom."""
+    from conftest import _end_event, _start_event
+
+    from prime_sandboxes.sandbox import _CommandTransportPool
+
+    active = {}
+    controls = []
+
+    class FakeConnectClient:
+        def __init__(self, address, **kwargs):
+            self.http_client = kwargs["http_client"]
+
+        def execute_server_stream(self, **kwargs):
+            request = kwargs["request"]
+            exited = asyncio.Event()
+            active[request.session_uuid] = (self.http_client, exited)
+
+            async def events():
+                yield _start_event(42, output_replay=True)
+                await exited.wait()
+                yield _end_event(0)
+
+            return events()
+
+        async def execute_unary(self, **kwargs):
+            request = kwargs["request"]
+            owner, exited = active[request.session.session_uuid]
+            assert any(self.http_client is slot[0] for slot in client._command_pool._slots)
+            controls.append(kwargs["method"].name)
+            if kwargs["method"].name == "SendSignal":
+                exited.set()
+            return getattr(command_session_pb2, kwargs["method"].name + "Response")()
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", FakeConnectClient)
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _AsyncFakeCache()
+    client._command_pool = _CommandTransportPool(object)
+    try:
+        processes = await asyncio.gather(
+            *(client.open_process(f"sandbox-{i}", "cat") for i in range(181))
+        )
+        assert [slot[1] for slot in client._command_pool._slots] == [90, 90, 1]
+        await asyncio.gather(*(p.write_stdin(b"input") for p in processes))
+        await asyncio.gather(*(p.terminate() for p in processes))
+        assert await asyncio.gather(*(p.wait() for p in processes)) == [0] * 181
+        await asyncio.gather(*(p.aclose() for p in processes))
+        assert [slot[1] for slot in client._command_pool._slots] == [0, 0, 0]
+        assert controls.count("SendInput") == controls.count("SendSignal") == 181
+        # Command churn reuses a released slot rather than allocating another transport.
+        process = await client.open_process("next-sandbox", "cat")
+        assert [slot[1] for slot in client._command_pool._slots] == [1, 0, 0]
+        await process.aclose()
+        assert [slot[1] for slot in client._command_pool._slots] == [0, 0, 0]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_pool_lease_released_on_stream_construction_error(monkeypatch):
+    """Synchronous RPC setup failure must not reserve a connection slot forever."""
+    from prime_sandboxes.sandbox import _CommandTransportPool
+
+    class BrokenConnectClient:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("cannot construct stream")
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", BrokenConnectClient)
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _AsyncFakeCache()
+    client._command_pool = _CommandTransportPool(object)
+    try:
+        with pytest.raises(RuntimeError, match="cannot construct stream"):
+            await client.open_process("sandbox", "cat")
+        assert [slot[1] for slot in client._command_pool._slots] == [0]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_blocked_stdin_cannot_starve_kill(monkeypatch):
+    """Full streaming and blocked-input connections must leave kill admissible."""
+    from conftest import _end_event, _start_event
+
+    from prime_sandboxes.sandbox import _CommandTransportPool
+
+    active = {}
+    all_inputs_started = asyncio.Event()
+    unblock_inputs = asyncio.Event()
+    input_clients = []
+    signal_clients = []
+
+    class FakeConnectClient:
+        def __init__(self, address, **kwargs):
+            self.http_client = kwargs["http_client"]
+
+        def execute_server_stream(self, **kwargs):
+            exited = asyncio.Event()
+            active[kwargs["request"].session_uuid] = exited
+
+            async def events():
+                yield _start_event(42, output_replay=True)
+                await exited.wait()
+                yield _end_event(0)
+
+            return events()
+
+        async def execute_unary(self, **kwargs):
+            if kwargs["method"].name == "SendInput":
+                input_clients.append(self.http_client)
+                if len(input_clients) == 90:
+                    all_inputs_started.set()
+                await unblock_inputs.wait()
+            else:
+                signal_clients.append(self.http_client)
+                unblock_inputs.set()
+                active[kwargs["request"].session.session_uuid].set()
+            return getattr(command_session_pb2, kwargs["method"].name + "Response")()
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("prime_sandboxes.sandbox.ConnectClient", FakeConnectClient)
+    client = AsyncSandboxClient(api_key="test-key")
+    cast(Any, client)._auth_cache = _AsyncFakeCache()
+    client._command_pool = _CommandTransportPool(object)
+    processes = []
+    writes = []
+    try:
+        processes = await asyncio.gather(
+            *(client.open_process(f"sandbox-{i}", "sleep 60") for i in range(90))
+        )
+        writes = [asyncio.create_task(p.write_stdin(b"large blocked write")) for p in processes]
+        await asyncio.wait_for(all_inputs_started.wait(), timeout=1)
+        assert [slot[1] for slot in client._command_pool._slots] == [90, 90]
+        await asyncio.wait_for(processes[0].kill(), timeout=1)
+        assert signal_clients[0] is not input_clients[0]
+        assert len(client._command_pool._slots) == 3
+        await asyncio.gather(*writes)
+        await asyncio.gather(*(p.aclose() for p in processes))
+        assert all(slot[1] == 0 for slot in client._command_pool._slots)
+    finally:
+        unblock_inputs.set()
+        await asyncio.gather(*writes, return_exceptions=True)
+        await asyncio.gather(*(p.aclose() for p in processes), return_exceptions=True)
+        await client.aclose()

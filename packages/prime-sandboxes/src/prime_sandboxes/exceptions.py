@@ -92,3 +92,7 @@ class SandboxImagePullError(SandboxNotRunningError):
     """Raised when Docker image cannot be pulled."""
 
     pass
+
+
+class ProcessOutputLostError(APIError):
+    """Raised when a command's complete output cannot be recovered safely."""

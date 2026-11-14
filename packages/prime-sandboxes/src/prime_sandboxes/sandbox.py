@@ -60,6 +60,7 @@ from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxDiskFullError,
     SandboxFileNotFoundError,
     SandboxFileTooLargeError,
     SandboxImagePullError,
@@ -1987,8 +1988,13 @@ def _build_terminated_message(command: str, ctx: dict) -> str:
     status = ctx.get("status")
 
     if error_type == "OOM_KILLED":
-        parts.append("The sandbox was terminated due to out-of-memory (OOM).")
-        parts.append("Consider requesting more memory or optimizing memory usage.")
+        parts.append("The sandbox ran out of memory.")
+        parts.append("Consider requesting more memory or reducing memory usage.")
+    elif error_type == "SANDBOX_UNRESPONSIVE":
+        parts.append("The sandbox stopped responding and was terminated.")
+    elif error_type == "NODE_FAILURE":
+        parts.append("The sandbox's host failed; this was not caused by the sandbox.")
+        parts.append("Retry with a new sandbox.")
     elif error_type == "TIMEOUT":
         parts.append("The sandbox exceeded its maximum runtime and was terminated.")
     elif error_type == "IMAGE_PULL_FAILED":
@@ -3934,6 +3940,11 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
@@ -4002,6 +4013,11 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
@@ -6071,6 +6087,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
@@ -6140,6 +6161,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e

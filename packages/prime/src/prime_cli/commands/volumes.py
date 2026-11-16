@@ -130,13 +130,35 @@ def create(
 
 @app.command("list")
 def list_volumes(
+    only_mine: bool = typer.Option(
+        True,
+        "--only-mine/--all-users",
+        help="Show only volumes you created (default), or include all users in the selected team",
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List your volumes."""
+    """List volumes you created in the selected account context.
+
+    Use --all-users to include volumes created by other members of your team.
+    """
     validate_output_format(output, console)
     client, team_id = _client()
     try:
+        user_id = None
+        if only_mine and team_id:
+            # Resolve the caller with the same credentials as the volume request;
+            # a cached user_id may belong to a different key or account context.
+            identity = client.client.get("/user/whoami")
+            data = identity.get("data")
+            user_id = data.get("id") if isinstance(data, dict) else None
+            if not isinstance(user_id, str) or not user_id.strip():
+                raise APIError("Cannot determine the authenticated user from the API response.")
         volumes = client.list_volumes(team_id=team_id)
+        # Omitting teamId would list only personal volumes, hiding the ones
+        # you created for your team. The API has no creator filter, so keep
+        # the selected team and filter its complete response by creator ID.
+        if user_id:
+            volumes = [v for v in volumes if v.created_by == user_id]
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

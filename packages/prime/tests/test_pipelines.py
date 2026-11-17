@@ -147,6 +147,8 @@ def test_run_sets_the_spend_limit_over_the_launch_files(api: Dict[str, Any], tmp
         ("launch.json", "[]", "two tables, config and capabilities"),
         ("launch.toml", 'package = "acme/triage"\n', "two tables, config and capabilities"),
         ("launch.toml", "config = 3\n", "config is a table"),
+        ("launch.toml", "[config]\nsince = 2026-01-01\n", "dates and times as strings"),
+        ("launch.toml", "[config]\nrate = inf\n", "dates and times as strings"),
     ],
 )
 def test_run_refuses_a_launch_file_it_cannot_send(

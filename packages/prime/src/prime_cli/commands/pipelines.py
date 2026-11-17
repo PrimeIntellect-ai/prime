@@ -115,6 +115,11 @@ def _launch(path: Path) -> dict[str, Any]:
     for key, value in data.items():
         if not isinstance(value, dict):
             _fail(ValueError(f"{path}: {key} is a table"))
+    try:
+        # What is sent is JSON: a TOML date or time, inf and nan have no JSON form.
+        json.dumps(data, allow_nan=False)
+    except (TypeError, ValueError):
+        _fail(ValueError(f"{path}: write dates and times as strings, and no inf or nan"))
     return data
 
 

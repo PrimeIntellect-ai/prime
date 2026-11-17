@@ -480,6 +480,11 @@ def reply(
         _fail(ValueError(f"--patch is not JSON: {error}"))
     if not isinstance(answer, dict):
         _fail(ValueError("--patch is a JSON object, such as '{\"approved\": true}'"))
+    try:
+        # Python reads NaN, Infinity and 1e999; none of them can be sent as JSON.
+        json.dumps(answer, allow_nan=False)
+    except ValueError:
+        _fail(ValueError("--patch is not JSON: it holds NaN or a number out of range"))
     waiting = (_run(run_id).get("state") or {}).get("waiting_on_people") or []
     held = _held(run_id, waiting, job)
     seq = _control(run_id, {"type": "answer", "job": held["job"], "patch": answer})

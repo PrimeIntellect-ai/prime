@@ -160,6 +160,8 @@ def test_run_refuses_a_spend_limit_that_is_not_a_number_of_dollars(
         ("launch.toml", "config = 3\n", "config is a table"),
         ("launch.toml", "[config]\nsince = 2026-01-01\n", "dates and times as strings"),
         ("launch.toml", "[config]\nrate = inf\n", "dates and times as strings"),
+        ("launch.json", '{"config": {"rate": NaN}}', "dates and times as strings"),
+        ("launch.json", '{"config": {"rate": 1e999}}', "dates and times as strings"),
     ],
 )
 def test_run_refuses_a_launch_file_it_cannot_send(
@@ -610,6 +612,9 @@ def test_reply_needs_no_job_while_only_one_waits(review: Dict[str, Any]) -> None
         (["--job", "batch", "--patch", "{"], "--patch is not JSON"),
         (["--job", "batch", "--patch", "[1]"], "--patch is a JSON object"),
         (["--job", "batch", "--patch", '"yes"'], "--patch is a JSON object"),
+        (["--job", "batch", "--patch", '{"score": NaN}'], "--patch is not JSON"),
+        (["--job", "batch", "--patch", '{"score": -Infinity}'], "--patch is not JSON"),
+        (["--job", "batch", "--patch", '{"score": 1e999}'], "--patch is not JSON"),
     ],
 )
 def test_a_reply_that_cannot_be_sent_sends_nothing(review: Dict[str, Any], args, error) -> None:

@@ -1,6 +1,7 @@
 """`prime pipelines`: run a pipeline (a package on the Environments Hub) and fetch what it made."""
 
 import json
+import math
 import os
 import re
 import shlex
@@ -222,6 +223,8 @@ def run(
         declared = _launch(launch) if launch is not None else {}
         capabilities = dict(declared.get("capabilities") or {})
         if spend_limit is not None:
+            if not math.isfinite(spend_limit):
+                _fail(ValueError("--spend-limit is a number of dollars, not inf or nan"))
             capabilities["spend_limit"] = spend_limit
         if pipeline is not None and name is None:
             # A save names the pipeline: without this it would take the package's name.

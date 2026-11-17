@@ -139,6 +139,17 @@ def test_run_sets_the_spend_limit_over_the_launch_files(api: Dict[str, Any], tmp
     assert api["post"][1]["capabilities"] == {"spend_limit": 5.0}
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_run_refuses_a_spend_limit_that_is_not_a_number_of_dollars(
+    api: Dict[str, Any], value
+) -> None:
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", f"--spend-limit={value}"], env=TEST_ENV
+    )
+    assert result.exit_code == 1 and "number of dollars" in result.output
+    assert "Traceback" not in result.output and "post" not in api
+
+
 @pytest.mark.parametrize(
     ("name", "text", "error"),
     [

@@ -18,15 +18,18 @@ RUN = {
     "id": "run1",
     "pipeline_id": "p1",
     "version": "a" * 64,
+    "package": "acme/triage@0.2.0",
     "status": "RUNNING",
     "error": None,
     "stopped": False,
-    "sample": None,
     "outputs": [{"name": "report.md", "node": "report", "bytes": 3}],
     "state": {
-        "nodes": {"scout": {"done": 1, "running": 0, "held": 0, "failed": 0, "cost": 0.25}},
-        "cards": [{"job": "graph", "node": "review", "question": "Keep or drop each idea."}],
-        "cost": {"usd": 0.25},
+        "jobs": {"terminal": 3, "held": 1},
+        "stages": {"scout": {"terminal": 3}, "review": {"held": 1}},
+        "waiting_on_people": [
+            {"job": "batch", "stage": "review", "reason": "Keep these ideas?", "by": "review"}
+        ],
+        "failures": [],
     },
     "created_at": "2026-11-05T00:00:00",
 }
@@ -51,118 +54,221 @@ def api(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
     return calls
 
 
-def test_run_submits_the_graph_with_the_secrets_it_names(api: Dict[str, Any], tmp_path) -> None:
-    graph = tmp_path / "g.json"
-    graph.write_text(json.dumps({"name": "g", "nodes": {}}))
+def test_run_submits_the_package_with_the_secrets_it_names(api: Dict[str, Any]) -> None:
     env = {**TEST_ENV, "GITHUB_TOKEN": "gh"}
     result = runner.invoke(
-        app,
-        ["pipelines", "run", str(graph), "--secret", "GITHUB_TOKEN", "--sample", "2"],
-        env=env,
+        app, ["pipelines", "run", "acme/triage@0.2.0", "--secret", "GITHUB_TOKEN"], env=env
     )
     assert result.exit_code == 0, result.output
     endpoint, body = api["post"]
     assert endpoint == "/pipelines/runs"
-    assert body["graph"] == {"name": "g", "nodes": {}}
-    assert body["secrets"] == {"GITHUB_TOKEN": "gh"} and body["sample"] == 2
-    assert body["pipeline_id"] is None
+    assert body["package"] == "acme/triage@0.2.0"
+    assert body["config"] == {} and body["capabilities"] == {}
+    assert body["secrets"] == {"GITHUB_TOKEN": "gh"} and body["network"] == {"allow": []}
+    assert body["pipeline_id"] is None and body["run_package"] is False
+    assert body["name"] is None
+    assert "Package: acme/triage@0.2.0" in result.output
     assert "prime pipelines get run1" in result.output
 
 
-def test_run_saves_a_new_version_of_a_named_pipeline(api: Dict[str, Any], tmp_path) -> None:
-    graph = tmp_path / "g.json"
-    graph.write_text(json.dumps({"name": "g", "nodes": {}}))
+def test_run_names_the_pipeline_it_saves(api: Dict[str, Any]) -> None:
     result = runner.invoke(
-        app, ["pipelines", "run", str(graph), "--pipeline", "p1", "-t", "t1"], env=TEST_ENV
+        app, ["pipelines", "run", "acme/triage", "--name", "nightly", "-t", "t1"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    assert api["post"][1]["pipeline_id"] == "p1" and api["post"][1]["team_id"] == "t1"
+    body = api["post"][1]
+    assert (body["name"], body["team_id"], body["pipeline_id"]) == ("nightly", "t1", None)
     assert "Pipeline: p1" in result.output
 
 
-def test_run_sends_the_hosts_it_adds_and_what_its_starter_agreed_to(
-    api: Dict[str, Any], tmp_path
-) -> None:
-    graph = tmp_path / "g.json"
-    graph.write_text(json.dumps({"name": "g", "nodes": {}}))
-    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
-    assert result.exit_code == 0, result.output
-    body = api["post"][1]
-    assert body["network"] == {"allow": []}
-    assert (body["read_personal_traces"], body["run_code"]) == (False, False)
+LAUNCH_TOML = """
+[config]
+items = 3
+ask = true
 
+[capabilities]
+spend_limit = 20
+
+[capabilities.publish.release]
+name = "triage-tasks"
+version = "0.1.0"
+
+[capabilities.traces]
+personal = true
+"""
+LAUNCH = {
+    "config": {"items": 3, "ask": True},
+    "capabilities": {
+        "spend_limit": 20,
+        "publish": {"release": {"name": "triage-tasks", "version": "0.1.0"}},
+        "traces": {"personal": True},
+    },
+}
+
+
+@pytest.mark.parametrize("name", ["launch.toml", "launch.json", "launch"])
+def test_run_sends_the_launch_files_config_and_capabilities(
+    api: Dict[str, Any], tmp_path, name
+) -> None:
+    file = tmp_path / name
+    file.write_text(json.dumps(LAUNCH) if name.endswith(".json") else LAUNCH_TOML)
     hosts = ["--allow-host", "api.github.com", "--allow-host", "*.example.com"]
     result = runner.invoke(
-        app,
-        ["pipelines", "run", str(graph), *hosts, "--read-personal-traces", "--run-code"],
-        env=TEST_ENV,
+        app, ["pipelines", "run", "acme/triage", "--launch", str(file), *hosts], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
     body = api["post"][1]
+    assert (body["config"], body["capabilities"]) == (LAUNCH["config"], LAUNCH["capabilities"])
     assert body["network"] == {"allow": ["api.github.com", "*.example.com"]}
-    assert (body["read_personal_traces"], body["run_code"]) == (True, True)
+
+
+def test_run_sets_the_spend_limit_over_the_launch_files(api: Dict[str, Any], tmp_path) -> None:
+    file = tmp_path / "launch.toml"
+    file.write_text(LAUNCH_TOML)
+    result = runner.invoke(
+        app,
+        ["pipelines", "run", "acme/triage", "--launch", str(file), "--spend-limit", "5"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert api["post"][1]["capabilities"] == {**LAUNCH["capabilities"], "spend_limit": 5.0}
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--spend-limit", "5"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert api["post"][1]["capabilities"] == {"spend_limit": 5.0}
 
 
 @pytest.mark.parametrize(
-    ("detail", "passed", "hint"),
+    ("name", "text", "error"),
     [
-        (
-            "The Code nodes ['glue'] run code saved in this team's pipeline on the run's "
-            "machine. Read their source, then start the run with run_code to agree.",
-            [],
-            "To agree, pass --run-code.",
-        ),
-        (
-            "The Traces inputs ['mine'] read your personal traces into outputs this team can "
-            "see. Start the run with read_personal_traces to agree.",
-            ["--run-code"],
-            "To agree, pass --read-personal-traces.",
-        ),
-        ("No Code node of the graph names the secrets ['X']", [], None),
-        # Already agreed to: the refusal is about something else, so no option is suggested.
-        ("run_code is not available here", ["--run-code"], None),
+        ("launch.toml", "[config\n", "is not TOML"),
+        ("launch.json", "{", "is not JSON"),
+        ("launch.json", "[]", "two tables, config and capabilities"),
+        ("launch.toml", 'package = "acme/triage"\n', "two tables, config and capabilities"),
+        ("launch.toml", "config = 3\n", "config is a table"),
     ],
 )
-def test_run_names_the_option_for_an_agreement_the_platform_asks_for(
-    monkeypatch: pytest.MonkeyPatch, tmp_path, detail, passed, hint
+def test_run_refuses_a_launch_file_it_cannot_send(
+    api: Dict[str, Any], tmp_path, name, text, error
 ) -> None:
+    file = tmp_path / name
+    file.write_text(text)
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--launch", str(file)], env=TEST_ENV
+    )
+    assert result.exit_code == 1 and error in result.output
+    assert "Traceback" not in result.output and "post" not in api
+
+
+TEAM_RUN = (
+    "This team run would, as you: publish triage-tasks@0.1.0 to the Hub (release); read your "
+    "personal traces. Agree to run the package and what it declares with run_package."
+)
+
+
+@pytest.fixture
+def team_run(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
+    """A team run's start: refused, with what it would do, until its starter agrees."""
     from prime_cli.client import APIError
 
+    calls: Dict[str, Any] = {"posts": [], "detail": TEAM_RUN}
+
     def post(self: Any, endpoint: str, json: Any = None, timeout: Any = None) -> Dict[str, Any]:
-        raise APIError(f"HTTP 422: {detail}")
+        calls["posts"].append(json)
+        if not json["run_package"] or calls.get("always"):
+            raise APIError(f"HTTP 422: {calls['detail']}")
+        return RUN
 
     monkeypatch.setattr("prime_cli.client.APIClient.post", post)
-    graph = tmp_path / "g.json"
-    graph.write_text("{}")
+    return calls
+
+
+def test_a_team_run_shows_what_it_would_do_and_asks_once(team_run: Dict[str, Any]) -> None:
     env = {**TEST_ENV, "COLUMNS": "2000"}
-    result = runner.invoke(app, ["pipelines", "run", str(graph), *passed], env=env)
-    assert result.exit_code == 1 and detail in result.output
-    assert ("To agree, pass" in result.output) == (hint is not None)
-    assert hint is None or hint in result.output
+    result = runner.invoke(app, ["pipelines", "run", "acme/triage"], env=env, input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "publish triage-tasks@0.1.0 to the Hub (release); read your personal traces" in (
+        result.output
+    )
+    assert "Agree, and start the run?" in result.output
+    assert "To agree without being asked, pass --run-package." in result.output
+    assert [body["run_package"] for body in team_run["posts"]] == [False, True]
+    assert "prime pipelines get run1" in result.output
 
 
-def test_run_help_says_what_each_agreement_is(api: Dict[str, Any]) -> None:
+def test_a_team_run_not_agreed_to_starts_nothing(team_run: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "run", "acme/triage"], env=TEST_ENV, input="n\n")
+    assert result.exit_code == 0 and "Cancelled." in result.output
+    assert [body["run_package"] for body in team_run["posts"]] == [False]
+    # No answer to read: it ends, rather than waiting, and nothing starts.
+    team_run["posts"].clear()
+    result = runner.invoke(app, ["pipelines", "--plain", "run", "acme/triage"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert [body["run_package"] for body in team_run["posts"]] == [False]
+
+
+def test_run_package_agrees_without_being_asked(team_run: Dict[str, Any]) -> None:
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--run-package", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["id"] == "run1"
+    assert [body["run_package"] for body in team_run["posts"]] == [True]
+    # Agreed to already: a refusal is about something else, and nothing is asked.
+    team_run["always"], team_run["detail"] = True, "run_package is not available here"
+    result = runner.invoke(app, ["pipelines", "run", "acme/triage", "--run-package"], env=TEST_ENV)
+    assert result.exit_code == 1 and "Agree, and start the run?" not in result.output
+
+
+def test_a_refusal_about_something_else_asks_nothing(team_run: Dict[str, Any]) -> None:
+    team_run["detail"] = "The publish release: version 0.1.0 of acme/triage-tasks is taken"
+    result = runner.invoke(app, ["pipelines", "run", "acme/triage"], env=TEST_ENV, input="y\n")
+    assert result.exit_code == 1 and "is taken" in result.output
+    assert "Agree, and start the run?" not in result.output and len(team_run["posts"]) == 1
+
+
+def test_asking_keeps_json_output_to_the_run_alone(team_run: Dict[str, Any]) -> None:
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "-o", "json"], env=TEST_ENV, input="y\n"
+    )
+    assert result.exit_code == 0, result.output
+    # The test runner echoes the typed answer to stdout; a terminal doesn't.
+    assert json.loads(result.stdout.removeprefix(" y\n"))["id"] == "run1"
+    assert "This team run would, as you" in result.stderr
+    assert "Agree, and start the run?" in result.stderr
+
+
+def test_run_help_says_what_the_agreement_is(api: Dict[str, Any]) -> None:
     result = runner.invoke(app, ["pipelines", "run", "--help"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     # CI renders help in colour, which splits an option's name with escape codes.
     text = " ".join(strip_ansi(result.output).replace("│", " ").split())
-    for expected in ("--allow-host", "--read-personal-traces", "--run-code"):
+    for expected in ("--launch", "--spend-limit", "--allow-host", "--run-package"):
         assert expected in text
+    for gone in ("--sample", "--run-code", "--read-personal-traces"):
+        assert gone not in text
     assert "can use your key and the secrets you pass" in text
 
 
-def test_run_refuses_a_secret_missing_from_the_environment(api: Dict[str, Any], tmp_path) -> None:
-    graph = tmp_path / "g.json"
-    graph.write_text("{}")
-    result = runner.invoke(app, ["pipelines", "run", str(graph), "--secret", "NOPE"], env=TEST_ENV)
+def test_run_refuses_a_secret_missing_from_the_environment(api: Dict[str, Any]) -> None:
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--secret", "NOPE"], env=TEST_ENV
+    )
     assert result.exit_code == 1 and "NOPE" in result.output and "post" not in api
 
 
-def test_get_shows_counts_what_waits_cost_and_outputs(api: Dict[str, Any]) -> None:
+def test_get_shows_counts_what_waits_and_outputs(api: Dict[str, Any]) -> None:
     result = runner.invoke(app, ["pipelines", "get", "run1"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     assert api["get"] == "/pipelines/runs/run1"
-    for text in ("scout", "Waiting on you", "Keep or drop each idea.", "$0.25", "report/report.md"):
+    for text in (
+        "Package: acme/triage@0.2.0",
+        "scout",
+        "Waiting on you at review (job batch): Keep these ideas?",
+        "prime pipelines reply run1 --job batch --patch JSON",
+        "report/report.md",
+    ):
         assert text in result.output
 
 
@@ -170,7 +276,47 @@ def test_get_as_json_is_the_run_with_what_waits(api: Dict[str, Any]) -> None:
     result = runner.invoke(app, ["pipelines", "get", "run1", "-o", "json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     found = json.loads(result.output)
-    assert found["id"] == "run1" and found["state"]["cards"] == RUN["state"]["cards"]
+    assert found["id"] == "run1"
+    assert found["state"]["waiting_on_people"] == RUN["state"]["waiting_on_people"]
+
+
+def test_get_shows_what_failed_and_what_the_run_started_and_spent(
+    api: Dict[str, Any], monkeypatch
+) -> None:
+    run = {
+        **RUN,
+        "state": {
+            "stages": {"grade": {"terminal": 2, "held": 1, "odd": 1}},
+            "waiting_on_people": [],
+            "failures": [
+                {"job": "t3", "stage": "grade", "reason": "no reply", "error": "TimeoutError"}
+            ],
+        },
+        "evaluations": [
+            {"node": "grade", "evaluation_id": "ev1", "taskset": "acme/qa", "model": "m1"}
+        ],
+        "trainings": [{"node": "tune", "training_id": "tr1"}],
+        "deployments": [{"node": "tune", "training_id": "tr1", "deployment_id": "dep1"}],
+        "spend_limit": 20.0,
+        "spent": 1.5,
+    }
+    monkeypatch.setattr(
+        "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
+    )
+    result = runner.invoke(app, ["pipelines", "get", "run1"], env={**TEST_ENV, "COLUMNS": "2000"})
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.output.replace("│", " ").replace("┃", " ").split())
+    for expected in (
+        "stage held done odd",
+        "grade 1 2 1",
+        "Failed at grade (job t3): TimeoutError no reply",
+        "Evaluation ev1 (grade): acme/qa with m1",
+        "Training tr1 (tune)",
+        "Deployment dep1 (tune)",
+        "Spend limit: $20.00, $1.50 spent",
+    ):
+        assert expected in text
+    assert "Waiting on you" not in text
 
 
 def test_stop_asks_first(api: Dict[str, Any]) -> None:
@@ -209,7 +355,8 @@ def test_help_documents_the_json_output(api: Dict[str, Any], command) -> None:
     assert result.exit_code == 0, result.output
     text = " ".join(strip_ansi(result.output).replace("│", " ").split())
     assert "JSON output (--output json):" in text and "pipeline_id" in text
-    assert (".state.cards[]" in text) == (command == "get")
+    assert "package?" in text and "sample" not in text
+    assert (".state.waiting_on_people[]" in text) == (command == "get")
     assert (".total = number" in text) == (command in ("list", "runs"))
 
 
@@ -219,7 +366,9 @@ def test_get_shows_bracketed_text_as_written(api: Dict[str, Any], monkeypatch) -
         "error": "bad [type=missing]",
         "state": {
             **RUN["state"],
-            "cards": [{**RUN["state"]["cards"][0], "question": "Choose [keep/drop]"}],
+            "waiting_on_people": [
+                {**RUN["state"]["waiting_on_people"][0], "reason": "Choose [keep/drop]"}
+            ],
         },
         "outputs": [{"name": "[/red].md", "node": "report", "bytes": 3}],
     }
@@ -256,11 +405,9 @@ def test_outputs_refuse_a_name_that_leaves_the_directory(monkeypatch, tmp_path, 
     assert not (tmp_path.parent / "evil").exists()
 
 
-def test_errors_with_markup_print_as_written(api: Dict[str, Any], tmp_path) -> None:
-    graph = tmp_path / "g.json"
-    graph.write_text("{}")
+def test_errors_with_markup_print_as_written(api: Dict[str, Any]) -> None:
     result = runner.invoke(
-        app, ["pipelines", "run", str(graph), "--secret", "[/red]"], env=TEST_ENV
+        app, ["pipelines", "run", "acme/triage", "--secret", "[/red]"], env=TEST_ENV
     )
     assert result.exit_code == 1 and "[/red]" in result.output
 
@@ -325,7 +472,7 @@ def test_outputs_encode_names_in_the_download_url(
     assert urls[0].endswith("/api/v1/pipelines/runs/run1/outputs/report/report%3Fv%3D1%23x.md")
 
 
-def test_outputs_of_the_same_name_from_two_heads_are_both_saved(
+def test_outputs_of_the_same_name_in_two_folders_are_both_saved(
     api: Dict[str, Any], monkeypatch, tmp_path
 ) -> None:
     from contextlib import contextmanager
@@ -364,23 +511,17 @@ def test_outputs_of_the_same_name_from_two_heads_are_both_saved(
     assert (tmp_path / "b" / "report.md").read_text() == "b"
 
 
-CARDS = [
-    {
-        "job": "review.t1",
-        "node": "review",
-        "question": "Keep or drop each idea.",
-        "items": ["a", "b", "c"],
-        "reason": "3 ideas",
-    },
-    {"job": "graph", "node": "gate", "question": "Ship it? (yes | no)", "options": ["yes", "no"]},
-    {"job": "graph", "node": "ask", "question": "Which repo?"},
+WAITING = [
+    {"job": "review.t1", "stage": "review", "reason": "3 ideas: keep or drop each", "by": "review"},
+    {"job": "batch", "stage": "gate", "reason": "Ship it?", "by": "gate"},
+    {"job": "t9", "stage": "gate", "reason": "", "by": "operator"},
 ]
 
 
 @pytest.fixture
 def review(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
     calls: Dict[str, Any] = {"posts": []}
-    run = {**RUN, "state": {**RUN["state"], "cards": CARDS}}
+    run = {**RUN, "state": {**RUN["state"], "waiting_on_people": WAITING}}
 
     def post(
         self: Any, endpoint: str, json: Optional[Dict[str, Any]] = None, timeout: Any = None
@@ -409,14 +550,10 @@ def test_get_lists_what_waits_and_how_to_answer_each(review: Dict[str, Any]) -> 
     assert result.exit_code == 0, result.output
     assert review["get"] == "/pipelines/runs/run1"
     for text in (
-        "Waiting on you at review (job review.t1), review: Keep or drop each idea.",
-        "3 ideas",
-        "- b",
-        "gate (job graph), choice",
-        "Options: yes, no",
-        "ask (job graph), question: Which repo?",
-        "prime pipelines reply run1 --node gate --job graph --choice OPTION",
-        "--note TEXT",
+        "Waiting on you at review (job review.t1): 3 ideas: keep or drop each",
+        "Waiting on you at gate (job batch): Ship it?",
+        "Waiting on you at gate (job t9): no reason given",
+        "prime pipelines reply run1 --job review.t1 --patch JSON",
     ):
         assert text in result.output
     assert review["posts"] == []
@@ -425,7 +562,10 @@ def test_get_lists_what_waits_and_how_to_answer_each(review: Dict[str, Any]) -> 
 def test_get_says_why_a_reply_was_not_applied(review: Dict[str, Any]) -> None:
     review["run"] = {
         **RUN,
-        "state": {"cards": [], "skipped_controls": [{"seq": 3, "error": "KeyError: [job]"}]},
+        "state": {
+            "waiting_on_people": [],
+            "skipped_controls": [{"seq": 3, "error": "KeyError: [job]"}],
+        },
     }
     result = runner.invoke(app, ["pipelines", "get", "run1"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
@@ -433,62 +573,40 @@ def test_get_says_why_a_reply_was_not_applied(review: Dict[str, Any]) -> None:
     assert "Waiting on you" not in result.output
 
 
-@pytest.mark.parametrize(
-    "args, keep",
-    [
-        (["--keep", "c", "--keep", "a"], ["a", "c"]),
-        (["--drop", "b"], ["a", "c"]),
-        (["--drop", "a", "--drop", "b", "--drop", "c"], []),
-        (["--keep-all"], ["a", "b", "c"]),
-    ],
-)
-def test_reply_to_a_review_sends_the_items_kept(review: Dict[str, Any], args, keep) -> None:
-    result, sent = _reply(review, "--node", "review", *args, "--note", "fine")
+def test_reply_sends_the_patch_as_an_answer_to_the_job(review: Dict[str, Any]) -> None:
+    patch = '{"approved": true, "note": "fine"}'
+    result, sent = _reply(review, "--job", "batch", "--patch", patch)
     assert result.exit_code == 0, result.output
-    assert sent == [
-        {
-            "type": "reply",
-            "job": "review.t1",
-            "node": "review",
-            "reply": {"note": "fine", "keep": keep},
-        }
-    ]
-    assert f"Sent (control 7), keeping {len(keep)} of 3" in result.output
+    assert sent == [{"type": "answer", "job": "batch", "patch": {"approved": True, "note": "fine"}}]
+    assert "Sent (control 7)" in result.output
     assert "prime pipelines get run1 says why" in result.output
 
 
-def test_reply_with_a_choice_and_to_a_question(review: Dict[str, Any]) -> None:
-    result, sent = _reply(review, "--node", "gate", "--choice", "no")
+def test_reply_needs_no_job_while_only_one_waits(review: Dict[str, Any]) -> None:
+    review["run"] = {**RUN, "state": {"waiting_on_people": WAITING[:1]}}
+    result, sent = _reply(review, "--patch", "{}")
     assert result.exit_code == 0, result.output
-    result, sent = _reply(review, "--node", "ask", "--job", "graph", "--note", "prime")
-    assert result.exit_code == 0, result.output
-    assert [control["reply"] for control in sent] == [
-        {"note": "", "choice": "no"},
-        {"note": "prime"},
-    ]
-    assert [(c["job"], c["node"]) for c in sent] == [("graph", "gate"), ("graph", "ask")]
+    assert sent == [{"type": "answer", "job": "review.t1", "patch": {}}]
 
 
 @pytest.mark.parametrize(
     "args, error",
     [
-        ([], "3 questions match"),
-        (["--job", "graph", "--choice", "yes"], "2 questions match"),
-        (["--node", "nope"], "nothing waiting matches; see prime pipelines get run1"),
-        (["--node", "gate", "--choice", "maybe"], "choose one of: yes, no"),
-        (["--node", "gate", "--keep", "a"], "it has no items"),
-        (["--node", "review", "--choice", "yes"], "no options"),
-        (["--node", "review"], "one of --keep, --drop or --keep-all"),
-        (["--node", "review", "--keep", "a", "--drop", "b"], "one of --keep"),
-        (["--node", "review", "--keep", "z"], "not an item of this review: z"),
-        (["--node", "ask", "--note", "  "], "answer the question with --note"),
+        (["--patch", "{}"], "3 jobs wait on you"),
+        (["--job", "nope", "--patch", "{}"], "nothing waiting matches"),
+        (["--job", "batch", "--patch", "{"], "--patch is not JSON"),
+        (["--job", "batch", "--patch", "[1]"], "--patch is a JSON object"),
+        (["--job", "batch", "--patch", '"yes"'], "--patch is a JSON object"),
     ],
 )
-def test_a_reply_that_doesnt_fit_its_card_sends_nothing(
-    review: Dict[str, Any], args, error
-) -> None:
+def test_a_reply_that_cannot_be_sent_sends_nothing(review: Dict[str, Any], args, error) -> None:
     result, sent = _reply(review, *args)
     assert result.exit_code == 1 and error in result.output and sent == []
+
+
+def test_reply_without_a_patch_sends_nothing(review: Dict[str, Any]) -> None:
+    result, sent = _reply(review, "--job", "batch")
+    assert result.exit_code == 2 and sent == []
 
 
 def test_a_refused_reply_says_why(review: Dict[str, Any], monkeypatch) -> None:
@@ -499,7 +617,7 @@ def test_a_refused_reply_says_why(review: Dict[str, Any], monkeypatch) -> None:
 
     monkeypatch.setattr("prime_cli.client.APIClient.post", post)
     result = runner.invoke(
-        app, ["pipelines", "reply", "run1", "--node", "gate", "--choice", "yes"], env=TEST_ENV
+        app, ["pipelines", "reply", "run1", "--job", "batch", "--patch", "{}"], env=TEST_ENV
     )
     assert result.exit_code == 1 and "This run has finished" in result.output
 
@@ -563,15 +681,15 @@ def test_an_interrupted_download_leaves_no_partial_file(
 def test_reply_quotes_the_names_it_suggests_when_several_match(
     review: Dict[str, Any],
 ) -> None:
-    cards = [
-        {"job": "a; rm -rf ~", "node": "ask", "question": "Which?"},
-        {"job": "b", "node": "ask", "question": "Which?"},
+    waiting = [
+        {"job": "a; rm -rf ~", "stage": "ask", "reason": "Which?"},
+        {"job": "b", "stage": "ask", "reason": "Which?"},
     ]
-    review["run"] = {**RUN, "state": {"cards": cards}}
+    review["run"] = {**RUN, "state": {"waiting_on_people": waiting}}
     env = {**TEST_ENV, "COLUMNS": "2000"}
-    result = runner.invoke(app, ["pipelines", "reply", "run1", "--note", "x"], env=env)
+    result = runner.invoke(app, ["pipelines", "reply", "run1", "--patch", "{}"], env=env)
     assert result.exit_code == 1 and review["posts"] == []
-    assert "--node ask --job 'a; rm -rf ~', --node ask --job b" in result.output
+    assert "--job 'a; rm -rf ~', --job b" in result.output
 
 
 PIPELINES = {
@@ -581,6 +699,7 @@ PIPELINES = {
             "name": "nightly [draft]",
             "team_id": "t1",
             "version": "a" * 64,
+            "package": "acme/triage",
             "updated_at": "2026-11-11T10:20:30Z",
             "runs": 2,
             "latest_run": {**RUN, "state": None},
@@ -590,6 +709,7 @@ PIPELINES = {
             "name": "idle",
             "team_id": "t1",
             "version": "b" * 64,
+            "package": "acme/idle@1.0",
             "updated_at": "2026-11-10T08:00:00Z",
             "runs": 0,
             "latest_run": None,
@@ -649,7 +769,15 @@ def test_list_shows_each_pipeline_with_its_latest_run(saved: Dict[str, Any]) -> 
     assert saved["requests"] == [
         ("GET", "/pipelines", {"team_id": "t1", "page": 1, "per_page": 20})
     ]
-    for text in ("p1", "nightly [draft]", "run1", "RUNNING", "2026-11-11 10:20", "idle"):
+    for text in (
+        "p1",
+        "nightly [draft]",
+        "acme/triage",
+        "acme/idle@1.0",
+        "run1",
+        "RUNNING",
+        "2026-11-11 10:20",
+    ):
         assert text in result.output
     assert "Total: 2 pipelines" in result.output
 
@@ -695,7 +823,15 @@ def test_runs_lists_one_pipelines_or_the_accounts(saved: Dict[str, Any]) -> None
     assert saved["requests"] == [
         ("GET", "/pipelines/runs", {"team_id": "t1", "page": 1, "per_page": 2})
     ]
-    for text in ("run1", "RUNNING", "2026-11-11 10:21", "run0", "STOPPED", "aaaaaaaaaaaa"):
+    for text in (
+        "run1",
+        "acme/triage@0.2.0",
+        "RUNNING",
+        "2026-11-11 10:21",
+        "run0",
+        "STOPPED",
+        "aaaaaaaaaaaa",
+    ):
         assert text in result.output
     assert "2 of 41 runs. Use --page 2 to see more." in result.output
 
@@ -716,54 +852,92 @@ def test_runs_lists_one_pipelines_or_the_accounts(saved: Dict[str, Any]) -> None
 
 def test_run_of_a_pipeline_id_starts_its_latest_version(saved: Dict[str, Any]) -> None:
     env = {**TEST_ENV, "GITHUB_TOKEN": "gh"}
-    args = ["--secret", "GITHUB_TOKEN", "--run-code", "--allow-host", "api.github.com"]
+    args = ["--secret", "GITHUB_TOKEN", "--run-package", "--allow-host", "api.github.com"]
     result = runner.invoke(app, ["pipelines", "run", "p1", *args, "-t", "t1"], env=env)
     assert result.exit_code == 0, result.output
     ((method, endpoint, body),) = saved["requests"]
     assert (method, endpoint) == ("POST", "/pipelines/runs")
-    # No graph, and no team: the pipeline runs as its own account.
+    # No package, and no team: the pipeline runs the launch it was saved with, as its own account.
     assert body == {
         "pipeline_id": "p1",
-        "sample": None,
         "secrets": {"GITHUB_TOKEN": "gh"},
         "network": {"allow": ["api.github.com"]},
-        "read_personal_traces": False,
-        "run_code": True,
+        "run_package": True,
     }
     assert "prime pipelines get run1" in result.output
 
 
-def test_run_tells_a_file_from_a_pipeline_id(saved: Dict[str, Any], tmp_path) -> None:
-    # A file that exists is a graph, whatever it is called.
-    graph = tmp_path / "p1"
-    graph.write_text(json.dumps({"name": "g", "nodes": {}}))
-    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
-    assert result.exit_code == 0, result.output
-    assert saved["requests"][0][2]["graph"] == {"name": "g", "nodes": {}}
-    assert saved["requests"][0][2]["pipeline_id"] is None
-
-    saved["requests"].clear()
-    missing = runner.invoke(app, ["pipelines", "run", "missing.json"], env=TEST_ENV)
-    assert missing.exit_code == 1 and "neither a file nor a pipeline's id" in missing.output
-    both = runner.invoke(app, ["pipelines", "run", "p1", "--pipeline", "p2"], env=TEST_ENV)
-    assert both.exit_code == 1 and "--pipeline goes with a graph file" in both.output
-    assert saved["requests"] == []
-
-
-def test_run_says_how_to_choose_between_pipelines_of_one_name(
-    saved: Dict[str, Any], tmp_path
+def test_run_saves_a_new_version_of_a_pipeline_under_the_name_it_has(
+    saved: Dict[str, Any],
 ) -> None:
     from prime_cli.client import APIError
 
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--pipeline", "p/1"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    # Read first: a save names the pipeline, and it keeps the name it has.
+    assert [request[:2] for request in saved["requests"]] == [
+        ("GET", "/pipelines/p%2F1"),
+        ("POST", "/pipelines/runs"),
+    ]
+    body = saved["requests"][1][2]
+    assert (body["pipeline_id"], body["name"]) == ("p/1", "nightly [draft]")
+
+    saved["requests"].clear()
+    args = ["pipelines", "run", "acme/triage", "--pipeline", "p1", "--name", "weekly"]
+    result = runner.invoke(app, args, env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    ((method, _, body),) = saved["requests"]
+    assert method == "POST" and (body["pipeline_id"], body["name"]) == ("p1", "weekly")
+
+    saved["requests"].clear()
+    saved["refuse"] = ("GET", APIError("HTTP 404: Pipeline not found"))
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--pipeline", "p9"], env=TEST_ENV
+    )
+    assert result.exit_code == 1 and "Pipeline not found" in result.output
+    assert [request[0] for request in saved["requests"]] == ["GET"]
+
+
+def test_run_tells_a_package_from_a_pipeline_id(saved: Dict[str, Any], tmp_path) -> None:
+    saved["team"] = "picked"
+    result = runner.invoke(app, ["pipelines", "run", "acme/p1@latest"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    body = saved["requests"][0][2]
+    assert body["package"] == "acme/p1@latest" and body["pipeline_id"] is None
+    # Without --team, the team picked with `prime switch`.
+    assert body["team_id"] == "picked"
+
+    saved["requests"].clear()
+    # A file is neither: the launch file goes with --launch, after the package.
+    file = tmp_path / "launch.toml"
+    file.write_text("")
+    for target in (str(file), "a/b/c", "acme/", "acme/p1@", "two words"):
+        neither = runner.invoke(app, ["pipelines", "run", target], env=TEST_ENV)
+        assert neither.exit_code == 1 and "neither a package" in neither.output, target
+    options = (
+        ["--pipeline", "p2"],
+        ["--launch", str(file)],
+        ["--spend-limit", "5"],
+        ["--name", "nightly"],
+    )
+    for option in options:
+        both = runner.invoke(app, ["pipelines", "run", "p1", *option], env=TEST_ENV)
+        assert both.exit_code == 1 and "go with a package" in both.output
+    assert saved["requests"] == []
+
+
+def test_run_says_how_to_choose_between_pipelines_of_one_name(saved: Dict[str, Any]) -> None:
+    from prime_cli.client import APIError
+
     detail = (
-        "Several pipelines are named 'g': p1, p2. Name the one to add this version to "
+        "Several pipelines are named 'triage': p1, p2. Name the one to add this version to "
         "with pipeline_id."
     )
     saved["refuse"] = ("POST", APIError(f"HTTP 409: {detail}"))
-    graph = tmp_path / "g.json"
-    graph.write_text(json.dumps({"name": "g", "nodes": {}}))
     env = {**TEST_ENV, "COLUMNS": "2000"}
-    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=env)
+    result = runner.invoke(app, ["pipelines", "run", "acme/triage"], env=env)
     assert result.exit_code == 1 and "p1, p2" in result.output
     assert "Pass one of these ids with --pipeline." in result.output
 
@@ -821,37 +995,43 @@ def test_delete_of_a_pipeline_that_is_not_yours_is_not_found(saved: Dict[str, An
     assert [request[0] for request in saved["requests"]] == ["GET"]
 
 
-def test_run_reads_the_graph_file_as_utf8_whatever_the_locale(
+def test_run_reads_the_launch_file_as_utf8_whatever_the_locale(
     api: Dict[str, Any], monkeypatch, tmp_path
 ) -> None:
-    graph = tmp_path / "g.json"
-    text = json.dumps({"name": "café ✓", "nodes": {}}, ensure_ascii=False)
-    graph.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))  # with a BOM, as Notepad saves it
+    file = tmp_path / "launch.json"
+    text = json.dumps({"config": {"name": "café ✓"}}, ensure_ascii=False)
+    file.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))  # with a BOM, as Notepad saves it
     monkeypatch.setattr("locale.getpreferredencoding", lambda *args: "cp1252")
     monkeypatch.setattr("locale.getencoding", lambda: "cp1252", raising=False)
-    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--launch", str(file)], env=TEST_ENV
+    )
     assert result.exit_code == 0, result.output
-    assert api["post"][1]["graph"] == {"name": "café ✓", "nodes": {}}
+    assert api["post"][1]["config"] == {"name": "café ✓"}
 
 
-def test_run_says_when_the_graph_file_is_not_utf8(api: Dict[str, Any], tmp_path) -> None:
-    graph = tmp_path / "g.json"
-    graph.write_bytes(b'{"name": "caf\xe9"}')
-    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
-    assert result.exit_code == 1 and "is not JSON" in result.output
+def test_run_says_when_the_launch_file_is_not_utf8(api: Dict[str, Any], tmp_path) -> None:
+    file = tmp_path / "launch.toml"
+    file.write_bytes(b'[config]\nname = "caf\xe9"\n')
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--launch", str(file)], env=TEST_ENV
+    )
+    assert result.exit_code == 1 and "is not UTF-8 text" in result.output
     assert "Traceback" not in result.output and "post" not in api
 
 
-def test_run_says_when_the_graph_file_cannot_be_read(
+def test_run_says_when_the_launch_file_cannot_be_read(
     api: Dict[str, Any], monkeypatch, tmp_path
 ) -> None:
-    graph = tmp_path / "g.json"
-    graph.write_text("{}")
+    file = tmp_path / "launch.toml"
+    file.write_text("")
 
     def read_text(self: Any, *args: Any, **kwargs: Any) -> str:
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr("pathlib.Path.read_text", read_text)
-    result = runner.invoke(app, ["pipelines", "run", str(graph)], env=TEST_ENV)
+    result = runner.invoke(
+        app, ["pipelines", "run", "acme/triage", "--launch", str(file)], env=TEST_ENV
+    )
     assert result.exit_code == 1 and "can't read" in result.output
     assert "Traceback" not in result.output and "post" not in api

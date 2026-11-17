@@ -801,19 +801,26 @@ def checkpoint_list(
     older_than: Optional[str] = typer.Option(
         None, "--older-than", help="Only checkpoints older than this, e.g. 7d"
     ),
+    user_id: Optional[str] = typer.Option(
+        None, "--user-id", help="Only checkpoints this user created"
+    ),
+    label: Optional[List[str]] = typer.Option(
+        None, "--label", "-l", help="Only checkpoints of sandboxes with this label (repeatable)"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List checkpoints of one sandbox, or of your whole account (incl. deleted sandboxes)."""
     validate_output_format(output, console)
-    if checkpoint_id and (not sandbox_id or state or older_than):
+    filtered = bool(state or older_than or user_id or label)
+    if checkpoint_id and (not sandbox_id or filtered):
         console.print(
-            "[red]Error:[/red] --checkpoint-id needs a sandbox ID and no --state/--older-than; "
+            "[red]Error:[/red] --checkpoint-id needs a sandbox ID and no other filters; "
             "use 'prime sandbox checkpoint get ID' to look one up."
         )
         raise typer.Exit(1)
     client = SandboxClient(APIClient())
     try:
-        if sandbox_id and not (state or older_than):
+        if sandbox_id and not filtered:
             results = client.list_checkpoints(sandbox_id, checkpoint_id)
         else:
             results = client.list_all_checkpoints(
@@ -821,6 +828,8 @@ def checkpoint_list(
                 sandbox_id=sandbox_id,
                 states=[s.upper() for s in state] if state else None,
                 created_before=_older_than(older_than),
+                user_id=user_id,
+                labels=label,
             )
     except APIError as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
@@ -922,17 +931,40 @@ def checkpoint_delete(
     older_than: Optional[str] = typer.Option(
         None, "--older-than", help="With --all: only checkpoints older than this, e.g. 7d"
     ),
+    label: Optional[List[str]] = typer.Option(
+        None,
+        "--label",
+        "-l",
+        help="With --all: only checkpoints of sandboxes with this label (repeatable)",
+    ),
+    user_id: Optional[str] = typer.Option(
+        None,
+        "--user-id",
+        help="With --all: delete this teammate's checkpoints instead of yours (team admin)",
+    ),
+    all_users: bool = typer.Option(
+        False,
+        "--all-users",
+        help="With --all: delete every team member's checkpoints, not just yours (team admin)",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """Delete checkpoints by ID, all of a sandbox's with --sandbox, or all with --all.
 
-    Deleting stops storage billing. Data is kept while descendant checkpoints
-    still need it, without charges.
+    In a team, --all deletes only your own checkpoints unless a team admin
+    passes --user-id or --all-users. Deleting stops storage billing. Data is
+    kept while descendant checkpoints still need it, without charges.
     """
     validate_output_format(output, console)
     if sum((bool(checkpoint_ids), bool(sandbox_id) and not delete_all, delete_all)) != 1:
         console.print("[red]Error:[/red] Pass checkpoint IDs, --sandbox, or --all.")
+        raise typer.Exit(1)
+    if (label or user_id or all_users) and not delete_all:
+        console.print("[red]Error:[/red] --label, --user-id and --all-users need --all.")
+        raise typer.Exit(1)
+    if user_id and all_users:
+        console.print("[red]Error:[/red] Pass --user-id or --all-users, not both.")
         raise typer.Exit(1)
     parts = (s.strip() for arg in checkpoint_ids or [] for s in arg.split(","))
     ids = [i for i in dict.fromkeys(parts) if i]
@@ -940,14 +972,22 @@ def checkpoint_delete(
     resolved_team = team_id or client.client.config.team_id
     if delete_all:
         scope = f"team {resolved_team}" if resolved_team else "your personal account"
+        owner = (
+            "ALL of EVERY team member's"
+            if all_users
+            else f"ALL of user {user_id}'s"
+            if user_id
+            else "ALL your"
+        )
         filters = "".join(
             [
                 f" of sandbox {sandbox_id}" if sandbox_id else "",
+                f" with labels {', '.join(label)}" if label else "",
                 f" in state {', '.join(state)}" if state else "",
                 f" older than {older_than}" if older_than else "",
             ]
         )
-        target = f"ALL checkpoints{filters} in {scope}"
+        target = f"{owner} checkpoints{filters} in {scope}"
     elif sandbox_id:
         target = f"all checkpoints of sandbox {sandbox_id}"
     else:
@@ -963,6 +1003,9 @@ def checkpoint_delete(
                 sandbox_id=sandbox_id,
                 states=[s.upper() for s in state] if state else None,
                 created_before=_older_than(older_than),
+                user_id=user_id,
+                labels=label,
+                all_users=all_users,
             )
             deleted = result.deleted
             errors = [e.model_dump() for e in result.errors]

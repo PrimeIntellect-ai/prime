@@ -559,9 +559,7 @@ async def test_wait_for_checkpoint_backoff_caps_at_max_delay(
 
     assert checkpoint.state == "DURABLE"
     # Ten fast sleeps, one backoff ramp, then the capped 10s delay.
-    assert checkpoint_clock == (
-        [1.0] * 11 + [1.5, 2.25, 3.375, 5.0625, 7.59375] + [10.0] * 13
-    )
+    assert checkpoint_clock == ([1.0] * 11 + [1.5, 2.25, 3.375, 5.0625, 7.59375] + [10.0] * 13)
 
 
 async def concurrent_checkpoint_waits(client, checkpoint_ids):
@@ -897,3 +895,26 @@ def test_explicit_zero_ttl_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client.client, "request", request)
     client.checkpoint("sandbox-1", ttl_seconds=0)
     assert sent == [{"ttl_seconds": 0}]
+
+
+def test_account_wide_filters_and_all_users(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str, params: dict) -> dict:
+        calls.append((method, dict(params)))
+        if method == "GET":
+            return {"checkpoints": [], "next_cursor": None}
+        return {"deleted": [], "errors": [], "next_cursor": None}
+
+    monkeypatch.setattr(client.client, "request", request)
+    client.list_all_checkpoints(team_id="team-1", user_id="u-2", labels=["run-1", "eval"])
+    client.delete_all_checkpoints(team_id="team-1", labels=["run-1"])
+    client.delete_all_checkpoints(team_id="team-1", all_users=True)
+
+    assert calls == [
+        ("GET", {"team_id": "team-1", "user_id": "u-2", "labels": ["run-1", "eval"]}),
+        # Without user_id/all_users the platform deletes only the caller's own.
+        ("DELETE", {"team_id": "team-1", "labels": ["run-1"]}),
+        ("DELETE", {"team_id": "team-1", "all_users": "true"}),
+    ]

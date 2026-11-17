@@ -60,6 +60,7 @@ from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxDiskFullError,
     SandboxFileNotFoundError,
     SandboxFileTooLargeError,
     SandboxImagePullError,
@@ -1875,6 +1876,9 @@ def _owner_checkpoint_params(
     sandbox_id: Optional[str],
     states: Optional[List[str]],
     created_before: Optional[datetime],
+    user_id: Optional[str] = None,
+    labels: Optional[List[str]] = None,
+    all_users: bool = False,
 ) -> Dict[str, Any]:
     """Query params shared by the account-wide checkpoint list and delete."""
     params: Dict[str, Any] = {}
@@ -1882,6 +1886,12 @@ def _owner_checkpoint_params(
         params["team_id"] = team_id
     if sandbox_id:
         params["sandbox_id"] = sandbox_id
+    if user_id:
+        params["user_id"] = user_id
+    if labels:
+        params["labels"] = labels
+    if all_users:
+        params["all_users"] = "true"
     if states:
         params["state"] = states
     if created_before:
@@ -1978,8 +1988,13 @@ def _build_terminated_message(command: str, ctx: dict) -> str:
     status = ctx.get("status")
 
     if error_type == "OOM_KILLED":
-        parts.append("The sandbox was terminated due to out-of-memory (OOM).")
-        parts.append("Consider requesting more memory or optimizing memory usage.")
+        parts.append("The sandbox ran out of memory.")
+        parts.append("Consider requesting more memory or reducing memory usage.")
+    elif error_type == "SANDBOX_UNRESPONSIVE":
+        parts.append("The sandbox stopped responding and was terminated.")
+    elif error_type == "NODE_FAILURE":
+        parts.append("The sandbox's host failed; this was not caused by the sandbox.")
+        parts.append("Retry with a new sandbox.")
     elif error_type == "TIMEOUT":
         parts.append("The sandbox exceeded its maximum runtime and was terminated.")
     elif error_type == "IMAGE_PULL_FAILED":
@@ -2648,13 +2663,18 @@ class SandboxClient:
         sandbox_id: Optional[str] = None,
         states: Optional[List[str]] = None,
         created_before: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
     ) -> List[SandboxCheckpoint]:
         """List every rootfs checkpoint of your account (or team_id), oldest first.
 
-        Includes checkpoints of deleted sandboxes.
+        Includes checkpoints of deleted sandboxes. user_id keeps one creator's
+        checkpoints; labels keeps those whose sandbox had ALL these labels.
         """
         team_id = team_id if team_id is not None else self.client.config.team_id
-        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        params = _owner_checkpoint_params(
+            team_id, sandbox_id, states, created_before, user_id, labels
+        )
         results: List[SandboxCheckpoint] = []
         while True:
             response = self.client.request("GET", "/sandbox/checkpoints", params=params)
@@ -2669,14 +2689,22 @@ class SandboxClient:
         sandbox_id: Optional[str] = None,
         states: Optional[List[str]] = None,
         created_before: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        all_users: bool = False,
     ) -> DeleteSandboxCheckpointsResponse:
         """Delete every matching durable or failed checkpoint, with per-checkpoint errors.
 
         Each deletion behaves like delete_checkpoint; the active tip of a running
-        sandbox is kept and reported as CONFLICT.
+        sandbox is kept and reported as CONFLICT. In a team, only your own
+        checkpoints are deleted unless you are a team admin and pass another
+        user_id or all_users=True. labels keeps checkpoints whose sandbox had ALL
+        these labels.
         """
         team_id = team_id if team_id is not None else self.client.config.team_id
-        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        params = _owner_checkpoint_params(
+            team_id, sandbox_id, states, created_before, user_id, labels, all_users
+        )
         total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
         while True:
             response = self.client.request("DELETE", "/sandbox/checkpoints", params=params)
@@ -3912,6 +3940,11 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
@@ -3980,6 +4013,11 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
@@ -4501,10 +4539,14 @@ class AsyncSandboxClient:
         sandbox_id: Optional[str] = None,
         states: Optional[List[str]] = None,
         created_before: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
     ) -> List[SandboxCheckpoint]:
         """List every rootfs checkpoint of your account (or team_id), oldest first."""
         team_id = team_id if team_id is not None else self.client.config.team_id
-        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        params = _owner_checkpoint_params(
+            team_id, sandbox_id, states, created_before, user_id, labels
+        )
         results: List[SandboxCheckpoint] = []
         while True:
             response = await self.client.request("GET", "/sandbox/checkpoints", params=params)
@@ -4519,10 +4561,15 @@ class AsyncSandboxClient:
         sandbox_id: Optional[str] = None,
         states: Optional[List[str]] = None,
         created_before: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        all_users: bool = False,
     ) -> DeleteSandboxCheckpointsResponse:
         """Delete every matching durable or failed checkpoint, with per-checkpoint errors."""
         team_id = team_id if team_id is not None else self.client.config.team_id
-        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        params = _owner_checkpoint_params(
+            team_id, sandbox_id, states, created_before, user_id, labels, all_users
+        )
         total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
         while True:
             response = await self.client.request("DELETE", "/sandbox/checkpoints", params=params)
@@ -6040,6 +6087,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
@@ -6109,6 +6161,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e

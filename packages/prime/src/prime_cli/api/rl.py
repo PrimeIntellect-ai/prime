@@ -222,6 +222,19 @@ class RLClient:
                 raise APIError(f"Failed to delete Hosted Training run: {e.response.text}")
             raise APIError(f"Failed to delete Hosted Training run: {str(e)}")
 
+    def rename_run(self, run_id: str, name: str) -> RLRun:
+        """Rename a Hosted Training run. The server trims `name` and requires
+        1-255 characters after trimming."""
+        try:
+            response = self.client.patch(f"/rft/runs/{run_id}", json={"name": name})
+            return RLRun.model_validate(response.get("run"))
+        except APIError:
+            raise
+        except Exception as e:
+            if hasattr(e, "response") and hasattr(e.response, "text"):
+                raise APIError(f"Failed to rename Hosted Training run: {e.response.text}")
+            raise APIError(f"Failed to rename Hosted Training run: {str(e)}")
+
     def restart_run(self, run_id: str) -> RLRun:
         """Restart a running Hosted Training run from its latest checkpoint.
 

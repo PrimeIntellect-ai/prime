@@ -487,6 +487,39 @@ def test_outputs_encode_names_in_the_download_url(
     assert urls[0].endswith("/api/v1/pipelines/runs/run1/outputs/report/report%3Fv%3D1%23x.md")
 
 
+def test_an_output_with_a_name_near_the_filesystems_limit_is_saved(
+    api: Dict[str, Any], monkeypatch, tmp_path
+) -> None:
+    """The file a download is written to first has a short name of its own: one built on the
+    output's name would pass the limit the output's own name fits in."""
+    from contextlib import contextmanager
+
+    name = "r" * 247 + ".md"
+    run = {**RUN, "outputs": [{"name": name, "node": "report", "bytes": 3}]}
+    monkeypatch.setattr(
+        "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
+    )
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def iter_bytes(self):
+            yield b"# R"
+
+    @contextmanager
+    def stream(self: Any, method: str, url: str, **kwargs: Any):
+        yield Response()
+
+    monkeypatch.setattr("httpx.Client.stream", stream)
+    result = runner.invoke(
+        app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path)], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "report" / name).read_text() == "# R"
+    assert [path.name for path in (tmp_path / "report").iterdir()] == [name]
+
+
 def test_outputs_of_the_same_name_in_two_folders_are_both_saved(
     api: Dict[str, Any], monkeypatch, tmp_path
 ) -> None:

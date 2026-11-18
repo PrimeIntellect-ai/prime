@@ -524,8 +524,10 @@ def outputs(
             timeout = httpx.Timeout(300.0, connect=10.0)
             with client.client.stream("GET", url, timeout=timeout) as response:
                 response.raise_for_status()
-                # A new file with a random name (O_EXCL), so nothing already there is followed.
-                handle, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+                # A new file with a random name (O_EXCL), so nothing already there is followed. The
+                # name is short and its own: one built on the output's would pass the filesystem's
+                # limit for a name near it.
+                handle, name = tempfile.mkstemp(dir=target.parent, prefix=".part-")
                 partial = Path(name)
                 with os.fdopen(handle, "wb") as file:
                     for chunk in response.iter_bytes():

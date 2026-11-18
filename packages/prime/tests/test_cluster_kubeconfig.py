@@ -11,6 +11,9 @@ import itertools
 import json
 import os
 import re
+import socket
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -41,6 +44,15 @@ def token_cache_dir(tmp_path, monkeypatch):
     pids = itertools.count(1000)
     monkeypatch.setattr("prime_cli.commands.auth.os.getppid", lambda: next(pids))
     return cache
+
+
+@pytest.fixture(autouse=True)
+def proxy_names_resolve(monkeypatch):
+    """No test reaches a real resolver: every proxy name resolves unless a
+    test says otherwise."""
+    looked_up = []
+    monkeypatch.setattr("prime_cli.commands.cluster._resolve", looked_up.append)
+    return looked_up
 
 
 class _FakeConfig:
@@ -238,6 +250,17 @@ class _FakeAPIClient:
         if type(self).error is not None:
             raise type(self).error
         return type(self).payload
+
+
+def _flat(output: str) -> str:
+    """Rich wraps long lines; compare on normalized whitespace."""
+    return " ".join(output.split())
+
+
+NO_GRANT_DETAIL = (
+    "You are not a member of any Kubernetes reservation on 'c1'. "
+    "Ask your team admin to add you, or reserve nodes from the dashboard."
+)
 
 
 class TestClusterLogin:
@@ -440,6 +463,343 @@ class TestClusterLogin:
         assert "No active grant" in result.output
         assert not (tmp_path / "kube" / "c1.yaml").exists()
 
+    def test_no_grant_shows_the_platform_message_and_points_at_list(self, login, tmp_path):
+        from prime_cli.core.client import APIError
+
+        _FakeAPIClient.error = APIError(f"HTTP 403: {NO_GRANT_DETAIL}")
+
+        result = login("c1")
+
+        assert result.exit_code == 1
+        output = _flat(result.output)
+        assert NO_GRANT_DETAIL in output
+        assert "HTTP 403" not in output
+        assert "prime cluster list" in output
+        assert "Removed" not in output
+        assert not (tmp_path / "kube" / "c1.yaml").exists()
+
+    def test_no_grant_removes_the_stale_kubeconfig(self, login, tmp_path):
+        from prime_cli.core.client import APIError
+
+        assert login("c1").exit_code == 0
+        path = tmp_path / "kube" / "c1.yaml"
+        other = tmp_path / "kube" / "c2.yaml"
+        other.write_text("untouched")
+        assert path.exists()
+
+        _FakeAPIClient.error = APIError(f"HTTP 403: {NO_GRANT_DETAIL}")
+        result = login("c1")
+
+        assert result.exit_code == 1
+        assert not path.exists()
+        assert other.read_text() == "untouched"
+        # Rich may break the long temp path anywhere; drop all whitespace.
+        assert f"Removedthestalekubeconfig{path}." in "".join(result.output.split())
+
+    def test_other_errors_keep_the_kubeconfig(self, login, tmp_path):
+        from prime_cli.core.client import ServerError
+
+        assert login("c1").exit_code == 0
+        path = tmp_path / "kube" / "c1.yaml"
+        before = path.read_text()
+
+        _FakeAPIClient.error = ServerError("HTTP 503: try later")
+        result = login("c1")
+
+        assert result.exit_code == 1
+        assert path.read_text() == before
+        assert "Removed" not in result.output
+
+    def test_no_reachable_grant_says_the_kept_file_may_be_stale(self, login, tmp_path):
+        assert login("c1").exit_code == 0
+        _FakeAPIClient.payload = {**self.INFO, "grants": [_grant("train", reason="Not yet.")]}
+
+        result = login("c1")
+
+        assert result.exit_code == 1
+        path = tmp_path / "kube" / "c1.yaml"
+        assert path.exists()
+        squashed = "".join(result.output.split())
+        assert f"Theexisting{path}waskept,butitscontextsmaybestale." in squashed
+
+    def test_default_context_is_the_first_and_says_how_to_switch(self, login, tmp_path):
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        config = yaml.safe_load((tmp_path / "kube" / "c1.yaml").read_text())
+        assert config["current-context"] == "c1-train"
+        output = _flat(result.output)
+        assert "Current context: c1-train" in output
+        assert "kubectl config use-context c1-eval" in output
+
+    def test_a_single_context_has_nothing_to_switch_to(self, login):
+        _FakeAPIClient.payload = {**self.INFO, "grants": [_grant("train")]}
+
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        assert "Current context: c1-train" in result.output
+        assert "use-context" not in result.output
+
+    def test_pool_selects_the_current_context(self, login, tmp_path):
+        result = login("c1", "--pool", "eval")
+
+        assert result.exit_code == 0, result.output
+        config = yaml.safe_load((tmp_path / "kube" / "c1.yaml").read_text())
+        # Every reachable context is still written; only the current one moves.
+        assert [c["name"] for c in config["contexts"]] == ["c1-train", "c1-eval"]
+        assert config["current-context"] == "c1-eval"
+        output = _flat(result.output)
+        assert "Current context: c1-eval" in output
+        assert "kubectl config use-context c1-train" in output
+
+    def test_unknown_pool_lists_the_available_ones_and_writes_nothing(self, login, tmp_path):
+        assert login("c1").exit_code == 0
+        path = tmp_path / "kube" / "c1.yaml"
+        before = path.read_text()
+
+        result = login("c1", "--pool", "nope")
+
+        assert result.exit_code == 1
+        output = _flat(result.output)
+        assert "Pool 'nope' on 'c1' is not one of your reservations there." in output
+        assert "Available pools: train, eval" in output
+        assert path.read_text() == before
+
+    def test_unreachable_pool_says_why_and_writes_nothing(self, login, tmp_path):
+        _FakeAPIClient.payload = {
+            **self.INFO,
+            "grants": [_grant("train"), _grant("eval", reason="Proxy not joined.")],
+        }
+
+        result = login("c1", "--pool", "eval")
+
+        assert result.exit_code == 1
+        output = _flat(result.output)
+        assert "Pool 'eval' on 'c1' is not reachable: Proxy not joined." in output
+        assert "Available pools: train" in output
+        assert not (tmp_path / "kube" / "c1.yaml").exists()
+
+
+class TestProxyDnsCheck:
+    """After writing, each context's proxy name is looked up once; a name
+    that does not resolve is a Tailscale hint, never a failed login."""
+
+    @pytest.fixture
+    def login(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        monkeypatch.setattr("prime_cli.commands.cluster.KUBECONFIG_DIR", tmp_path / "kube")
+        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
+        _FakeAPIClient.payload = dict(TestClusterLogin.INFO)
+        _FakeAPIClient.error = None
+        _FakeAPIClient.requested = []
+
+        def _run(*args):
+            from prime_cli.main import app as root_app
+
+            return runner.invoke(root_app, ["cluster", "login", *args])
+
+        return _run
+
+    def test_resolvable_names_print_no_warning(self, login, proxy_names_resolve):
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        assert sorted(proxy_names_resolve) == [
+            "k8s-eval.tail1234.ts.net",
+            "k8s-train.tail1234.ts.net",
+        ]
+        assert "Can't resolve" not in result.output
+
+    def test_an_unresolvable_name_warns_but_the_login_succeeds(self, login, monkeypatch, tmp_path):
+        def _resolve(host):
+            if host.startswith("k8s-eval"):
+                raise socket.gaierror(8, "nodename nor servname provided")
+
+        monkeypatch.setattr("prime_cli.commands.cluster._resolve", _resolve)
+
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "kube" / "c1.yaml").exists()
+        output = _flat(result.output)
+        assert (
+            "Can't resolve k8s-eval.tail1234.ts.net. Make sure Tailscale is connected "
+            "to your team's tailnet (the one the reservation's proxy joined), then retry."
+        ) in output
+        assert "Can't resolve k8s-train" not in output
+
+    def test_a_slow_resolver_is_cut_off(self, login, monkeypatch):
+        release = threading.Event()
+
+        def _hang(host):
+            release.wait(10)
+
+        monkeypatch.setattr("prime_cli.commands.cluster._resolve", _hang)
+        monkeypatch.setattr("prime_cli.commands.cluster.DNS_CHECK_TIMEOUT_SECONDS", 0.2)
+        started = time.monotonic()
+        try:
+            result = login("c1")
+        finally:
+            release.set()
+
+        # One budget for every name, not one per name.
+        assert time.monotonic() - started < 2
+        assert result.exit_code == 0, result.output
+        assert _flat(result.output).count("Can't resolve") == 2
+
+    def test_ip_literals_are_not_looked_up(self, login, proxy_names_resolve):
+        _FakeAPIClient.payload = {
+            **TestClusterLogin.INFO,
+            "grants": [
+                _grant("train", server="https://[::1]:6443"),
+                _grant("eval", server="https://127.0.0.1:6443"),
+            ],
+        }
+
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        assert proxy_names_resolve == []
+
+
+LIST_PAYLOAD = {
+    "clusters": [
+        {
+            "cluster": "c1",
+            "displayName": "Cluster One",
+            "reservations": [
+                {
+                    "pool": "eval",
+                    "namespace": "prime-user-u1-k8s-eval",
+                    "teamId": "team-1",
+                    "status": "Ready",
+                    "proxyReady": True,
+                    "server": "https://eval.tail1234.ts.net",
+                    "unavailableReason": None,
+                },
+                {
+                    "pool": "train",
+                    "namespace": "prime-user-u1-k8s-train",
+                    "teamId": "team-1",
+                    "status": "Ready",
+                    "proxyReady": True,
+                    "server": "https://train.tail1234.ts.net",
+                    "unavailableReason": None,
+                },
+            ],
+        },
+        {
+            "cluster": "c2",
+            "displayName": None,
+            "reservations": [
+                {
+                    "pool": "debug",
+                    "namespace": "prime-user-u1-k8s-debug",
+                    "teamId": "team-1",
+                    "status": "Provisioning",
+                    "proxyReady": False,
+                    "server": None,
+                    "unavailableReason": "Proxy has not joined your tailnet yet.",
+                }
+            ],
+        },
+    ]
+}
+
+
+class TestClusterList:
+    @pytest.fixture
+    def cluster_list(self, monkeypatch):
+        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
+        _FakeAPIClient.payload = LIST_PAYLOAD
+        _FakeAPIClient.error = None
+        _FakeAPIClient.requested = []
+
+        def _run(*args):
+            from prime_cli.main import app as root_app
+
+            return runner.invoke(root_app, ["cluster", "list", *args], env={"COLUMNS": "200"})
+
+        return _run
+
+    def test_table_lists_each_reservation_with_its_next_step(self, cluster_list):
+        result = cluster_list()
+
+        assert result.exit_code == 0, result.output
+        assert _FakeAPIClient.requested == ["/clusters"]
+        output = result.output
+        for text in (
+            "prime-user-u1-k8s-eval",
+            "prime-user-u1-k8s-train",
+            "prime-user-u1-k8s-debug",
+            "Cluster One",
+            "Provisioning",
+            "not ready",
+            # Two loginable pools on c1: each step names its pool.
+            "prime cluster login c1 --pool eval",
+            "prime cluster login c1 --pool train",
+            "Proxy has not joined your tailnet yet.",
+        ):
+            assert text in output, text
+
+    def test_one_loginable_pool_needs_no_pool_flag(self, cluster_list):
+        _FakeAPIClient.payload = {
+            "clusters": [
+                {
+                    **LIST_PAYLOAD["clusters"][0],
+                    "reservations": [LIST_PAYLOAD["clusters"][0]["reservations"][0]],
+                }
+            ]
+        }
+
+        result = cluster_list()
+
+        assert result.exit_code == 0, result.output
+        assert "prime cluster login c1" in result.output
+        assert "--pool" not in result.output
+
+    def test_json_is_the_platforms_shape(self, cluster_list):
+        result = cluster_list("--output", "json")
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == LIST_PAYLOAD
+
+    def test_empty_list_says_how_to_get_access(self, cluster_list):
+        _FakeAPIClient.payload = {"clusters": []}
+
+        result = cluster_list()
+
+        assert result.exit_code == 0, result.output
+        assert _flat(result.output) == (
+            "You're not a member of any Kubernetes reservation. Ask your team admin "
+            "to add you, or reserve nodes from the dashboard."
+        )
+
+    def test_empty_json_is_an_empty_list(self, cluster_list):
+        _FakeAPIClient.payload = {"clusters": []}
+
+        result = cluster_list("-o", "json")
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {"clusters": []}
+
+    def test_api_errors_are_reported(self, cluster_list):
+        from prime_cli.core.client import UnauthorizedError
+
+        _FakeAPIClient.error = UnauthorizedError("Token permission missing: scope 'clusters'")
+
+        result = cluster_list()
+
+        assert result.exit_code == 1
+        assert "scope 'clusters'" in result.output
+
+    def test_bad_output_format_is_refused(self, cluster_list):
+        result = cluster_list("-o", "yaml")
+
+        assert result.exit_code == 1
+        assert _FakeAPIClient.requested == []
+
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -458,7 +818,13 @@ class TestRootWiring:
 
         result = runner.invoke(root_app, ["cluster", "login", "--help"])
         assert result.exit_code == 0
-        assert "CLUSTER" in _ANSI.sub("", result.output)
+
+    def test_cluster_list_is_a_real_subcommand(self):
+        from prime_cli.main import app as root_app
+
+        result = runner.invoke(root_app, ["cluster", "list", "--help"])
+        assert result.exit_code == 0
+        assert "--output" in _ANSI.sub("", result.output)
 
 
 class TestCustomBaseUrlSurvivesContextRefresh:

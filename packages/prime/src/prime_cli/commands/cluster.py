@@ -16,16 +16,27 @@ Tailscale API proxy on the customer's tailnet, so every grant carries its own
 verify the apiserver certificate under `tlsServerName`, not the proxy's name.
 """
 
+import ipaddress
 import os
+import socket
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import typer
 import yaml
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console
+from ..utils import (
+    PlainTyper,
+    build_table,
+    get_console,
+    output_data_as_json,
+    validate_output_format,
+)
 from ..utils import kube_token_cache as token_cache
 
 app = PlainTyper(
@@ -36,8 +47,8 @@ app = PlainTyper(
 
 @app.callback()
 def _cluster() -> None:
-    """Present so Typer keeps `login` as a subcommand rather than promoting it
-    to the group when it is the only one."""
+    """Present so Typer keeps this a command group whatever subcommands it
+    has, rather than promoting a lone one to the group."""
 
 
 console = get_console()
@@ -48,8 +59,24 @@ console = get_console()
 KUBECONFIG_DIR = Path.home() / ".prime" / "kube"
 
 
+# What `prime cluster list` and a refused login say when there is nothing to
+# log in to: the platform cannot grant access itself, so point at who can.
+NO_RESERVATION_HINT = (
+    "You're not a member of any Kubernetes reservation. Ask your team admin to "
+    "add you, or reserve nodes from the dashboard."
+)
+
+# Whole budget for the post-login DNS check, across every context: a warning
+# is never worth more than a moment of the researcher's time.
+DNS_CHECK_TIMEOUT_SECONDS = 2.0
+
+
 def _kubeconfig_path(cluster: str) -> Path:
     return KUBECONFIG_DIR / f"{cluster}.yaml"
+
+
+def _context_name(cluster: str, pool: str) -> str:
+    return f"{cluster}-{pool}"
 
 
 def _build_kubeconfig(
@@ -58,9 +85,11 @@ def _build_kubeconfig(
     ca_data: str,
     grants: List[Dict[str, Any]],
     base_url: str,
+    current_pool: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Render a kubeconfig with one cluster entry and one context per reachable
-    pool grant.
+    pool grant. The current context is `current_pool`'s, or else the first
+    grant's.
 
     Every grant must already carry a `server`. Pools do not share an endpoint
     (each has its own API proxy), so each context points at its own cluster
@@ -97,7 +126,7 @@ def _build_kubeconfig(
     users = []
     for grant in grants:
         pool = grant["pool"]
-        context_name = f"{cluster}-{pool}"
+        context_name = _context_name(cluster, pool)
         cluster_entry: Dict[str, Any] = {
             "server": grant["server"],
             "certificate-authority-data": ca_data,
@@ -139,19 +168,108 @@ def _build_kubeconfig(
             }
         )
 
+    if current_pool is not None:
+        current = _context_name(cluster, current_pool)
+    else:
+        current = contexts[0]["name"] if contexts else ""
     return {
         "apiVersion": "v1",
         "kind": "Config",
         "clusters": clusters,
         "contexts": contexts,
         "users": users,
-        "current-context": contexts[0]["name"] if contexts else "",
+        "current-context": current,
     }
+
+
+@app.command("list")
+def list_clusters(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List the Kubernetes reservations you can log in to."""
+    validate_output_format(output, console)
+    try:
+        data: Dict[str, Any] = APIClient().get("/clusters")
+    except APIError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+    clusters = data.get("clusters") or []
+    if output == "json":
+        output_data_as_json({"clusters": clusters}, console)
+        return
+    if not clusters:
+        console.print(NO_RESERVATION_HINT)
+        return
+
+    table = build_table(
+        "Kubernetes reservations",
+        [
+            ("Cluster", "cyan"),
+            ("Pool", "blue"),
+            ("Namespace", "white"),
+            ("Status", "white"),
+            ("Proxy", "white"),
+            ("Next step", "white"),
+        ],
+    )
+    for entry in clusters:
+        cluster = entry.get("cluster") or "?"
+        reservations = entry.get("reservations") or []
+        loginable = [r for r in reservations if r.get("server")]
+        for reservation in reservations:
+            table.add_row(
+                _cluster_label(entry),
+                reservation.get("pool") or "?",
+                reservation.get("namespace") or "",
+                _status_label(reservation.get("status")),
+                _proxy_label(reservation.get("proxyReady")),
+                _next_step(cluster, reservation, several=len(loginable) > 1),
+            )
+    console.print(table)
+
+
+def _cluster_label(entry: Dict[str, Any]) -> str:
+    name = entry.get("cluster") or "?"
+    display = entry.get("displayName")
+    return f"{name}\n[dim]{display}[/dim]" if display and display != name else name
+
+
+def _proxy_label(ready: Any) -> str:
+    return "[green]ready[/green]" if ready else "[yellow]not ready[/yellow]"
+
+
+_STATUS_STYLES = {
+    "Ready": "green",
+    "Provisioning": "yellow",
+    "Releasing": "dim",
+    "Failed": "red",
+}
+
+
+def _status_label(status: Optional[str]) -> str:
+    status = status or "Unknown"
+    style = _STATUS_STYLES.get(status, "white")
+    return f"[{style}]{status}[/{style}]"
+
+
+def _next_step(cluster: str, reservation: Dict[str, Any], *, several: bool) -> str:
+    if reservation.get("server"):
+        command = f"prime cluster login {cluster}"
+        if several:
+            command += f" --pool {reservation.get('pool')}"
+        return command
+    return f"[dim]{reservation.get('unavailableReason') or 'Not ready yet.'}[/dim]"
 
 
 @app.command("login")
 def login(
-    cluster: str = typer.Argument(..., help="Cluster name, as shown by your admin"),
+    cluster: str = typer.Argument(..., help="Cluster name, as shown by `prime cluster list`"),
+    pool: Optional[str] = typer.Option(
+        None,
+        "--pool",
+        help="Make this pool's context the current one (default: the first, alphabetically)",
+    ),
 ) -> None:
     """Write a kubeconfig for a cluster you have been granted access to."""
     # Re-login is the documented step after a grant changes, and a changed
@@ -162,16 +280,27 @@ def login(
     except OSError as e:
         console.print(f"[yellow]Could not clear cached credentials for '{cluster}': {e}[/yellow]")
 
+    path = _kubeconfig_path(cluster)
     try:
         client = APIClient()
         info: Dict[str, Any] = client.get(f"/clusters/{cluster}/kubeconfig-info")
     except APIError as e:
-        console.print(f"[red]{e}[/red]")
+        detail = str(e)
+        if detail.startswith("HTTP 403:"):
+            # The platform's "no live grant": neutral about whether the
+            # cluster exists, and permanent until someone grants access.
+            console.print(f"[red]{detail.removeprefix('HTTP 403:').strip()}[/red]")
+            _remove_stale_kubeconfig(path)
+            console.print("Run `prime cluster list` to see the reservations you can log in to.")
+        else:
+            console.print(f"[red]{detail}[/red]")
         raise typer.Exit(1) from e
 
     grants = info.get("grants") or []
     if not grants:
         console.print(f"[red]No active access grant for '{cluster}'.[/red]")
+        _remove_stale_kubeconfig(path)
+        console.print("Run `prime cluster list` to see the reservations you can log in to.")
         raise typer.Exit(1)
 
     ca_data = info.get("certificateAuthorityData")
@@ -186,14 +315,13 @@ def login(
     # grant's own API proxy on the researcher's tailnet.
     reachable = []
     for grant in grants:
-        pool = grant.get("pool") or "?"
+        name = grant.get("pool") or "?"
         reason = _unreachable_reason(grant)
         if reason:
-            console.print(f"[yellow]Skipping pool '{pool}': {reason}[/yellow]")
+            console.print(f"[yellow]Skipping pool '{name}': {reason}[/yellow]")
         else:
             reachable.append(grant)
 
-    path = _kubeconfig_path(cluster)
     if not reachable:
         # Failing before the write leaves any earlier kubeconfig as it was,
         # rather than replacing it with one that has no contexts.
@@ -201,6 +329,23 @@ def login(
             f"[red]None of your pools on '{cluster}' is reachable yet; "
             f"{path} was not written.[/red]"
         )
+        if path.exists():
+            console.print(
+                f"[yellow]The existing {path} was kept, but its contexts may be stale.[/yellow]"
+            )
+        raise typer.Exit(1)
+
+    reachable_pools = [grant["pool"] for grant in reachable]
+    if pool is not None and pool not in reachable_pools:
+        # Checked before the write, so a typo never replaces a working file.
+        known = next((g for g in grants if g.get("pool") == pool), None)
+        why = (
+            f"is not reachable: {_unreachable_reason(known)}"
+            if known is not None
+            else "is not one of your reservations there."
+        )
+        console.print(f"[red]Pool '{pool}' on '{cluster}' {why}[/red]")
+        console.print(f"Available pools: {', '.join(reachable_pools)}")
         raise typer.Exit(1)
 
     kubeconfig = _build_kubeconfig(
@@ -210,6 +355,7 @@ def login(
         # The exact URL this login request just used — not re-derived at
         # refresh time, where context resolution would lose a custom one.
         base_url=client.base_url,
+        current_pool=pool,
     )
 
     # The file is regenerated from scratch, so contexts for grants that are
@@ -221,12 +367,92 @@ def login(
         raise typer.Exit(1) from e
 
     console.print(f"[green]Wrote kubeconfig to {path}[/green]")
-    if len(reachable) > 1:
-        pools = ", ".join(grant["pool"] for grant in reachable)
-        console.print(f"Contexts for pools: {pools}")
+    current = kubeconfig["current-context"]
+    console.print(f"Current context: {current}")
+    others = [c["name"] for c in kubeconfig["contexts"] if c["name"] != current]
+    if others:
+        console.print(f"Other contexts: {', '.join(others)}")
+        console.print(f"Switch with: kubectl config use-context {others[0]}")
     console.print("\nUse it with:")
     console.print(f"  export KUBECONFIG={path}")
     console.print("  kubectl get pods")
+
+    _warn_unresolvable_proxies(reachable)
+
+
+def _remove_stale_kubeconfig(path: Path) -> None:
+    """A refused login means none of the file's contexts can work any more;
+    leaving it would only produce confusing kubectl errors later. The
+    cluster's cached tokens were already cleared at the start of the login."""
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except OSError as e:
+        console.print(f"[yellow]Could not remove the stale {path}: {e}[/yellow]")
+        return
+    console.print(f"[yellow]Removed the stale kubeconfig {path}.[/yellow]")
+
+
+def _resolve(host: str) -> None:
+    socket.getaddrinfo(host, None)
+
+
+def _unresolved_hosts(hosts: List[str], timeout: float) -> List[str]:
+    """The hosts that did not resolve within `timeout` seconds in total.
+
+    Daemon threads rather than an executor: a lookup stuck in the system
+    resolver must not keep the process alive after the login has finished.
+    """
+    resolved: set = set()
+    lock = threading.Lock()
+
+    def _lookup(host: str) -> None:
+        try:
+            _resolve(host)
+        except (OSError, UnicodeError):
+            return
+        with lock:
+            resolved.add(host)
+
+    threads = [threading.Thread(target=_lookup, args=(h,), daemon=True) for h in hosts]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    with lock:
+        return [h for h in hosts if h not in resolved]
+
+
+def _warn_unresolvable_proxies(grants: List[Dict[str, Any]]) -> None:
+    """Warn, never fail, when a written context's proxy name does not resolve.
+
+    The proxy is only reachable on the reservation's tailnet, so a name that
+    does not resolve almost always means Tailscale is off or on another
+    tailnet — which kubectl would otherwise report as a bare dial error.
+    """
+    hosts: List[str] = []
+    for grant in grants:
+        host = urlparse(grant["server"]).hostname
+        if not host or host in hosts or _is_ip_literal(host):
+            continue
+        hosts.append(host)
+    if not hosts:
+        return
+    for host in _unresolved_hosts(hosts, DNS_CHECK_TIMEOUT_SECONDS):
+        console.print(
+            f"[yellow]Can't resolve {host}. Make sure Tailscale is connected to your "
+            "team's tailnet (the one the reservation's proxy joined), then retry.[/yellow]"
+        )
+
+
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
 
 
 def _unreachable_reason(grant: Dict[str, Any]) -> Optional[str]:

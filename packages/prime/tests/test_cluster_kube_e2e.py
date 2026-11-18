@@ -3,9 +3,12 @@
 Runs the installed `prime` binary and a real `kubectl` against a real
 Kubernetes apiserver. Two things are stood in for:
 
-* The Prime platform, by a small HTTP server that serves the two routes the
+* The Prime platform, by a small HTTP server that serves the routes the
   CLI depends on with the platform's response shapes:
 
+  * ``GET  /api/v1/clusters`` → ``{clusters: [{cluster, displayName,
+    reservations: [{pool, namespace, teamId, status, proxyReady, server,
+    unavailableReason}]}]}``
   * ``GET  /api/v1/clusters/{name}/kubeconfig-info`` →
     ``{cluster, certificateAuthorityData, grants: [{pool, namespace, server,
     tlsServerName, unavailableReason}]}``
@@ -75,6 +78,13 @@ TLS_SERVER_NAME = "kubernetes.default.svc"
 PENDING_REASON = "This reservation's API proxy has not joined your tailnet yet; try again shortly."
 
 _ROUTE = re.compile(r"^/api/v1/clusters/([^/]+)/(kubeconfig-info|kube-token)$")
+
+
+def _no_grant_detail(cluster: str) -> str:
+    return (
+        f"You are not a member of any Kubernetes reservation on '{cluster}'. "
+        "Ask your team admin to add you, or reserve nodes from the dashboard."
+    )
 
 
 def _admin_kubectl(*args: str, input: str | None = None) -> subprocess.CompletedProcess:
@@ -216,6 +226,27 @@ class _Platform:
             "grants": grants,
         }
 
+    def cluster_list(self) -> dict:
+        if not self.grants and not self.pending:
+            return {"clusters": []}
+        reservations = [
+            {
+                "pool": entry["pool"],
+                "namespace": entry["namespace"],
+                "teamId": "team-e2e",
+                "status": "Ready" if entry["server"] else "Provisioning",
+                "proxyReady": bool(entry["server"]),
+                "server": entry["server"],
+                "unavailableReason": entry["unavailableReason"],
+            }
+            for entry in sorted(self.kubeconfig_info(CLUSTER)["grants"], key=lambda g: g["pool"])
+        ]
+        return {
+            "clusters": [
+                {"cluster": CLUSTER, "displayName": "E2E cluster", "reservations": reservations}
+            ]
+        }
+
     def close(self) -> None:
         for proxy in self.proxies.values():
             proxy.close()
@@ -249,17 +280,22 @@ class _Platform:
         if auth != f"Bearer {self.api_key}":
             return 401, {"detail": "Invalid or expired API key"}, {}
 
+        if parsed.path == "/api/v1/clusters" and method == "GET":
+            return 200, self.cluster_list(), {}
+
         match = _ROUTE.match(parsed.path)
         if not match:
             return 404, {"detail": "Not Found"}, {}
         cluster, route = match.groups()
+        if route == "kubeconfig-info" and method == "GET":
+            # The platform answers an unknown cluster exactly like one the
+            # caller holds no grant on, so names can't be enumerated.
+            if cluster != CLUSTER or not self.grants:
+                return 403, {"detail": _no_grant_detail(cluster)}, {}
+            return 200, self.kubeconfig_info(cluster), {}
+
         if cluster != CLUSTER:
             return 404, {"detail": f"Cluster '{cluster}' not found"}, {}
-
-        if route == "kubeconfig-info" and method == "GET":
-            if not self.grants:
-                return 404, {"detail": f"No active cluster access grant for '{cluster}'."}, {}
-            return 200, self.kubeconfig_info(cluster), {}
 
         if route == "kube-token" and method == "POST":
             if self.rate_limited:
@@ -596,6 +632,57 @@ def test_each_pool_context_mints_for_its_own_pool(e2e):
     assert e2e.platform.proxies["train"].connections == train_before
 
 
+def test_cluster_list_shows_each_reservation_and_how_to_log_in(e2e):
+    table = e2e.prime("cluster", "list", COLUMNS="250")
+    assert table.returncode == 0, table.stderr + table.stdout
+    assert ("GET", "/api/v1/clusters", None) in e2e.platform.requests
+    for text in (NS_TRAIN, NS_EVAL, "Provisioning", PENDING_REASON[:40]):
+        assert text in table.stdout, text
+    assert f"prime cluster login {CLUSTER} --pool train" in table.stdout
+    assert f"prime cluster login {CLUSTER} --pool eval" in table.stdout
+
+    as_json = e2e.prime("cluster", "list", "--output", "json")
+    assert as_json.returncode == 0, as_json.stderr
+    (cluster,) = json.loads(as_json.stdout)["clusters"]
+    assert cluster["cluster"] == CLUSTER
+    assert {r["pool"]: r["proxyReady"] for r in cluster["reservations"]} == {
+        "debug": False,
+        "eval": True,
+        "train": True,
+    }
+
+
+def test_login_with_pool_makes_that_context_current(e2e):
+    login = e2e.prime("cluster", "login", CLUSTER, "--pool", "eval")
+    try:
+        assert login.returncode == 0, login.stderr + login.stdout
+        assert f"Current context: {CLUSTER}-eval" in login.stdout
+        assert f"kubectl config use-context {CLUSTER}-train" in " ".join(login.stdout.split())
+        whoami = e2e.kubectl("auth", "whoami", "-o", "jsonpath={.status.userInfo.username}")
+        assert whoami.returncode == 0, whoami.stderr
+        assert whoami.stdout == f"system:serviceaccount:{NS_EVAL}:{SA}"
+
+        before = e2e.kubeconfig.read_text()
+        bad = e2e.prime("cluster", "login", CLUSTER, "--pool", "debug")
+        assert bad.returncode == 1
+        assert "Available pools: train, eval" in bad.stdout
+        assert e2e.kubeconfig.read_text() == before
+    finally:
+        # The later tests use the default (train) context.
+        restored = e2e.prime("cluster", "login", CLUSTER)
+        assert restored.returncode == 0, restored.stderr + restored.stdout
+    assert yaml.safe_load(e2e.kubeconfig.read_text())["current-context"] == f"{CLUSTER}-train"
+
+
+def test_login_to_an_unknown_cluster_points_at_cluster_list(e2e):
+    result = e2e.prime("cluster", "login", "no-such-cluster")
+    assert result.returncode == 1
+    output = " ".join(result.stdout.split())
+    assert _no_grant_detail("no-such-cluster") in output
+    assert "prime cluster list" in output
+    assert e2e.kubeconfig.exists()
+
+
 def test_plugin_exit_codes_through_the_real_binary(e2e):
     ok = e2e.exec_plugin(f"{CLUSTER}-train")
     assert ok.returncode == 0, ok.stderr
@@ -734,3 +821,22 @@ def test_revocation_cuts_off_kubectl_and_issued_tokens(e2e, tmp_path):
     assert contexts == [f"{CLUSTER}-train"]
     still_ok = e2e.kubectl("auth", "whoami", "-o", "jsonpath={.status.userInfo.username}")
     assert still_ok.stdout == f"system:serviceaccount:{NS_TRAIN}:{SA}"
+
+
+def test_losing_every_grant_removes_the_stale_kubeconfig(e2e):
+    # Runs after the revocation test, which left only the train grant.
+    assert e2e.kubeconfig.exists()
+    e2e.platform.revoke("train")
+    e2e.platform.pending.clear()
+
+    result = e2e.prime("cluster", "login", CLUSTER)
+
+    assert result.returncode == 1
+    output = " ".join(result.stdout.split())
+    assert _no_grant_detail(CLUSTER) in output
+    assert "Removed the stale kubeconfig" in output
+    assert not e2e.kubeconfig.exists()
+
+    empty = e2e.prime("cluster", "list")
+    assert empty.returncode == 0, empty.stderr
+    assert "You're not a member of any Kubernetes reservation" in " ".join(empty.stdout.split())

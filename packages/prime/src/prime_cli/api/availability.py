@@ -135,7 +135,7 @@ class AvailabilityClient:
         disks: Optional[List[str]] = None,
     ) -> Dict[str, List[GPUAvailability]]:
         """
-        Get both single GPU and cluster availability information.
+        Get single GPU availability information.
 
         Args:
             regions: Optional list of regions to filter by
@@ -144,8 +144,7 @@ class AvailabilityClient:
             disks: Optional list of disk IDs used to filter by provider/data center
 
         Returns:
-            Dictionary mapping GPU types to lists of availability information,
-            combining both single GPU and cluster availability
+            Dictionary mapping GPU types to lists of availability information
         """
 
         base_params: Dict[str, Any] = {}
@@ -163,15 +162,9 @@ class AvailabilityClient:
                 base_params["disks"] = normalized_disks
 
         gpu_response = self._fetch_paginaged("/availability/gpus", base_params)
-        cluster_response = self._fetch_paginaged("/availability/multi-node", base_params)
 
         combined: Dict[str, List[GPUAvailability]] = {}
         for gpu in gpu_response:
-            if gpu["gpuType"] not in combined:
-                combined[gpu["gpuType"]] = []
-            combined[gpu["gpuType"]].append(GPUAvailability.model_validate(gpu))
-
-        for gpu in cluster_response:
             if gpu["gpuType"] not in combined:
                 combined[gpu["gpuType"]] = []
             combined[gpu["gpuType"]].append(GPUAvailability.model_validate(gpu))

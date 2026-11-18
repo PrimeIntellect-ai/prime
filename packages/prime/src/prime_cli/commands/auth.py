@@ -142,6 +142,9 @@ def k8s_token(
             headers={"Authorization": f"Bearer {api_key}"},
             params=params,
             timeout=_TIMEOUT_SECONDS,
+            # As the shared APIClient does, so a platform URL that redirects
+            # (e.g. to its canonical host) works for the plugin as for login.
+            follow_redirects=True,
         )
     except httpx.TimeoutException:
         _fail(

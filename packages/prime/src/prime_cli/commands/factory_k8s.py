@@ -86,6 +86,7 @@ def _build_kubeconfig(
     grants: List[Dict[str, Any]],
     base_url: str,
     current_pool: Optional[str] = None,
+    environment: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Render a kubeconfig with one cluster entry and one context per reachable
     pool grant. The current context is `current_pool`'s, or else the first
@@ -103,7 +104,14 @@ def _build_kubeconfig(
     # callback. The credential plugin runs much later, from kubectl, where that
     # variable does not exist — so the flag has to be baked into the exec args
     # or every refresh would silently hit the default context's platform.
+    # A custom environment selected persistently (`prime config use staging`)
+    # is pinned the same way: otherwise switching environments later would
+    # send the new environment's API key to the old platform's URL. The
+    # built-in production context carries no key of its own, so pinning it
+    # would change nothing.
     prime_context = os.getenv("PRIME_CONTEXT")
+    if not prime_context and environment and environment.lower() != "production":
+        prime_context = environment
     context_args = ["--context", prime_context] if prime_context else []
 
     # The context flag alone is not enough: reloading a context re-resolves
@@ -356,6 +364,7 @@ def login(
         # refresh time, where context resolution would lose a custom one.
         base_url=client.base_url,
         current_pool=pool,
+        environment=client.config.current_environment,
     )
 
     # The file is regenerated from scratch, so contexts for grants that are

@@ -15,6 +15,7 @@ import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -70,6 +71,7 @@ def respond(monkeypatch, *, status_code, json_body=None, headers=None):
 
     def _post(url, **kwargs):
         requested_urls.append(url)
+        assert kwargs.get("follow_redirects") is True
         return httpx.Response(
             status_code=status_code,
             json=json_body if json_body is not None else {},
@@ -148,6 +150,42 @@ class TestKubeconfigRendering:
             "--pool",
             "alpha",
         ]
+
+    def test_exec_args_pin_a_persisted_custom_environment(self, monkeypatch):
+        # `prime config use staging` then `factory k8s login`, with no
+        # --context: switching environments later must not send the new
+        # environment's key to staging's pinned URL.
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = _build_kubeconfig(
+            cluster="c1",
+            ca_data="Y2E=",
+            grants=[_grant("alpha")],
+            base_url="https://api.staging.example.com",
+            environment="staging",
+        )
+        assert config["users"][0]["user"]["exec"]["args"][:2] == ["--context", "staging"]
+
+    def test_exec_args_do_not_pin_the_production_environment(self, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        config = _build_kubeconfig(
+            cluster="c1",
+            ca_data="Y2E=",
+            grants=[_grant("alpha")],
+            base_url="https://api.example.com",
+            environment="production",
+        )
+        assert "--context" not in config["users"][0]["user"]["exec"]["args"]
+
+    def test_an_explicit_context_wins_over_the_persisted_environment(self, monkeypatch):
+        monkeypatch.setenv("PRIME_CONTEXT", "dev")
+        config = _build_kubeconfig(
+            cluster="c1",
+            ca_data="Y2E=",
+            grants=[_grant("alpha")],
+            base_url="https://api.dev.example.com",
+            environment="staging",
+        )
+        assert config["users"][0]["user"]["exec"]["args"][:2] == ["--context", "dev"]
 
     def test_exec_env_pins_the_resolved_base_url(self, monkeypatch):
         # The --context flag alone regressed custom API URLs: reloading the
@@ -241,6 +279,7 @@ class TestKubeconfigRendering:
 
 class _FakeAPIClient:
     base_url = "https://api.example.com"
+    config = SimpleNamespace(current_environment="production")
     payload: dict = {}
     error: Exception | None = None
     requested: list = []
@@ -288,6 +327,17 @@ class TestFactoryK8sLogin:
             return runner.invoke(root_app, ["factory", "k8s", "login", *args])
 
         return _run
+
+    def test_login_pins_the_persisted_environment(self, login, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            _FakeAPIClient, "config", SimpleNamespace(current_environment="staging")
+        )
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        config = yaml.safe_load((tmp_path / "kube" / "c1.yaml").read_text())
+        for user in config["users"]:
+            assert user["user"]["exec"]["args"][:2] == ["--context", "staging"]
 
     def test_writes_a_private_kubeconfig_from_kubeconfig_info(self, login, tmp_path):
         result = login("c1")

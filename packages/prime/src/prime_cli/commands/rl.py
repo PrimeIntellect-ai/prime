@@ -136,6 +136,8 @@ VOLUME_DEFAULT_SIZE = "5Ti"  # same default as `prime volumes create`
 
 TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED", "PAUSED"}
 
+RUN_NAME_MAX_LENGTH = 255
+
 # Log level colors for rich console
 LEVEL_STYLES = {
     "DEBUG": "dim",
@@ -2074,6 +2076,45 @@ def delete_run(
     except APIError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
+
+
+@app.command("rename", rich_help_panel="Commands", epilog=RL_RUN_JSON_HELP)
+def rename_run(
+    run_id: str = typer.Argument(..., help="Run ID to rename"),
+    name: str = typer.Argument(..., help="New name for the run (1-255 characters)"),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Rename a run.
+
+    Example:
+
+        prime train rename <run_id> "my new run name"
+    """
+    validate_output_format(output, console)
+
+    name = name.strip()
+    if not name:
+        console.print("[red]Error:[/red] Run name cannot be empty.")
+        raise typer.Exit(1)
+    if len(name) > RUN_NAME_MAX_LENGTH:
+        console.print(
+            f"[red]Error:[/red] Run name must be at most {RUN_NAME_MAX_LENGTH} characters "
+            f"(got {len(name)})."
+        )
+        raise typer.Exit(1)
+
+    try:
+        run = RLClient(APIClient()).rename_run(run_id, name)
+    except APIError as e:
+        console.print(f"[red]Error:[/red] {rich_escape(str(e))}")
+        raise typer.Exit(1)
+
+    if output == "json":
+        output_data_as_json({"run": run.model_dump()}, console)
+        return
+
+    console.print(f"[green]✓ Run {run_id} renamed[/green]")
+    console.print(f"Name: {rich_escape(run.name or name)}")
 
 
 @app.command("restart", rich_help_panel="Commands")

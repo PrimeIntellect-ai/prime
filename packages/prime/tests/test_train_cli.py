@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from prime_cli.core import APIError
+from prime_cli.core import APIError, NotFoundError, ValidationError
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -376,6 +376,119 @@ def test_train_pause(monkeypatch, response, exit_code, expected_output) -> None:
     assert result.exit_code == exit_code, result.output
     assert expected_output in result.output
     assert calls == [("POST", "/training/runs/run-1/pause")]
+
+
+def _mock_rename(monkeypatch, response: Any) -> list[tuple[str, str, Any]]:
+    calls: list[tuple[str, str, Any]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint, json))
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    return calls
+
+
+def test_train_rename(monkeypatch) -> None:
+    calls = _mock_rename(monkeypatch, {"run": {**_fake_run_payload("RUNNING"), "name": "new"}})
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", "  new  "],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Run run-1 renamed" in result.output
+    assert "Name: new" in result.output
+    assert calls == [("PATCH", "/rft/runs/run-1", {"name": "new"})]
+
+
+def test_train_rename_json_output(monkeypatch) -> None:
+    _mock_rename(monkeypatch, {"run": {**_fake_run_payload("RUNNING"), "name": "new"}})
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", "new", "-o", "json"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    run = json.loads(result.output)["run"]
+    assert (run["id"], run["name"]) == ("run-1", "new")
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_output"),
+    [
+        (NotFoundError("HTTP 404: Run run-1 not found"), "Error: HTTP 404: Run run-1 not found"),
+        (
+            APIError("HTTP 403: You don't have access to this run"),
+            "Error: HTTP 403: You don't have access to this run",
+        ),
+        (
+            ValidationError(
+                [
+                    {
+                        "loc": ["body", "name"],
+                        "msg": "String should have at most 255 characters",
+                    }
+                ]
+            ),
+            "name: String should have at most 255 characters",
+        ),
+    ],
+)
+def test_train_rename_reports_api_errors(monkeypatch, error, expected_output) -> None:
+    _mock_rename(monkeypatch, error)
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", "new"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert expected_output in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_output"),
+    [
+        ("", "Run name cannot be empty"),
+        ("   ", "Run name cannot be empty"),
+        ("x" * 256, "Run name must be at most 255 characters (got 256)"),
+    ],
+)
+def test_train_rename_validates_name_locally(monkeypatch, name, expected_output) -> None:
+    calls = _mock_rename(monkeypatch, {"run": _fake_run_payload("RUNNING")})
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", name],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert expected_output in result.output
+    assert calls == []
+
+
+def test_train_rename_accepts_max_length_name(monkeypatch) -> None:
+    name = "x" * 255
+    calls = _mock_rename(monkeypatch, {"run": {**_fake_run_payload("RUNNING"), "name": name}})
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", name],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("PATCH", "/rft/runs/run-1", {"name": name})]
 
 
 RESUME_CONFLICT = "Run run-1 is RUNNING; only a PAUSED run can be resumed."

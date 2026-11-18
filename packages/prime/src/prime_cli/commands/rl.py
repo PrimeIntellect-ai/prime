@@ -88,6 +88,11 @@ DEDICATED_CAPACITY_HINT = (
     "for dedicated capacity.[/dim]"
 )
 
+_PLACEMENT_FAILURE = re.compile(
+    r"capacity|inventory|insufficient|unavailable|no (available|free)|no \S*\s*clusters?",
+    re.IGNORECASE,
+)
+
 RL_LIST_JSON_HELP = json_output_help(
     ".runs[] = {id, name?, status, base_model, environments[], max_steps, "
     "batch_size, gpu_count?, created_at, updated_at, ...}",
@@ -1540,17 +1545,23 @@ def _report_dispatch_error(
     gpu_type: Optional[str],
     team_id: Optional[str],
 ) -> None:
+    detail = api_detail(exc)
     capacity_unrelated = (UnauthorizedError, PaymentRequiredError, ServerError, APITimeoutError)
-    if not isinstance(exc, capacity_unrelated) and _at_capacity_rejection(
-        client, gpu_type, team_id
-    ):
-        console.print(
-            f"[red]Error:[/red] {rich_escape(gpu_type or '')} is at capacity for "
-            "Hosted Training right now. Pick another GPU type from `prime train models`."
-        )
-        console.print(DEDICATED_CAPACITY_HINT)
+    if isinstance(exc, capacity_unrelated) or not _at_capacity_rejection(client, gpu_type, team_id):
+        console.print(f"[red]Error:[/red] {rich_escape(detail)}")
         return
-    console.print(f"[red]Error:[/red] {rich_escape(api_detail(exc))}")
+    gpu = rich_escape(gpu_type or "")
+    # Only a placement failure is replaced; anything else (e.g. resuming a
+    # run that is not PAUSED) stays actionable and just gains the note.
+    if _PLACEMENT_FAILURE.search(detail):
+        console.print(
+            f"[red]Error:[/red] {gpu} is at capacity for Hosted Training right now. "
+            "Pick another GPU type from `prime train models`."
+        )
+    else:
+        console.print(f"[red]Error:[/red] {rich_escape(detail)}")
+        console.print(f"[dim]Note: {gpu} is also at capacity right now.[/dim]")
+    console.print(DEDICATED_CAPACITY_HINT)
 
 
 @app.command("gpus", rich_help_panel="Commands")

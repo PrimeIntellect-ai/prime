@@ -1410,3 +1410,26 @@ def test_resume_on_at_capacity_gpu_explains(monkeypatch) -> None:
 
     assert result.exit_code == 1, result.output
     assert "B200_180GB is at capacity" in " ".join(result.output.split())
+
+
+def test_resume_state_error_on_at_capacity_gpu_keeps_detail(monkeypatch) -> None:
+    """A non-placement rejection stays actionable even when the GPU is at
+    capacity: the backend detail is kept and the capacity state is a note."""
+    _mock_capacity_discovery(monkeypatch)
+
+    def resume_run(self, run_id, payload):
+        raise APIError(f"HTTP 409: {RESUME_CONFLICT}")
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.resume_run", resume_run)
+
+    result = runner.invoke(
+        app,
+        ["train", "resume", "run-1", "--gpu-type", "B200_180GB", "-y"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert f"Error: {RESUME_CONFLICT}" in plain
+    assert "Note: B200_180GB is also at capacity right now." in plain
+    assert "is at capacity for Hosted Training" not in plain

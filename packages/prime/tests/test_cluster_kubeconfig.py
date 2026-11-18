@@ -7,8 +7,11 @@ pinning down — a regression in them shows up as a confusing kubectl error
 rather than a test failure anywhere else.
 """
 
+import itertools
 import json
+import os
 import re
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -22,9 +25,22 @@ from prime_cli.commands.auth import (
 )
 from prime_cli.commands.auth import app as auth_app
 from prime_cli.commands.cluster import _build_kubeconfig
+from prime_cli.utils import kube_token_cache
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def token_cache_dir(tmp_path, monkeypatch):
+    """Keep every test's credential cache out of the real ~/.prime, and make
+    each plugin run look like it came from a new kubectl process unless a test
+    says otherwise."""
+    cache = tmp_path / "kube" / "cache"
+    monkeypatch.setattr("prime_cli.utils.kube_token_cache.CACHE_DIR", cache)
+    pids = itertools.count(1000)
+    monkeypatch.setattr("prime_cli.commands.auth.os.getppid", lambda: next(pids))
+    return cache
 
 
 class _FakeConfig:
@@ -616,3 +632,314 @@ class TestCredentialPluginFailures:
         monkeypatch.setattr("prime_cli.commands.auth.httpx.post", _explode)
         result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
         assert result.exit_code == EXIT_AUTH_EXPIRED
+
+
+def _credential(token, *, expires_in=timedelta(hours=1)):
+    expiry = datetime.now(timezone.utc) + expires_in
+    return {
+        "apiVersion": "client.authentication.k8s.io/v1",
+        "kind": "ExecCredential",
+        "status": {"token": token, "expirationTimestamp": expiry.strftime("%Y-%m-%dT%H:%M:%SZ")},
+    }
+
+
+class _MintingPlatform:
+    """`kube-token`, minting a new token on every successful call."""
+
+    def __init__(self):
+        self.calls = []
+        self.status = 200
+        self.expires_in = timedelta(hours=1)
+
+    def post(self, url, **kwargs):
+        self.calls.append(url)
+        request = httpx.Request("POST", url)
+        if self.status != 200:
+            return httpx.Response(self.status, json={"detail": "refused"}, request=request)
+        token = f"tok-{len(self.calls)}"
+        return httpx.Response(
+            200, json=_credential(token, expires_in=self.expires_in), request=request
+        )
+
+
+class TestTokenCache:
+    """kubectl runs the plugin once per command, so without the cache every
+    command minted a token and a polling loop hit the platform's rate limit."""
+
+    @pytest.fixture
+    def platform(self, monkeypatch):
+        platform = _MintingPlatform()
+        monkeypatch.setattr("prime_cli.commands.auth.httpx.post", platform.post)
+        return platform
+
+    @pytest.fixture
+    def config(self, monkeypatch):
+        class _Config:
+            api_key = "key-one"
+            base_url = "https://api.example.com"
+
+        monkeypatch.setattr("prime_cli.commands.auth.Config", lambda: _Config)
+        return _Config
+
+    @staticmethod
+    def run(*args, env=None):
+        return runner.invoke(auth_app, ["k8s-token", "--cluster", "c1", *args], env=env)
+
+    @classmethod
+    def token(cls, *args, env=None):
+        result = cls.run(*args, env=env)
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)["status"]["token"]
+
+    @staticmethod
+    def path(config, *, cluster="c1", pool=None):
+        return kube_token_cache.entry_path(
+            base_url=config.base_url, cluster=cluster, pool=pool, api_key=config.api_key
+        )
+
+    def seed(self, config, *, expires_in, pool=None, served_to=None):
+        path = self.path(config, pool=pool)
+        credential = _credential("seeded", expires_in=expires_in)
+        kube_token_cache.save(path, {"credential": credential, "servedTo": served_to})
+        return path
+
+    def test_a_cache_hit_makes_no_request(self, config, platform):
+        assert self.token("--pool", "train") == "tok-1"
+        result = self.run("--pool", "train")
+
+        assert result.exit_code == 0
+        assert len(platform.calls) == 1
+        # A hit still writes nothing but the credential to stdout.
+        assert json.loads(result.stdout)["status"]["token"] == "tok-1"
+        assert result.stderr == ""
+
+    def test_a_token_well_inside_its_lifetime_is_served(self, config, platform):
+        self.seed(config, expires_in=timedelta(minutes=6))
+        assert self.token() == "seeded"
+        assert platform.calls == []
+
+    def test_a_token_inside_the_margin_is_replaced(self, config, platform):
+        path = self.seed(config, expires_in=timedelta(minutes=4))
+
+        assert self.token() == "tok-1"
+        assert kube_token_cache.load(path)["credential"]["status"]["token"] == "tok-1"
+
+    def test_an_expired_token_is_replaced(self, config, platform):
+        self.seed(config, expires_in=timedelta(minutes=-1))
+        assert self.token() == "tok-1"
+
+    def test_a_credential_without_expiry_is_not_cached(self, config, monkeypatch):
+        def _post(url, **kwargs):
+            return httpx.Response(
+                200, json={"status": {"token": "t"}}, request=httpx.Request("POST", url)
+            )
+
+        monkeypatch.setattr("prime_cli.commands.auth.httpx.post", _post)
+        assert self.token() == "t"
+        assert not self.path(config).exists()
+
+    @pytest.mark.parametrize("content", ["", "{not json", "[]", '{"credential": "x"}'])
+    def test_a_corrupt_entry_is_a_miss_and_is_overwritten(self, config, platform, content):
+        path = self.seed(config, expires_in=timedelta(hours=1))
+        path.write_text(content)
+
+        assert self.token() == "tok-1"
+        assert kube_token_cache.load(path)["credential"]["status"]["token"] == "tok-1"
+
+    def test_entries_are_separated_by_platform_cluster_pool_and_key(self, config, platform):
+        assert self.token("--pool", "train") == "tok-1"
+
+        config.base_url = "https://staging.example.com"
+        assert self.token("--pool", "train") == "tok-2"
+        config.base_url = "https://api.example.com"
+
+        assert self.token("--pool", "eval") == "tok-3"
+        assert self.token() == "tok-4"
+
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c2", "--pool", "train"])
+        assert json.loads(result.stdout)["status"]["token"] == "tok-5"
+
+        config.api_key = "key-two"
+        assert self.token("--pool", "train") == "tok-6"
+
+        # Each of those is now a hit of its own.
+        config.api_key = "key-one"
+        assert self.token("--pool", "train") == "tok-1"
+        assert self.token("--pool", "eval") == "tok-3"
+        assert len(platform.calls) == 6
+
+    def test_nothing_on_disk_reveals_the_api_key(self, config, platform, token_cache_dir):
+        config.api_key = "pit_secret_api_key"
+        self.token("--pool", "train")
+
+        files = [p for p in token_cache_dir.rglob("*") if p.is_file()]
+        assert len(files) == 1
+        for path in files:
+            assert "pit_secret" not in str(path.relative_to(token_cache_dir))
+            assert "pit_secret" not in path.read_text()
+
+    def test_files_are_0600_and_directories_0700(self, config, platform, token_cache_dir):
+        self.token("--pool", "train")
+
+        path = self.path(config, pool="train")
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert token_cache_dir.stat().st_mode & 0o777 == 0o700
+        assert path.parent.stat().st_mode & 0o777 == 0o700
+        # Atomic write: no temp file is left beside the entry.
+        assert [p.name for p in path.parent.iterdir()] == [path.name]
+
+    @pytest.mark.parametrize("status", [401, 403, 409])
+    def test_a_refused_mint_evicts_the_entry(self, config, platform, monkeypatch, status):
+        # The token kubectl was handed is rejected, kubectl re-runs the plugin
+        # from the same process, and the platform refuses the new mint.
+        monkeypatch.setattr("prime_cli.commands.auth.os.getppid", lambda: 42)
+        path = self.seed(config, expires_in=timedelta(hours=1), served_to=42)
+        platform.status = status
+
+        assert self.run().exit_code != 0
+        assert not path.exists()
+
+    def test_a_refused_mint_with_no_cache_still_evicts(self, config, platform):
+        path = self.seed(config, expires_in=timedelta(hours=1))
+        platform.status = 403
+
+        assert self.run("--no-cache").exit_code == EXIT_FORBIDDEN
+        assert not path.exists()
+
+    def test_a_transient_failure_keeps_the_entry(self, config, platform, monkeypatch):
+        monkeypatch.setattr("prime_cli.commands.auth.os.getppid", lambda: 42)
+        path = self.seed(config, expires_in=timedelta(hours=1), served_to=42)
+        platform.status = 503
+
+        assert self.run().exit_code == EXIT_UNREACHABLE
+        assert path.exists()
+
+    def test_a_rejected_token_is_replaced_once_per_process(self, config, platform, monkeypatch):
+        # client-go re-runs the plugin from the same process after a 401.
+        # Serving the same token again would just repeat the 401.
+        assert self.token() == "tok-1"
+        monkeypatch.setattr("prime_cli.commands.auth.os.getppid", lambda: 42)
+        assert self.token() == "tok-1"  # a new kubectl, served from cache
+        assert self.token() == "tok-2"  # the same kubectl again: rejected
+        # A caller that re-runs the plugin without caching does not mint on
+        # every call.
+        assert self.token() == "tok-2"
+        assert self.token() == "tok-2"
+        assert len(platform.calls) == 2
+
+    def test_a_revoked_grant_surfaces_the_platform_reason(self, config, platform, monkeypatch):
+        assert self.token() == "tok-1"
+        monkeypatch.setattr("prime_cli.commands.auth.os.getppid", lambda: 42)
+        assert self.token() == "tok-1"
+        platform.status = 403
+
+        result = self.run()
+
+        assert result.exit_code == EXIT_FORBIDDEN
+        assert result.stdout == ""
+        assert "refused" in result.stderr
+        assert not self.path(config).exists()
+
+    @pytest.mark.parametrize(
+        "args, env",
+        [(["--no-cache"], None), ([], {"PRIME_K8S_TOKEN_NO_CACHE": "1"})],
+        ids=["flag", "env"],
+    )
+    def test_no_cache_always_mints_and_writes_nothing(
+        self, config, platform, token_cache_dir, args, env
+    ):
+        self.seed(config, expires_in=timedelta(hours=1))
+        before = {p: p.read_text() for p in token_cache_dir.rglob("*.json")}
+
+        assert self.token(*args, env=env) == "tok-1"
+        assert self.token(*args, env=env) == "tok-2"
+        assert {p: p.read_text() for p in token_cache_dir.rglob("*.json")} == before
+
+    def test_no_cache_env_can_be_turned_off(self, config, platform):
+        assert self.token(env={"PRIME_K8S_TOKEN_NO_CACHE": "0"}) == "tok-1"
+        assert self.token(env={"PRIME_K8S_TOKEN_NO_CACHE": "0"}) == "tok-1"
+
+    def test_a_cache_write_failure_still_prints_the_credential(self, config, platform, monkeypatch):
+        def _boom(path, entry):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("prime_cli.commands.auth.token_cache.save", _boom)
+        result = self.run()
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout)["status"]["token"] == "tok-1"
+        assert "could not cache the credential" in result.stderr
+        assert "Permission denied" in result.stderr
+        assert "tok-1" not in result.stderr
+
+    def test_an_unwritable_cache_directory_still_prints_the_credential(
+        self, config, platform, token_cache_dir
+    ):
+        if os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions")
+        token_cache_dir.parent.mkdir(parents=True)
+        token_cache_dir.parent.chmod(0o500)
+        try:
+            result = self.run()
+        finally:
+            token_cache_dir.parent.chmod(0o700)
+
+        assert result.exit_code == 0
+        assert json.loads(result.stdout)["status"]["token"] == "tok-1"
+        assert "could not cache the credential" in result.stderr
+
+
+class TestClusterLoginClearsCachedTokens:
+    @pytest.fixture
+    def seeded(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        monkeypatch.setattr("prime_cli.commands.cluster.KUBECONFIG_DIR", tmp_path / "kube")
+        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
+        _FakeAPIClient.payload = dict(TestClusterLogin.INFO)
+        _FakeAPIClient.error = None
+        _FakeAPIClient.requested = []
+
+        paths = {}
+        for cluster, pool, base_url in [
+            ("c1", "train", "https://api.example.com"),
+            ("c1", "eval", "https://api.example.com"),
+            ("c1", None, "https://api.example.com"),
+            ("c1", "train", "https://staging.example.com"),
+            ("c2", "train", "https://api.example.com"),
+        ]:
+            path = kube_token_cache.entry_path(
+                base_url=base_url, cluster=cluster, pool=pool, api_key="k"
+            )
+            kube_token_cache.save(path, {"credential": _credential("t")})
+            paths[(cluster, pool, base_url)] = path
+        return paths
+
+    def _login(self, cluster):
+        from prime_cli.main import app as root_app
+
+        return runner.invoke(root_app, ["cluster", "login", cluster])
+
+    def test_login_clears_only_that_clusters_tokens(self, seeded):
+        assert self._login("c1").exit_code == 0
+
+        remaining = {key for key, path in seeded.items() if path.exists()}
+        assert remaining == {("c2", "train", "https://api.example.com")}
+
+    def test_a_failed_login_still_clears_them(self, seeded):
+        from prime_cli.core.client import NotFoundError
+
+        _FakeAPIClient.error = NotFoundError("HTTP 404: No active grant for 'c1'")
+
+        assert self._login("c1").exit_code == 1
+        assert not any(path.exists() for key, path in seeded.items() if key[0] == "c1")
+
+    def test_login_with_nothing_cached_is_fine(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PRIME_CONTEXT", raising=False)
+        monkeypatch.setattr("prime_cli.commands.cluster.KUBECONFIG_DIR", tmp_path / "kube")
+        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
+        _FakeAPIClient.payload = dict(TestClusterLogin.INFO)
+        _FakeAPIClient.error = None
+
+        result = self._login("c1")
+        assert result.exit_code == 0, result.output
+        assert "Could not clear" not in result.output

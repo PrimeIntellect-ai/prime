@@ -1,13 +1,14 @@
 """`prime cluster` — kubeconfig setup for researcher cluster access.
 
 `prime cluster login <name>` writes a kubeconfig whose credentials come from an
-`exec` block calling back into this CLI. No Kubernetes token is ever written to
-disk: every `kubectl` invocation shells out to `prime auth k8s-token`, which
-exchanges the user's platform API token for a short-lived ServiceAccount token.
+`exec` block calling back into this CLI. The kubeconfig holds no Kubernetes
+token: every `kubectl` invocation shells out to `prime auth k8s-token`, which
+exchanges the user's platform API token for a short-lived ServiceAccount token
+(cached privately under ~/.prime/kube/cache until shortly before it expires).
 
 That indirection is what makes revocation work. Deleting the grant deletes the
-namespace and its ServiceAccount, so the next refresh fails and any token
-already issued expires within the hour.
+namespace and its ServiceAccount, so any token already issued stops working
+and the next mint is refused.
 
 Researchers never reach a cluster's apiserver directly. Each pool has its own
 Tailscale API proxy on the customer's tailnet, so every grant carries its own
@@ -25,6 +26,7 @@ import yaml
 
 from ..client import APIClient, APIError
 from ..utils import PlainTyper, get_console
+from ..utils import kube_token_cache as token_cache
 
 app = PlainTyper(
     help="Kubernetes access for clusters you have been granted",
@@ -152,6 +154,14 @@ def login(
     cluster: str = typer.Argument(..., help="Cluster name, as shown by your admin"),
 ) -> None:
     """Write a kubeconfig for a cluster you have been granted access to."""
+    # Re-login is the documented step after a grant changes, and a changed
+    # grant can mean a new ServiceAccount, so cached tokens for this cluster go
+    # first, whatever the rest of the login does.
+    try:
+        token_cache.clear_cluster(cluster)
+    except OSError as e:
+        console.print(f"[yellow]Could not clear cached credentials for '{cluster}': {e}[/yellow]")
+
     try:
         client = APIClient()
         info: Dict[str, Any] = client.get(f"/clusters/{cluster}/kubeconfig-info")

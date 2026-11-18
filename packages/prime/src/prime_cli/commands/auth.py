@@ -1,8 +1,9 @@
 """`prime auth` — credential plugin entry points.
 
 `prime auth k8s-token` is a Kubernetes client-go credential plugin. kubectl
-runs it on every API call and reads an ExecCredential from stdout, so this
-command has a stricter contract than the rest of the CLI:
+runs it once per process (so once per `kubectl` command) and reads an
+ExecCredential from stdout, so this command has a stricter contract than the
+rest of the CLI:
 
 * **stdout is protocol.** Only the ExecCredential JSON goes there. Every
   human-readable message goes to stderr, or kubectl fails to parse the reply
@@ -16,9 +17,26 @@ command has a stricter contract than the rest of the CLI:
 It deliberately does not use the shared `APIClient`: that collapses HTTP status
 codes into a single `APIError`, and the whole failure contract here is a
 function of the status code.
+
+Minted credentials are cached on disk (see `kube_token_cache`) and reused until
+shortly before they expire, because minting on every kubectl command runs into
+the platform's rate limit.
+
+A cached token can still be rejected before it expires: revoking a grant
+deletes its ServiceAccount, and the token dies with it. client-go reacts to a
+401 by running the plugin again, from the same kubectl process, to refresh its
+credential for the next request (the failed request itself is not retried).
+Handing back the same cached token would only repeat the 401, so a second
+run from the same parent process while the token it was given is still fresh
+is taken as that rejection: the entry is skipped and a new token minted,
+which for a revoked grant fails with the platform's 403 reason instead. That
+happens at most once per process per entry, so a caller that simply re-runs
+the plugin without caching (some client libraries do) costs one extra mint,
+not one per call.
 """
 
 import json
+import os
 import sys
 from typing import NoReturn
 
@@ -28,6 +46,7 @@ import typer
 from prime_cli.core import Config
 
 from ..utils import PlainTyper
+from ..utils import kube_token_cache as token_cache
 
 app = PlainTyper(
     help="Authentication helpers (used by other tools, not usually by hand)",
@@ -68,6 +87,15 @@ def k8s_token(
     pool: str = typer.Option(
         None, "--pool", help="Pool name, when you have access to more than one"
     ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help=(
+            "Mint a new token every time, without reading or writing the on-disk "
+            "cache. Also set by PRIME_K8S_TOKEN_NO_CACHE=1, which reaches the plugin "
+            "through kubectl without editing the kubeconfig"
+        ),
+    ),
 ) -> None:
     """Print a Kubernetes ExecCredential for a granted cluster.
 
@@ -77,6 +105,30 @@ def k8s_token(
     api_key = config.api_key
     if not api_key:
         _fail("Not logged in. Run `prime login`.", EXIT_AUTH_EXPIRED)
+
+    # Parsed here rather than through Click's envvar support, which (as of
+    # Click 8.2) turns a flag on for any non-empty value, "0" included.
+    no_cache = no_cache or _env_flag("PRIME_K8S_TOKEN_NO_CACHE")
+    cache_path = token_cache.entry_path(
+        base_url=config.base_url, cluster=cluster, pool=pool or None, api_key=api_key
+    )
+    caller = os.getppid()
+    reissue = False
+    if not no_cache:
+        entry = token_cache.load(cache_path)
+        if entry is not None and token_cache.is_fresh(entry["credential"]):
+            served_to = entry.get("servedTo")
+            if served_to != caller or entry.get("reissuedFor") == caller:
+                if served_to != caller:
+                    # Bookkeeping for the rejection check; losing it only
+                    # means a rejected token is served once more.
+                    try:
+                        token_cache.save(cache_path, {**entry, "servedTo": caller})
+                    except OSError:
+                        pass
+                _emit(entry["credential"])
+                return
+            reissue = True
 
     # Config.base_url deliberately strips any /api/v1 suffix, and the shared
     # APIClient re-adds it on every request — so it must be added here too, or
@@ -101,6 +153,10 @@ def k8s_token(
             f"Cannot reach the Prime platform at {config.base_url}: {e}",
             EXIT_UNREACHABLE,
         )
+
+    if response.status_code in (401, 403, 409):
+        # Whatever was cached for this key is no longer something to serve.
+        token_cache.evict(cache_path)
 
     if response.status_code == 401:
         _fail("Platform auth expired. Run `prime login`.", EXIT_AUTH_EXPIRED)
@@ -159,9 +215,38 @@ def k8s_token(
     if not isinstance(credential, dict) or "status" not in credential:
         _fail("Platform returned a malformed credential.", EXIT_UNREACHABLE)
 
+    if not no_cache:
+        if token_cache.is_fresh(credential):
+            entry = {
+                "credential": credential,
+                "servedTo": caller,
+                "reissuedFor": caller if reissue else None,
+            }
+            try:
+                token_cache.save(cache_path, entry)
+            except OSError as e:
+                # The credential is good; failing to cache it only costs a
+                # mint next time, so kubectl still gets it.
+                print(
+                    f"Warning: could not cache the credential under "
+                    f"{token_cache.CACHE_DIR}: {e.strerror or e}",
+                    file=sys.stderr,
+                )
+        else:
+            # Nothing to cache, and anything older is superseded.
+            token_cache.evict(cache_path)
+
+    _emit(credential)
+
+
+def _emit(credential: dict) -> None:
     # stdout, and nothing else on stdout.
     sys.stdout.write(json.dumps(credential))
     sys.stdout.flush()
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _detail(response: httpx.Response) -> str:

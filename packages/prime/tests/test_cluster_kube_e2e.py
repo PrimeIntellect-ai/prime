@@ -26,6 +26,11 @@ Opt-in, because it needs a disposable cluster it may create namespaces in:
 
 The tests share one login and run in file order; the revocation test is last
 because it permanently removes a grant. Do not run this file under xdist.
+
+The plugin caches what it mints under ``~/.prime/kube/cache`` (``HOME`` is a
+temporary directory here). Tests that need the platform to answer every call
+set ``PRIME_K8S_TOKEN_NO_CACHE=1``, the documented escape hatch, which reaches
+the plugin through kubectl's environment.
 """
 
 import base64
@@ -38,7 +43,9 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 import uuid
+from collections import Counter
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -178,6 +185,8 @@ class _Platform:
         self.rate_limited = False
         self.unavailable: str | None = None
         self.requests: list[tuple[str, str, str | None]] = []
+        # Successful kube-token mints per pool.
+        self.mints: Counter[str] = Counter()
         self._lock = threading.Lock()
 
     def kubeconfig_info(self, cluster: str) -> dict:
@@ -275,7 +284,10 @@ class _Platform:
                     },
                     {},
                 )
-            return 200, self.mint(self.grants[pool]), {}
+            credential = self.mint(self.grants[pool])
+            with self._lock:
+                self.mints[pool] += 1
+            return 200, credential, {}
 
         return 405, {"detail": "Method Not Allowed"}, {}
 
@@ -338,10 +350,10 @@ class _Env:
             timeout=60,
         )
 
-    def kubectl(self, *args: str) -> subprocess.CompletedProcess:
+    def kubectl(self, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["kubectl", *args],
-            env=self.environ(KUBECONFIG=str(self.kubeconfig)),
+            env=self.environ(KUBECONFIG=str(self.kubeconfig), **extra_env),
             capture_output=True,
             text=True,
             timeout=60,
@@ -475,6 +487,46 @@ def test_kubectl_is_confined_to_the_grant_namespace(e2e):
     assert nodes.stdout.strip() == "no"
 
 
+def test_consecutive_kubectl_calls_reuse_one_minted_token(e2e):
+    # kubectl runs the plugin afresh in every process. Before the cache, each
+    # command minted a token, and polling ran into the platform's rate limit.
+    relogin = e2e.prime("cluster", "login", CLUSTER)
+    assert relogin.returncode == 0, relogin.stderr + relogin.stdout
+    before = e2e.platform.mints["train"]
+
+    for _ in range(5):
+        listed = e2e.kubectl("get", "configmaps", "-o", "name")
+        assert listed.returncode == 0, listed.stderr
+        # Nothing about the cache reaches kubectl's output.
+        assert listed.stderr == ""
+        assert "configmap/e2e-probe" in listed.stdout.split()
+    whoami = e2e.kubectl("auth", "whoami", "-o", "jsonpath={.status.userInfo.username}")
+    assert whoami.stdout == f"system:serviceaccount:{NS_TRAIN}:{SA}"
+    assert e2e.platform.mints["train"] - before == 1
+
+    cache = e2e.home / ".prime" / "kube" / "cache"
+    entries = [p for p in cache.rglob("*") if p.is_file()]
+    assert len(entries) == 1
+    assert entries[0].stat().st_mode & 0o777 == 0o600
+    assert cache.stat().st_mode & 0o777 == 0o700
+    assert entries[0].parent.stat().st_mode & 0o777 == 0o700
+    assert API_KEY not in entries[0].read_text()
+
+    # Re-login drops the cached token, so the next kubectl mints again.
+    relogin = e2e.prime("cluster", "login", CLUSTER)
+    assert relogin.returncode == 0, relogin.stderr + relogin.stdout
+    assert not any(p.is_file() for p in cache.rglob("*"))
+    for _ in range(3):
+        assert e2e.kubectl("get", "pods").returncode == 0
+    assert e2e.platform.mints["train"] - before == 2
+
+    # The escape hatch, through kubectl: every command mints.
+    for _ in range(2):
+        pods = e2e.kubectl("get", "pods", PRIME_K8S_TOKEN_NO_CACHE="1")
+        assert pods.returncode == 0, pods.stderr
+    assert e2e.platform.mints["train"] - before == 4
+
+
 def _cert_covers(proxy: _PoolProxy, ca_data: str, name: str) -> bool:
     """Whether the apiserver certificate behind `proxy` is valid for `name`."""
     context = ssl.create_default_context(cadata=base64.b64decode(ca_data).decode())
@@ -555,11 +607,14 @@ def test_plugin_exit_codes_through_the_real_binary(e2e):
     assert (ambiguous.returncode, ambiguous.stdout) == (5, "")
     assert "several pools" in ambiguous.stderr
 
+    # A cached token would answer before the platform could refuse.
+    no_cache = {"PRIME_K8S_TOKEN_NO_CACHE": "1"}
+
     e2e.platform.rate_limited = True
     try:
-        limited = e2e.exec_plugin(f"{CLUSTER}-train")
+        limited = e2e.exec_plugin(f"{CLUSTER}-train", **no_cache)
         assert (limited.returncode, limited.stdout) == (3, "")
-        via_kubectl = e2e.kubectl("get", "pods")
+        via_kubectl = e2e.kubectl("get", "pods", **no_cache)
         assert via_kubectl.returncode != 0
         assert "Retry after 7s" in via_kubectl.stderr
     finally:
@@ -567,61 +622,60 @@ def test_plugin_exit_codes_through_the_real_binary(e2e):
 
     e2e.platform.unavailable = "Cluster 'e2e-k8s' has not reported a heartbeat recently."
     try:
-        down = e2e.exec_plugin(f"{CLUSTER}-train")
+        down = e2e.exec_plugin(f"{CLUSTER}-train", **no_cache)
         assert (down.returncode, down.stdout) == (1, "")
         assert "has not reported a heartbeat recently" in down.stderr
-        via_kubectl = e2e.kubectl("get", "pods")
+        via_kubectl = e2e.kubectl("get", "pods", **no_cache)
         assert via_kubectl.returncode != 0
         assert "has not reported a heartbeat recently" in via_kubectl.stderr
     finally:
         e2e.platform.unavailable = None
 
-    e2e.platform.api_key = "rotated"
-    try:
-        expired = e2e.exec_plugin(f"{CLUSTER}-train")
-        assert (expired.returncode, expired.stdout) == (4, "")
-        assert "prime login" in expired.stderr
-    finally:
-        e2e.platform.api_key = API_KEY
-
+    # Another platform is another cache key, so nothing cached is reused.
     unreachable = e2e.exec_plugin(
         f"{CLUSTER}-train", PRIME_API_BASE_URL=f"http://127.0.0.1:{_closed_port()}"
     )
     assert (unreachable.returncode, unreachable.stdout) == (1, "")
 
+    # Transient failures leave the cached token alone, and it still works.
+    before = e2e.platform.mints["train"]
+    assert e2e.kubectl("get", "pods").returncode == 0
+    assert e2e.platform.mints["train"] == before
 
-def test_revocation_cuts_off_kubectl_and_issued_tokens(e2e, tmp_path):
-    issued = json.loads(e2e.exec_plugin(f"{CLUSTER}-eval").stdout)["status"]["token"]
-    # Through the surviving pool's proxy, the way a researcher would hold on
-    # to an old token.
-    proxy_url = e2e.platform.proxies["train"].url
+    e2e.platform.api_key = "rotated"
+    try:
+        expired = e2e.exec_plugin(f"{CLUSTER}-train", **no_cache)
+        assert (expired.returncode, expired.stdout) == (4, "")
+        assert "prime login" in expired.stderr
+    finally:
+        e2e.platform.api_key = API_KEY
 
-    e2e.platform.revoke("eval")
+    # A 401 from the platform evicts the cached token for that key.
+    assert e2e.kubectl("get", "pods").returncode == 0
+    assert e2e.platform.mints["train"] == before + 1
 
-    refused = e2e.kubectl("--context", f"{CLUSTER}-eval", "get", "pods")
-    assert refused.returncode != 0
-    assert "No active cluster access grant" in refused.stderr
 
-    plugin = e2e.exec_plugin(f"{CLUSTER}-eval")
-    assert (plugin.returncode, plugin.stdout) == (2, "")
-
+def _whoami_with_token(e2e, tmp_path, token: str) -> subprocess.CompletedProcess:
+    """`kubectl auth whoami` with a bare token, outside the plugin and cache,
+    through the surviving pool's proxy: how a researcher would hold on to an
+    old token."""
     ca_file = tmp_path / "ca.crt"
     ca_file.write_bytes(base64.b64decode(e2e.platform.ca_data))
     empty_kubeconfig = tmp_path / "empty.yaml"
     empty_kubeconfig.write_text("")
-    stale = subprocess.run(
+    return subprocess.run(
         [
             "kubectl",
             "--kubeconfig",
             str(empty_kubeconfig),
             "--server",
-            proxy_url,
+            e2e.platform.proxies["train"].url,
             "--tls-server-name",
             TLS_SERVER_NAME,
             "--certificate-authority",
             str(ca_file),
             "--token",
-            issued,
+            token,
             "auth",
             "whoami",
         ],
@@ -629,8 +683,50 @@ def test_revocation_cuts_off_kubectl_and_issued_tokens(e2e, tmp_path):
         text=True,
         timeout=60,
     )
+
+
+def test_revocation_cuts_off_kubectl_and_issued_tokens(e2e, tmp_path):
+    # Served from the cache: the same token kubectl has been using.
+    issued = json.loads(e2e.exec_plugin(f"{CLUSTER}-eval").stdout)["status"]["token"]
+
+    e2e.platform.revoke("eval")
+
+    # The issued token stops working. The apiserver caches successful token
+    # reviews for 10s, so one used just before the revocation can take that
+    # long to be refused.
+    deadline = time.monotonic() + 30
+    while True:
+        stale = _whoami_with_token(e2e, tmp_path, issued)
+        if stale.returncode != 0 or time.monotonic() > deadline:
+            break
+        time.sleep(1)
     assert stale.returncode != 0
     assert "unauthorized" in stale.stderr.lower()
+
+    def eval_mint_attempts() -> int:
+        return e2e.platform.requests.count(
+            ("POST", f"/api/v1/clusters/{CLUSTER}/kube-token", "eval")
+        )
+
+    attempts_before = eval_mint_attempts()
+    # The cache still holds `issued`, so this kubectl starts out with it.
+    refused = e2e.kubectl("--context", f"{CLUSTER}-eval", "get", "pods")
+    assert refused.returncode != 0
+    # The apiserver rejects the cached token, kubectl re-runs the plugin from
+    # the same process, and the plugin mints instead of serving the same
+    # token again — so the platform's reason reaches the researcher rather
+    # than a bare "Unauthorized".
+    assert "No active cluster access grant" in refused.stderr
+    # client-go re-runs the plugin at most once per failed request, never in
+    # a loop. kubectl 1.33 makes five requests here (discovery retries), and
+    # each is refused by the platform as it would have been without a cache.
+    attempts = eval_mint_attempts() - attempts_before
+    assert 1 <= attempts <= 10, attempts
+
+    # The refusal evicted the entry: the plugin goes to the platform again.
+    plugin = e2e.exec_plugin(f"{CLUSTER}-eval")
+    assert (plugin.returncode, plugin.stdout) == (2, "")
+    assert eval_mint_attempts() == attempts_before + attempts + 1
 
     relogin = e2e.prime("cluster", "login", CLUSTER)
     assert relogin.returncode == 0, relogin.stderr + relogin.stdout

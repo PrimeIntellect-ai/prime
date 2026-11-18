@@ -1341,3 +1341,50 @@ class TestFactoryK8sLoginClearsCachedTokens:
         result = self._login("c1")
         assert result.exit_code == 0, result.output
         assert "Could not clear" not in result.output
+
+
+# --- logout / config reset clear the token cache -------------------------------
+
+
+def _seed_cache(cache_dir):
+    entry = cache_dir / "abc" / "def.json"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("{}")
+    return entry
+
+
+@pytest.mark.parametrize("command", [["logout", "--yes"], ["config", "reset", "--yes"]])
+def test_logout_and_reset_clear_cached_cluster_tokens(
+    command, monkeypatch, tmp_path, token_cache_dir
+):
+    from prime_cli.core import Config
+    from prime_cli.main import app as main_app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    Config().set_api_key("secret")
+    _seed_cache(token_cache_dir)
+
+    result = runner.invoke(main_app, command)
+
+    assert result.exit_code == 0, result.output
+    assert not token_cache_dir.exists()
+
+
+def test_logout_clears_tokens_even_when_not_logged_in(monkeypatch, tmp_path, token_cache_dir):
+    """Tokens minted with PRIME_API_KEY from the environment are cached as well."""
+    from prime_cli.main import app as main_app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.delenv("PRIME_API_KEY", raising=False)
+    _seed_cache(token_cache_dir)
+
+    result = runner.invoke(main_app, ["logout", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert not token_cache_dir.exists()
+
+
+def test_clear_all_without_a_cache_is_a_no_op(token_cache_dir):
+    assert kube_token_cache.clear_all() is False

@@ -122,3 +122,14 @@ def clear_cluster(cluster: str) -> None:
         shutil.rmtree(_cluster_dir(cluster))
     except FileNotFoundError:
         pass
+
+
+def clear_all() -> bool:
+    """Drop every cached credential, for every cluster and platform. Logout
+    and config reset call this: a cached token stays valid on the apiserver
+    for up to an hour, so it must not outlive the API key it was minted with.
+    Returns whether anything was removed. Raises OSError on failure."""
+    if not CACHE_DIR.exists():
+        return False
+    shutil.rmtree(CACHE_DIR)
+    return True

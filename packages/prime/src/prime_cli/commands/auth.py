@@ -99,7 +99,7 @@ def k8s_token(
 ) -> None:
     """Print a Kubernetes ExecCredential for a granted cluster.
 
-    Invoked by kubectl via the `exec` block that `prime cluster login` writes.
+    Invoked by kubectl via the `exec` block that `prime factory k8s login` writes.
     """
     config = Config()
     api_key = config.api_key

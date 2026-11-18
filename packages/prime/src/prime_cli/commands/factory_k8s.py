@@ -1,6 +1,6 @@
-"""`prime cluster` — kubeconfig setup for researcher cluster access.
+"""`prime factory k8s` — kubeconfig setup for researcher cluster access.
 
-`prime cluster login <name>` writes a kubeconfig whose credentials come from an
+`prime factory k8s login <name>` writes a kubeconfig whose credentials come from an
 `exec` block calling back into this CLI. The kubeconfig holds no Kubernetes
 token: every `kubectl` invocation shells out to `prime auth k8s-token`, which
 exchanges the user's platform API token for a short-lived ServiceAccount token
@@ -40,13 +40,13 @@ from ..utils import (
 from ..utils import kube_token_cache as token_cache
 
 app = PlainTyper(
-    help="Kubernetes access for clusters you have been granted",
+    help="Kubernetes reservations on dedicated clusters",
     no_args_is_help=True,
 )
 
 
 @app.callback()
-def _cluster() -> None:
+def _factory_k8s() -> None:
     """Present so Typer keeps this a command group whatever subcommands it
     has, rather than promoting a lone one to the group."""
 
@@ -59,7 +59,7 @@ console = get_console()
 KUBECONFIG_DIR = Path.home() / ".prime" / "kube"
 
 
-# What `prime cluster list` and a refused login say when there is nothing to
+# What `prime factory k8s list` and a refused login say when there is nothing to
 # log in to: the platform cannot grant access itself, so point at who can.
 NO_RESERVATION_HINT = (
     "You're not a member of any Kubernetes reservation. Ask your team admin to "
@@ -99,7 +99,7 @@ def _build_kubeconfig(
     kubectl must not try to prompt, and `provideClusterInfo: false` because the
     plugin resolves the cluster from its own arguments.
     """
-    # `prime --context X cluster login` runs with PRIME_CONTEXT set by the root
+    # `prime --context X factory k8s login` runs with PRIME_CONTEXT set by the root
     # callback. The credential plugin runs much later, from kubectl, where that
     # variable does not exist — so the flag has to be baked into the exec args
     # or every refresh would silently hit the default context's platform.
@@ -255,7 +255,7 @@ def _status_label(status: Optional[str]) -> str:
 
 def _next_step(cluster: str, reservation: Dict[str, Any], *, several: bool) -> str:
     if reservation.get("server"):
-        command = f"prime cluster login {cluster}"
+        command = f"prime factory k8s login {cluster}"
         if several:
             command += f" --pool {reservation.get('pool')}"
         return command
@@ -264,7 +264,7 @@ def _next_step(cluster: str, reservation: Dict[str, Any], *, several: bool) -> s
 
 @app.command("login")
 def login(
-    cluster: str = typer.Argument(..., help="Cluster name, as shown by `prime cluster list`"),
+    cluster: str = typer.Argument(..., help="Cluster name, as shown by `prime factory k8s list`"),
     pool: Optional[str] = typer.Option(
         None,
         "--pool",
@@ -291,7 +291,7 @@ def login(
             # cluster exists, and permanent until someone grants access.
             console.print(f"[red]{detail.removeprefix('HTTP 403:').strip()}[/red]")
             _remove_stale_kubeconfig(path)
-            console.print("Run `prime cluster list` to see the reservations you can log in to.")
+            console.print("Run `prime factory k8s list` to see the reservations you can log in to.")
         else:
             console.print(f"[red]{detail}[/red]")
         raise typer.Exit(1) from e
@@ -300,7 +300,7 @@ def login(
     if not grants:
         console.print(f"[red]No active access grant for '{cluster}'.[/red]")
         _remove_stale_kubeconfig(path)
-        console.print("Run `prime cluster list` to see the reservations you can log in to.")
+        console.print("Run `prime factory k8s list` to see the reservations you can log in to.")
         raise typer.Exit(1)
 
     ca_data = info.get("certificateAuthorityData")

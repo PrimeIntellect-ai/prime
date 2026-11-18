@@ -1,4 +1,4 @@
-"""End-to-end: `prime cluster login` → kubectl → `prime auth k8s-token` → apiserver.
+"""End-to-end: `prime factory k8s login` → kubectl → `prime auth k8s-token` → apiserver.
 
 Runs the installed `prime` binary and a real `kubectl` against a real
 Kubernetes apiserver. Two things are stood in for:
@@ -25,7 +25,7 @@ Opt-in, because it needs a disposable cluster it may create namespaces in:
     kind create cluster --name prime-e2e
     kind get kubeconfig --name prime-e2e > /tmp/admin.yaml
     PRIME_K8S_E2E_ADMIN_KUBECONFIG=/tmp/admin.yaml \\
-        uv run pytest tests/test_cluster_kube_e2e.py -v
+        uv run pytest tests/test_factory_k8s_e2e.py -v
 
 The tests share one login and run in file order; the revocation test is last
 because it permanently removes a grant. Do not run this file under xdist.
@@ -428,7 +428,7 @@ def e2e(tmp_path_factory):
     # the key from ~/.prime rather than from a PRIME_API_KEY variable.
     assert env.prime("config", "set-base-url", base_url).returncode == 0
     assert env.prime("config", "set-api-key", API_KEY).returncode == 0
-    env.login_result = env.prime("cluster", "login", CLUSTER)
+    env.login_result = env.prime("factory", "k8s", "login", CLUSTER)
 
     try:
         yield env
@@ -526,7 +526,7 @@ def test_kubectl_is_confined_to_the_grant_namespace(e2e):
 def test_consecutive_kubectl_calls_reuse_one_minted_token(e2e):
     # kubectl runs the plugin afresh in every process. Before the cache, each
     # command minted a token, and polling ran into the platform's rate limit.
-    relogin = e2e.prime("cluster", "login", CLUSTER)
+    relogin = e2e.prime("factory", "k8s", "login", CLUSTER)
     assert relogin.returncode == 0, relogin.stderr + relogin.stdout
     before = e2e.platform.mints["train"]
 
@@ -549,7 +549,7 @@ def test_consecutive_kubectl_calls_reuse_one_minted_token(e2e):
     assert API_KEY not in entries[0].read_text()
 
     # Re-login drops the cached token, so the next kubectl mints again.
-    relogin = e2e.prime("cluster", "login", CLUSTER)
+    relogin = e2e.prime("factory", "k8s", "login", CLUSTER)
     assert relogin.returncode == 0, relogin.stderr + relogin.stdout
     assert not any(p.is_file() for p in cache.rglob("*"))
     for _ in range(3):
@@ -632,16 +632,16 @@ def test_each_pool_context_mints_for_its_own_pool(e2e):
     assert e2e.platform.proxies["train"].connections == train_before
 
 
-def test_cluster_list_shows_each_reservation_and_how_to_log_in(e2e):
-    table = e2e.prime("cluster", "list", COLUMNS="250")
+def test_factory_k8s_list_shows_each_reservation_and_how_to_log_in(e2e):
+    table = e2e.prime("factory", "k8s", "list", COLUMNS="250")
     assert table.returncode == 0, table.stderr + table.stdout
     assert ("GET", "/api/v1/clusters", None) in e2e.platform.requests
     for text in (NS_TRAIN, NS_EVAL, "Provisioning", PENDING_REASON[:40]):
         assert text in table.stdout, text
-    assert f"prime cluster login {CLUSTER} --pool train" in table.stdout
-    assert f"prime cluster login {CLUSTER} --pool eval" in table.stdout
+    assert f"prime factory k8s login {CLUSTER} --pool train" in table.stdout
+    assert f"prime factory k8s login {CLUSTER} --pool eval" in table.stdout
 
-    as_json = e2e.prime("cluster", "list", "--output", "json")
+    as_json = e2e.prime("factory", "k8s", "list", "--output", "json")
     assert as_json.returncode == 0, as_json.stderr
     (cluster,) = json.loads(as_json.stdout)["clusters"]
     assert cluster["cluster"] == CLUSTER
@@ -653,7 +653,7 @@ def test_cluster_list_shows_each_reservation_and_how_to_log_in(e2e):
 
 
 def test_login_with_pool_makes_that_context_current(e2e):
-    login = e2e.prime("cluster", "login", CLUSTER, "--pool", "eval")
+    login = e2e.prime("factory", "k8s", "login", CLUSTER, "--pool", "eval")
     try:
         assert login.returncode == 0, login.stderr + login.stdout
         assert f"Current context: {CLUSTER}-eval" in login.stdout
@@ -663,23 +663,23 @@ def test_login_with_pool_makes_that_context_current(e2e):
         assert whoami.stdout == f"system:serviceaccount:{NS_EVAL}:{SA}"
 
         before = e2e.kubeconfig.read_text()
-        bad = e2e.prime("cluster", "login", CLUSTER, "--pool", "debug")
+        bad = e2e.prime("factory", "k8s", "login", CLUSTER, "--pool", "debug")
         assert bad.returncode == 1
         assert "Available pools: train, eval" in bad.stdout
         assert e2e.kubeconfig.read_text() == before
     finally:
         # The later tests use the default (train) context.
-        restored = e2e.prime("cluster", "login", CLUSTER)
+        restored = e2e.prime("factory", "k8s", "login", CLUSTER)
         assert restored.returncode == 0, restored.stderr + restored.stdout
     assert yaml.safe_load(e2e.kubeconfig.read_text())["current-context"] == f"{CLUSTER}-train"
 
 
 def test_login_to_an_unknown_cluster_points_at_cluster_list(e2e):
-    result = e2e.prime("cluster", "login", "no-such-cluster")
+    result = e2e.prime("factory", "k8s", "login", "no-such-cluster")
     assert result.returncode == 1
     output = " ".join(result.stdout.split())
     assert _no_grant_detail("no-such-cluster") in output
-    assert "prime cluster list" in output
+    assert "prime factory k8s list" in output
     assert e2e.kubeconfig.exists()
 
 
@@ -815,7 +815,7 @@ def test_revocation_cuts_off_kubectl_and_issued_tokens(e2e, tmp_path):
     assert (plugin.returncode, plugin.stdout) == (2, "")
     assert eval_mint_attempts() == attempts_before + attempts + 1
 
-    relogin = e2e.prime("cluster", "login", CLUSTER)
+    relogin = e2e.prime("factory", "k8s", "login", CLUSTER)
     assert relogin.returncode == 0, relogin.stderr + relogin.stdout
     contexts = [c["name"] for c in yaml.safe_load(e2e.kubeconfig.read_text())["contexts"]]
     assert contexts == [f"{CLUSTER}-train"]
@@ -829,7 +829,7 @@ def test_losing_every_grant_removes_the_stale_kubeconfig(e2e):
     e2e.platform.revoke("train")
     e2e.platform.pending.clear()
 
-    result = e2e.prime("cluster", "login", CLUSTER)
+    result = e2e.prime("factory", "k8s", "login", CLUSTER)
 
     assert result.returncode == 1
     output = " ".join(result.stdout.split())
@@ -837,6 +837,6 @@ def test_losing_every_grant_removes_the_stale_kubeconfig(e2e):
     assert "Removed the stale kubeconfig" in output
     assert not e2e.kubeconfig.exists()
 
-    empty = e2e.prime("cluster", "list")
+    empty = e2e.prime("factory", "k8s", "list")
     assert empty.returncode == 0, empty.stderr
     assert "You're not a member of any Kubernetes reservation" in " ".join(empty.stdout.split())

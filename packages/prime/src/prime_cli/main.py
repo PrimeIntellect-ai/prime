@@ -6,7 +6,6 @@ import typer
 from . import __version__
 from .commands.auth import app as auth_app
 from .commands.availability import app as availability_app
-from .commands.cluster import app as cluster_app
 from .commands.config import app as config_app
 from .commands.disks import app as disks_app
 from .commands.env import app as env_app
@@ -67,7 +66,6 @@ app.add_typer(pods_app, name="pods", rich_help_panel="Compute")
 app.add_typer(sandbox_app, name="sandbox", rich_help_panel="Compute")
 app.add_typer(images_app, name="images", rich_help_panel="Compute")
 app.add_typer(tunnel_app, name="tunnel", rich_help_panel="Compute")
-app.add_typer(cluster_app, name="cluster", rich_help_panel="Compute")
 app.add_typer(inference_app, name="inference", rich_help_panel="Compute")
 
 # Account commands

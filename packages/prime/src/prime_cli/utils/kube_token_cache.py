@@ -10,7 +10,7 @@ directories 0700 and files 0600. The identity is the platform base URL, the
 cluster, the pool and the API key, all hashed into the file name, so a token
 is only ever reused for the same platform, grant and key, and the key itself
 is never on disk here.
-Grouping by cluster is what lets `prime cluster login` drop a cluster's
+Grouping by cluster is what lets `prime factory k8s login` drop a cluster's
 entries without reading any of them.
 """
 

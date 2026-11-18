@@ -280,7 +280,7 @@ jobs:
       run: uv run pytest tests/ -v
 
   test-prime-k8s-e2e:
-    # `prime cluster login` + the `prime auth k8s-token` exec plugin, driven by
+    # `prime factory k8s login` + the `prime auth k8s-token` exec plugin, driven by
     # real kubectl against a kind apiserver. The platform side is a stand-in.
     runs-on: ubuntu-latest
     steps:
@@ -310,7 +310,7 @@ jobs:
       run: |
         kind get kubeconfig --name prime-e2e > "$RUNNER_TEMP/admin.yaml"
         PRIME_K8S_E2E_ADMIN_KUBECONFIG="$RUNNER_TEMP/admin.yaml" \
-          uv run pytest tests/test_cluster_kube_e2e.py -v
+          uv run pytest tests/test_factory_k8s_e2e.py -v
 
   type-check:
     runs-on: ubuntu-latest

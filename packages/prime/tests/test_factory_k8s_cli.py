@@ -1,4 +1,4 @@
-"""Coverage for `prime cluster login` and the `prime auth k8s-token` plugin.
+"""Coverage for `prime factory k8s login` and the `prime auth k8s-token` plugin.
 
 The plugin's contract is unusually strict because kubectl, not a human, is the
 caller: stdout is protocol, and the exit code is how anything wrapping it tells
@@ -27,7 +27,7 @@ from prime_cli.commands.auth import (
     EXIT_UNREACHABLE,
 )
 from prime_cli.commands.auth import app as auth_app
-from prime_cli.commands.cluster import _build_kubeconfig
+from prime_cli.commands.factory_k8s import _build_kubeconfig
 from prime_cli.utils import kube_token_cache
 from typer.testing import CliRunner
 
@@ -51,7 +51,7 @@ def proxy_names_resolve(monkeypatch):
     """No test reaches a real resolver: every proxy name resolves unless a
     test says otherwise."""
     looked_up = []
-    monkeypatch.setattr("prime_cli.commands.cluster._resolve", looked_up.append)
+    monkeypatch.setattr("prime_cli.commands.factory_k8s._resolve", looked_up.append)
     return looked_up
 
 
@@ -263,8 +263,8 @@ NO_GRANT_DETAIL = (
 )
 
 
-class TestClusterLogin:
-    """`prime cluster login` through the root CLI, with the platform's
+class TestFactoryK8sLogin:
+    """`prime factory k8s login` through the root CLI, with the platform's
     `kubeconfig-info` response stubbed at the client boundary."""
 
     INFO = {
@@ -276,8 +276,8 @@ class TestClusterLogin:
     @pytest.fixture
     def login(self, tmp_path, monkeypatch):
         monkeypatch.delenv("PRIME_CONTEXT", raising=False)
-        monkeypatch.setattr("prime_cli.commands.cluster.KUBECONFIG_DIR", tmp_path / "kube")
-        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.KUBECONFIG_DIR", tmp_path / "kube")
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.APIClient", _FakeAPIClient)
         _FakeAPIClient.payload = dict(self.INFO)
         _FakeAPIClient.error = None
         _FakeAPIClient.requested = []
@@ -285,7 +285,7 @@ class TestClusterLogin:
         def _run(*args):
             from prime_cli.main import app as root_app
 
-            return runner.invoke(root_app, ["cluster", "login", *args])
+            return runner.invoke(root_app, ["factory", "k8s", "login", *args])
 
         return _run
 
@@ -423,7 +423,7 @@ class TestClusterLogin:
         def _boom(src, dst):
             raise OSError("disk full")
 
-        monkeypatch.setattr("prime_cli.commands.cluster.os.replace", _boom)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.os.replace", _boom)
         _FakeAPIClient.payload = {**self.INFO, "grants": [_grant("other")]}
         result = login("c1")
 
@@ -474,7 +474,7 @@ class TestClusterLogin:
         output = _flat(result.output)
         assert NO_GRANT_DETAIL in output
         assert "HTTP 403" not in output
-        assert "prime cluster list" in output
+        assert "prime factory k8s list" in output
         assert "Removed" not in output
         assert not (tmp_path / "kube" / "c1.yaml").exists()
 
@@ -588,16 +588,16 @@ class TestProxyDnsCheck:
     @pytest.fixture
     def login(self, tmp_path, monkeypatch):
         monkeypatch.delenv("PRIME_CONTEXT", raising=False)
-        monkeypatch.setattr("prime_cli.commands.cluster.KUBECONFIG_DIR", tmp_path / "kube")
-        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
-        _FakeAPIClient.payload = dict(TestClusterLogin.INFO)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.KUBECONFIG_DIR", tmp_path / "kube")
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.APIClient", _FakeAPIClient)
+        _FakeAPIClient.payload = dict(TestFactoryK8sLogin.INFO)
         _FakeAPIClient.error = None
         _FakeAPIClient.requested = []
 
         def _run(*args):
             from prime_cli.main import app as root_app
 
-            return runner.invoke(root_app, ["cluster", "login", *args])
+            return runner.invoke(root_app, ["factory", "k8s", "login", *args])
 
         return _run
 
@@ -616,7 +616,7 @@ class TestProxyDnsCheck:
             if host.startswith("k8s-eval"):
                 raise socket.gaierror(8, "nodename nor servname provided")
 
-        monkeypatch.setattr("prime_cli.commands.cluster._resolve", _resolve)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s._resolve", _resolve)
 
         result = login("c1")
 
@@ -635,8 +635,8 @@ class TestProxyDnsCheck:
         def _hang(host):
             release.wait(10)
 
-        monkeypatch.setattr("prime_cli.commands.cluster._resolve", _hang)
-        monkeypatch.setattr("prime_cli.commands.cluster.DNS_CHECK_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s._resolve", _hang)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.DNS_CHECK_TIMEOUT_SECONDS", 0.2)
         started = time.monotonic()
         try:
             result = login("c1")
@@ -650,7 +650,7 @@ class TestProxyDnsCheck:
 
     def test_ip_literals_are_not_looked_up(self, login, proxy_names_resolve):
         _FakeAPIClient.payload = {
-            **TestClusterLogin.INFO,
+            **TestFactoryK8sLogin.INFO,
             "grants": [
                 _grant("train", server="https://[::1]:6443"),
                 _grant("eval", server="https://127.0.0.1:6443"),
@@ -708,10 +708,10 @@ LIST_PAYLOAD = {
 }
 
 
-class TestClusterList:
+class TestFactoryK8sList:
     @pytest.fixture
     def cluster_list(self, monkeypatch):
-        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.APIClient", _FakeAPIClient)
         _FakeAPIClient.payload = LIST_PAYLOAD
         _FakeAPIClient.error = None
         _FakeAPIClient.requested = []
@@ -719,7 +719,9 @@ class TestClusterList:
         def _run(*args):
             from prime_cli.main import app as root_app
 
-            return runner.invoke(root_app, ["cluster", "list", *args], env={"COLUMNS": "200"})
+            return runner.invoke(
+                root_app, ["factory", "k8s", "list", *args], env={"COLUMNS": "200"}
+            )
 
         return _run
 
@@ -737,8 +739,8 @@ class TestClusterList:
             "Provisioning",
             "not ready",
             # Two loginable pools on c1: each step names its pool.
-            "prime cluster login c1 --pool eval",
-            "prime cluster login c1 --pool train",
+            "prime factory k8s login c1 --pool eval",
+            "prime factory k8s login c1 --pool train",
             "Proxy has not joined your tailnet yet.",
         ):
             assert text in output, text
@@ -756,7 +758,7 @@ class TestClusterList:
         result = cluster_list()
 
         assert result.exit_code == 0, result.output
-        assert "prime cluster login c1" in result.output
+        assert "prime factory k8s login c1" in result.output
         assert "--pool" not in result.output
 
     def test_json_is_the_platforms_shape(self, cluster_list):
@@ -813,18 +815,48 @@ class TestRootWiring:
         assert result.exit_code == 0
         assert "--cluster" in _ANSI.sub("", result.output)
 
-    def test_cluster_login_is_a_real_subcommand(self):
+    def test_factory_k8s_login_is_a_real_subcommand(self):
         from prime_cli.main import app as root_app
 
-        result = runner.invoke(root_app, ["cluster", "login", "--help"])
+        result = runner.invoke(root_app, ["factory", "k8s", "login", "--help"])
         assert result.exit_code == 0
 
-    def test_cluster_list_is_a_real_subcommand(self):
+    def test_factory_k8s_list_is_a_real_subcommand(self):
         from prime_cli.main import app as root_app
 
-        result = runner.invoke(root_app, ["cluster", "list", "--help"])
+        result = runner.invoke(root_app, ["factory", "k8s", "list", "--help"])
         assert result.exit_code == 0
         assert "--output" in _ANSI.sub("", result.output)
+
+    def test_factory_k8s_help_lists_list_and_login(self):
+        from prime_cli.main import app as root_app
+
+        result = runner.invoke(root_app, ["factory", "k8s", "--help"], env={"COLUMNS": "200"})
+        assert result.exit_code == 0
+        commands = re.findall(r"^\W*(\w[\w-]*)\s{2,}", _ANSI.sub("", result.output), re.M)
+        assert {"list", "login"} <= set(commands)
+
+    def test_factory_help_lists_k8s_but_not_the_kubernetes_alias(self):
+        from prime_cli.main import app as root_app
+
+        result = runner.invoke(root_app, ["factory", "--help"], env={"COLUMNS": "200"})
+        assert result.exit_code == 0
+        output = _ANSI.sub("", result.output)
+        assert re.search(r"\bk8s\b", output)
+        assert "kubernetes" not in output
+
+    def test_kubernetes_is_a_hidden_alias_of_factory_k8s(self):
+        from prime_cli.main import app as root_app
+
+        result = runner.invoke(root_app, ["factory", "kubernetes", "login", "--help"])
+        assert result.exit_code == 0
+
+    def test_top_level_cluster_group_is_gone(self):
+        from prime_cli.main import app as root_app
+
+        result = runner.invoke(root_app, ["cluster", "--help"])
+        assert result.exit_code != 0
+        assert "No such command" in _ANSI.sub("", result.output)
 
 
 class TestCustomBaseUrlSurvivesContextRefresh:
@@ -1255,13 +1287,13 @@ class TestTokenCache:
         assert "could not cache the credential" in result.stderr
 
 
-class TestClusterLoginClearsCachedTokens:
+class TestFactoryK8sLoginClearsCachedTokens:
     @pytest.fixture
     def seeded(self, tmp_path, monkeypatch):
         monkeypatch.delenv("PRIME_CONTEXT", raising=False)
-        monkeypatch.setattr("prime_cli.commands.cluster.KUBECONFIG_DIR", tmp_path / "kube")
-        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
-        _FakeAPIClient.payload = dict(TestClusterLogin.INFO)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.KUBECONFIG_DIR", tmp_path / "kube")
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.APIClient", _FakeAPIClient)
+        _FakeAPIClient.payload = dict(TestFactoryK8sLogin.INFO)
         _FakeAPIClient.error = None
         _FakeAPIClient.requested = []
 
@@ -1283,7 +1315,7 @@ class TestClusterLoginClearsCachedTokens:
     def _login(self, cluster):
         from prime_cli.main import app as root_app
 
-        return runner.invoke(root_app, ["cluster", "login", cluster])
+        return runner.invoke(root_app, ["factory", "k8s", "login", cluster])
 
     def test_login_clears_only_that_clusters_tokens(self, seeded):
         assert self._login("c1").exit_code == 0
@@ -1301,9 +1333,9 @@ class TestClusterLoginClearsCachedTokens:
 
     def test_login_with_nothing_cached_is_fine(self, tmp_path, monkeypatch):
         monkeypatch.delenv("PRIME_CONTEXT", raising=False)
-        monkeypatch.setattr("prime_cli.commands.cluster.KUBECONFIG_DIR", tmp_path / "kube")
-        monkeypatch.setattr("prime_cli.commands.cluster.APIClient", _FakeAPIClient)
-        _FakeAPIClient.payload = dict(TestClusterLogin.INFO)
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.KUBECONFIG_DIR", tmp_path / "kube")
+        monkeypatch.setattr("prime_cli.commands.factory_k8s.APIClient", _FakeAPIClient)
+        _FakeAPIClient.payload = dict(TestFactoryK8sLogin.INFO)
         _FakeAPIClient.error = None
 
         result = self._login("c1")

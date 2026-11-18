@@ -416,7 +416,8 @@ def test_train_resume(monkeypatch, response, exit_code, expected_output) -> None
 
     assert result.exit_code == exit_code, result.output
     assert expected_output in result.output
-    assert calls == [
+    # A failed resume may also look up GPU capacity to explain the error.
+    assert [c for c in calls if c[0] == "POST"] == [
         (
             "POST",
             "/training/runs/run-1/resume",
@@ -1282,3 +1283,130 @@ def test_create_run_waits_out_a_cold_validator():
     assert timeout is CREATE_RUN_TIMEOUT
     # The read wait outlasts the validator; connecting still fails fast.
     assert timeout.read > 60 and timeout.connect == 10.0
+
+
+# --- dispatch onto an at-capacity GPU type ---------------------------------
+
+_BACKEND_CAPACITY_ERROR = "HTTP 409: no capacity for gpu_type B200_180GB"
+
+
+def _mock_capacity_discovery(monkeypatch, *, reserved: tuple[str, ...] = ()) -> None:
+    from prime_cli.api.training import AvailableFFTModelsResponse
+
+    payload = {
+        "models": [
+            {"name": "m", "clusters": [{"clusterId": "c", "clusterName": "n", "gpuType": g}]}
+            for g in reserved
+        ],
+        "onDemand": [
+            {"gpuType": "H100_80GB", "pricePerGpuHour": 2.0, "availableNow": True},
+            {"gpuType": "B200_180GB", "pricePerGpuHour": 5.0, "atCapacity": True},
+        ],
+    }
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.get_available_fft",
+        lambda self, team_id=None: AvailableFFTModelsResponse.model_validate(payload),
+    )
+
+
+def _fail_create_run(monkeypatch, error: APIError) -> None:
+    def create_run(self, payload):
+        raise error
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", create_run)
+
+
+def _dispatch_on(tmp_path: Path, gpu_type: str):
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    return runner.invoke(
+        app,
+        ["train", str(cfg), "--gpu-type", gpu_type, "-y"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+
+def test_dispatch_on_at_capacity_gpu_explains_instead_of_raw_error(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _mock_capacity_discovery(monkeypatch)
+    _fail_create_run(monkeypatch, APIError(_BACKEND_CAPACITY_ERROR))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "B200_180GB is at capacity for Hosted Training right now." in plain
+    assert "contact@primeintellect.ai" in plain
+    assert "no capacity for gpu_type" not in plain
+
+
+def test_dispatch_error_on_available_gpu_keeps_backend_detail(monkeypatch, tmp_path: Path) -> None:
+    _mock_capacity_discovery(monkeypatch)
+    _fail_create_run(monkeypatch, APIError("HTTP 400: bad config"))
+
+    result = _dispatch_on(tmp_path, "H100_80GB")
+
+    assert result.exit_code == 1, result.output
+    assert "Error: bad config" in result.output
+    assert "at capacity" not in result.output
+
+
+def test_dispatch_error_with_reserved_capacity_keeps_backend_detail(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Pool capacity is irrelevant when the caller holds reserved B200s."""
+    _mock_capacity_discovery(monkeypatch, reserved=("B200_180GB",))
+    _fail_create_run(monkeypatch, APIError(_BACKEND_CAPACITY_ERROR))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    assert "no capacity for gpu_type B200_180GB" in result.output
+    assert "is at capacity for Hosted Training" not in result.output
+
+
+def test_dispatch_auth_error_is_not_blamed_on_capacity(monkeypatch, tmp_path: Path) -> None:
+    from prime_cli.core.client import UnauthorizedError
+
+    _mock_capacity_discovery(monkeypatch)
+    _fail_create_run(monkeypatch, UnauthorizedError("API key unauthorized."))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    assert "unauthorized" in result.output.lower()
+    assert "is at capacity" not in result.output
+
+
+def test_dispatch_error_survives_failed_capacity_lookup(monkeypatch, tmp_path: Path) -> None:
+    def broken_discovery(self, team_id=None):
+        raise APIError("HTTP 500: discovery down")
+
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.get_available_fft", broken_discovery
+    )
+    _fail_create_run(monkeypatch, APIError(_BACKEND_CAPACITY_ERROR))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    assert "no capacity for gpu_type B200_180GB" in result.output
+
+
+def test_resume_on_at_capacity_gpu_explains(monkeypatch) -> None:
+    _mock_capacity_discovery(monkeypatch)
+
+    def resume_run(self, run_id, payload):
+        raise APIError(_BACKEND_CAPACITY_ERROR)
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.resume_run", resume_run)
+
+    result = runner.invoke(
+        app,
+        ["train", "resume", "run-1", "--gpu-type", "B200_180GB", "-y"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "B200_180GB is at capacity" in " ".join(result.output.split())

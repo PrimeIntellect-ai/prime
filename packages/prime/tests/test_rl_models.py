@@ -656,6 +656,7 @@ def test_models_json_retains_on_demand_rows(monkeypatch: pytest.MonkeyPatch, mod
             "discount_label": None,
             "available_now": False,
             "is_beta": False,
+            "at_capacity": False,
         }
     ]
 
@@ -778,3 +779,93 @@ def test_on_demand_table_escapes_promo_markup(monkeypatch: pytest.MonkeyPatch) -
     # Rich may still wrap the caption to the table width, so compare on
     # whitespace-normalized text.
     assert " ".join(plain.split()).count(" ".join(label.split())) == 1
+
+
+# --- at-capacity GPU types (priced, no inventory) --------------------------
+
+_CAPACITY_HINT = "Contact us at contact@primeintellect.ai for dedicated capacity."
+
+
+def _capacity_line(plain: str, gpu_type: str) -> str:
+    return next(ln for ln in plain.splitlines() if gpu_type in ln)
+
+
+@pytest.mark.parametrize("key", ["atCapacity", "at_capacity"])
+def test_at_capacity_parses_both_casings(key: str) -> None:
+    from prime_cli.api.training import OnDemandGpuTypeAvailability
+
+    entry = OnDemandGpuTypeAvailability.model_validate({**_on_demand_entry(), key: True})
+    assert entry.at_capacity is True
+
+
+@pytest.mark.parametrize("payload", [{}, {"atCapacity": None}], ids=["absent", "null"])
+def test_missing_at_capacity_means_available(payload: dict[str, Any]) -> None:
+    from prime_cli.api.training import OnDemandGpuTypeAvailability
+
+    entry = OnDemandGpuTypeAvailability.model_validate({**_on_demand_entry(), **payload})
+    assert entry.at_capacity is False
+
+
+def test_at_capacity_entries_render_last_with_one_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [
+        {**_on_demand_entry("B200_180GB", 5.0, available_now=False), "atCapacity": True},
+        _on_demand_entry("H100_80GB", 2.0, available_now=True),
+        {**_on_demand_entry("GB200_186GB", 6.0, available_now=False), "atCapacity": True},
+        _on_demand_entry("H200_141GB", 3.0, available_now=False),
+    ]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    order = [
+        gpu
+        for ln in plain.splitlines()
+        for gpu in ("B200_180GB", "H100_80GB", "GB200_186GB", "H200_141GB")
+        if gpu in ln
+    ]
+    # Sellable types first in backend order, then at-capacity in backend order.
+    assert order == ["H100_80GB", "H200_141GB", "B200_180GB", "GB200_186GB"]
+    assert "At capacity" in _capacity_line(plain, "B200_180GB")
+    assert "At capacity" in _capacity_line(plain, "GB200_186GB")
+    assert "available" in _capacity_line(plain, "H100_80GB")
+    assert "busy" in _capacity_line(plain, "H200_141GB")
+    # Priced types keep their rate even with no inventory.
+    assert "$5.00" in _capacity_line(plain, "B200_180GB")
+    assert " ".join(plain.split()).count(_CAPACITY_HINT) == 1
+
+
+def test_no_capacity_hint_without_at_capacity_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _discovery_mock({"models": [], "onDemand": [_on_demand_entry()]}),
+    )
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "At capacity" not in plain
+    assert "contact@primeintellect.ai" not in plain
+
+
+def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [
+        {**_on_demand_entry("B200_180GB", 5.0), "atCapacity": True},
+        _on_demand_entry("H100_80GB", 2.0),
+    ]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+
+    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert [(o["gpu_type"], o["at_capacity"]) for o in data["on_demand"]] == [
+        ("H100_80GB", False),
+        ("B200_180GB", True),
+    ]

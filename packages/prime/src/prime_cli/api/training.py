@@ -10,7 +10,7 @@ import os
 from typing import Any, Dict, List, Literal, Optional
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agent
@@ -135,6 +135,11 @@ class OnDemandGpuTypeAvailability(BaseModel):
     discovery endpoint knows nothing about (and the backend's physical
     free capacity can even be unknown). Rendered as available/busy with a
     queue caveat, never a start-time promise.
+
+    `at_capacity` marks a GPU type that is priced but has no inventory at
+    all right now: listed so customers can see it and ask for dedicated
+    capacity. Absent on older backends, where every listed type is
+    sellable, so it defaults to False.
     """
 
     gpu_type: str = Field(..., alias="gpuType")
@@ -143,8 +148,14 @@ class OnDemandGpuTypeAvailability(BaseModel):
     available_now: bool = Field(False, alias="availableNow")
     # Server-driven so the label retires without a CLI release.
     is_beta: bool = Field(False, alias="isBeta")
+    at_capacity: bool = Field(False, validation_alias=AliasChoices("atCapacity", "at_capacity"))
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("at_capacity", mode="before")
+    @classmethod
+    def _null_at_capacity_is_available(cls, value: Any) -> Any:
+        return False if value is None else value
 
 
 class AvailableFFTModelsResponse(BaseModel):

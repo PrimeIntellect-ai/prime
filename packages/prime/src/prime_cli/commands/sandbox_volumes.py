@@ -6,7 +6,7 @@ import shutil
 import string
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, NoReturn, Optional
 
 import typer
 from prime_sandboxes import (
@@ -625,6 +625,13 @@ def _print_publish_result(checkpoint, name: str) -> None:
         )
 
 
+def _exit_sync_failed(failure: Optional[str]) -> NoReturn:
+    console.print(f"[red]Error:[/red] volume sync failed: {escape(failure or 'unknown')}")
+    if failure == "BUSY":
+        console.print("A process in the sandbox holds the volume; close it and retry.")
+    raise typer.Exit(1)
+
+
 @app.command()
 def sync(
     name: str = typer.Argument(..., help="Volume name to sync"),
@@ -636,15 +643,11 @@ def sync(
         "--discard",
         help="Drop this sandbox's unpublished volume writes instead of publishing them",
     ),
-    no_wait: bool = typer.Option(
-        False, "--no-wait", help="Do not wait for the sync to finish"
-    ),
+    no_wait: bool = typer.Option(False, "--no-wait", help="Do not wait for the sync to finish"),
 ) -> None:
     """Sync a sandbox's attached volume to the volume's committed head."""
     try:
-        result = _sandbox_client().volumes.sync(
-            sandbox_id, name, discard=discard, wait=not no_wait
-        )
+        result = _sandbox_client().volumes.sync(sandbox_id, name, discard=discard, wait=not no_wait)
     except UnauthorizedError as e:
         console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
         raise typer.Exit(1)
@@ -658,13 +661,10 @@ def sync(
     except TimeoutError as e:
         # The SDK wait budget expired; the sync may still finish.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
-        console.print(
-            "The sync may still complete. Re-run this command to wait for it."
-        )
+        console.print("The sync may still complete. Re-run this command to wait for it.")
         raise typer.Exit(1)
     except VolumeSyncFailedError as e:
-        console.print(f"[red]Error:[/red] {escape(str(e))}")
-        raise typer.Exit(1)
+        _exit_sync_failed(e.failure)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
@@ -673,11 +673,7 @@ def sync(
     # The wait mode returns only DONE (a FAILED sync raised above), but
     # --no-wait can receive a terminal state in the POST response itself.
     if result.state == "FAILED":
-        console.print(
-            "[red]Error:[/red] volume sync failed (state FAILED); "
-            "see the sandbox's volume sync logs"
-        )
-        raise typer.Exit(1)
+        _exit_sync_failed(result.failure)
     if result.state == "DONE":
         console.print(
             f"[green]✓[/green] Synced volume {escape(name)} in sandbox "

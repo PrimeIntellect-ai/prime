@@ -1,5 +1,7 @@
 """Custom exceptions for Prime Sandboxes SDK."""
 
+from typing import Optional
+
 from .core.client import APIError
 
 
@@ -61,16 +63,16 @@ class SandboxNotRunningError(RuntimeError):
 class VolumeSyncFailedError(RuntimeError):
     """Raised when a volume sync ends FAILED instead of DONE.
 
-    The sync response carries no error detail; the sandbox's volume sync
-    logs hold the reason.
+    failure is the server's failure code (BUSY, PUBLISH_FAILED, MERGE_FAILED,
+    DEADLINE, NODE_ERROR or ROLLBACK_FAILED); None when the server gave none.
     """
 
-    def __init__(self, sandbox_id: str, name: str):
+    def __init__(self, sandbox_id: str, name: str, failure: Optional[str] = None):
         self.sandbox_id = sandbox_id
         self.volume_name = name
+        self.failure = failure
         super().__init__(
-            f"Volume sync of '{name}' in sandbox {sandbox_id} failed (state FAILED); "
-            "see the sandbox's volume sync logs"
+            f"Volume sync of '{name}' in sandbox {sandbox_id} failed: {failure or 'unknown'}"
         )
 
 

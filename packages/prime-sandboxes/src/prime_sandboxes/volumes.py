@@ -208,9 +208,7 @@ class Volumes:
         while sync.state not in ("DONE", "FAILED"):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    _sync_timeout_message(sandbox_id, name, timeout_seconds, sync)
-                )
+                raise TimeoutError(_sync_timeout_message(sandbox_id, name, timeout_seconds, sync))
             if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
                 time.sleep(min(_creation_poll_delay(slow_index), remaining))
                 slow_index += 1
@@ -219,7 +217,7 @@ class Volumes:
             response = self._parent.client.request("GET", _sync_path(sandbox_id, name))
             sync = VolumeSync.model_validate(response)
         if sync.state == "FAILED":
-            raise VolumeSyncFailedError(sandbox_id, name)
+            raise VolumeSyncFailedError(sandbox_id, name, sync.failure)
         return sync
 
 
@@ -364,9 +362,7 @@ class AsyncVolumes:
         while sync.state not in ("DONE", "FAILED"):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    _sync_timeout_message(sandbox_id, name, timeout_seconds, sync)
-                )
+                raise TimeoutError(_sync_timeout_message(sandbox_id, name, timeout_seconds, sync))
             if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
                 await asyncio.sleep(min(_creation_poll_delay(slow_index), remaining))
                 slow_index += 1
@@ -377,5 +373,5 @@ class AsyncVolumes:
             response = await self._parent.client.request("GET", _sync_path(sandbox_id, name))
             sync = VolumeSync.model_validate(response)
         if sync.state == "FAILED":
-            raise VolumeSyncFailedError(sandbox_id, name)
+            raise VolumeSyncFailedError(sandbox_id, name, sync.failure)
         return sync

@@ -1337,7 +1337,7 @@ def test_volume_sync_no_wait_failed_in_response_exits_nonzero(
     monkeypatch.setattr(
         "prime_sandboxes.volumes.Volumes.sync",
         lambda self, sandbox_id, name, *, discard=False, wait=True: VolumeSync(
-            sync_id="sync-1", state="FAILED", head_id=None
+            sync_id="sync-1", state="FAILED", head_id=None, failure="BUSY"
         ),
     )
 
@@ -1347,15 +1347,13 @@ def test_volume_sync_no_wait_failed_in_response_exits_nonzero(
 
     assert result.exit_code == 1, result.output
     output = " ".join(strip_ansi(result.output).split())
-    assert "volume sync failed (state FAILED)" in output
-    assert "see the sandbox's volume sync logs" in output
+    assert "volume sync failed: BUSY" in output
+    assert "A process in the sandbox holds the volume; close it and retry." in output
     assert "has not finished" not in output
     assert "Unexpected error" not in output
 
 
-def test_volume_sync_discard_no_wait_flags(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
+def test_volume_sync_discard_no_wait_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     captured: dict[str, Any] = {}
 
@@ -1388,17 +1386,17 @@ def test_volume_sync_failed_exits_nonzero_with_error(
     _configure_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "prime_sandboxes.volumes.Volumes.sync",
-        lambda self, sandbox_id, name, *, discard=False, wait=True: (
-            _ for _ in ()
-        ).throw(VolumeSyncFailedError("sbx-1", "data")),
+        lambda self, sandbox_id, name, *, discard=False, wait=True: (_ for _ in ()).throw(
+            VolumeSyncFailedError("sbx-1", "data", "MERGE_FAILED")
+        ),
     )
 
     result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])
 
     assert result.exit_code == 1, result.output
     output = " ".join(strip_ansi(result.output).split())
-    assert "failed (state FAILED)" in output
-    assert "see the sandbox's volume sync logs" in output
+    assert "volume sync failed: MERGE_FAILED" in output
+    assert "holds the volume" not in output
     assert "Unexpected error" not in output
 
 
@@ -1406,9 +1404,9 @@ def test_volume_sync_timeout_hints_rerun(monkeypatch: pytest.MonkeyPatch, tmp_pa
     _configure_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "prime_sandboxes.volumes.Volumes.sync",
-        lambda self, sandbox_id, name, *, discard=False, wait=True: (
-            _ for _ in ()
-        ).throw(TimeoutError("Volume 'data' in sandbox sbx-1 did not finish syncing"))
+        lambda self, sandbox_id, name, *, discard=False, wait=True: (_ for _ in ()).throw(
+            TimeoutError("Volume 'data' in sandbox sbx-1 did not finish syncing")
+        ),
     )
 
     result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])

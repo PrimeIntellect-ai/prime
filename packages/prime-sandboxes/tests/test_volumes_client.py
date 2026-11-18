@@ -886,8 +886,7 @@ def test_sync_wait_true_polls_until_done(sync_waiter_clock):
     poll_calls = client.calls[1:]
     assert len(poll_calls) == 3
     assert all(
-        call[0] == "GET" and call[1] == "/sandbox/sb-1/volumes/dataset/sync"
-        for call in poll_calls
+        call[0] == "GET" and call[1] == "/sandbox/sb-1/volumes/dataset/sync" for call in poll_calls
     )
 
 
@@ -919,16 +918,15 @@ def test_sync_wait_returns_immediately_when_request_done(sync_waiter_clock):
 
 
 def test_sync_wait_failed_raises_volume_sync_failed_error(sync_waiter_clock):
-    client = RoutingAPIClient(_sync_handler([_sync("UNMOUNTING"), _sync("FAILED")]))
+    client = RoutingAPIClient(_sync_handler([_sync("UNMOUNTING"), _sync("FAILED", failure="BUSY")]))
     volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
 
-    # The response carries no error detail; the exception points at the
-    # sandbox's volume sync logs instead.
-    with pytest.raises(VolumeSyncFailedError, match="state FAILED.*volume sync logs") as error:
+    with pytest.raises(VolumeSyncFailedError, match="failed: BUSY") as error:
         volumes.sync("sb-1", "dataset")
 
     assert error.value.sandbox_id == "sb-1"
     assert error.value.volume_name == "dataset"
+    assert error.value.failure == "BUSY"
 
 
 def test_sync_wait_timeout_raises_timeout_error(sync_waiter_clock):
@@ -978,11 +976,13 @@ def test_async_sync_wait_true_polls_until_done(sync_waiter_clock):
 
 
 def test_async_sync_wait_failed_raises_volume_sync_failed_error(sync_waiter_clock):
-    client, _ = _async_publish_client(_sync_handler([_sync("UNMOUNTING"), _sync("FAILED")]))
+    client, _ = _async_publish_client(
+        _sync_handler([_sync("UNMOUNTING"), _sync("FAILED", failure="MERGE_FAILED")])
+    )
 
     async def scenario() -> None:
         async with client:
-            with pytest.raises(VolumeSyncFailedError, match="state FAILED.*volume sync logs"):
+            with pytest.raises(VolumeSyncFailedError, match="failed: MERGE_FAILED"):
                 await client.volumes.sync("sb-1", "dataset")
 
     asyncio.run(scenario())

@@ -628,13 +628,16 @@ class VolumeSync(BaseModel):
     state is null before the first sync, then one of UNMOUNTING,
     PUBLISHING, REMOUNTING, DONE, or FAILED; head_id is the attachment's
     current head (the synced head once state is DONE); updated_at is the
-    last transition time.
+    last transition time. failure says why a FAILED sync failed (BUSY,
+    PUBLISH_FAILED, MERGE_FAILED, DEADLINE, NODE_ERROR or ROLLBACK_FAILED) and
+    is null otherwise, including when the sandbox itself left RUNNING.
     """
 
     sync_id: Optional[str] = None
     state: Optional[str] = None
     head_id: Optional[str] = None
     updated_at: Optional[datetime] = None
+    failure: Optional[str] = None
 
 
 class VolumeListResponse(BaseModel):

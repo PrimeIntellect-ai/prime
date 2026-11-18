@@ -7,8 +7,9 @@ grant, 300 per user, per hour) locked out anyone polling `kubectl get pods`.
 
 Entries live at ``~/.prime/kube/cache/<cluster hash>/<identity hash>.json``,
 directories 0700 and files 0600. The identity is the platform base URL, the
-cluster, the pool and a fingerprint of the API key, all hashed into the file
-name, so a token is only ever reused for the same platform, grant and key.
+cluster, the pool and the API key, all hashed into the file name, so a token
+is only ever reused for the same platform, grant and key, and the key itself
+is never on disk here.
 Grouping by cluster is what lets `prime cluster login` drop a cluster's
 entries without reading any of them.
 """
@@ -42,11 +43,21 @@ def _cluster_dir(cluster: str) -> Path:
     return CACHE_DIR / _sha256(cluster)[:16]
 
 
+# PBKDF2 rather than a bare SHA-256 because the API key is part of what is
+# hashed. The key is long and random, and ~/.prime/config.json beside this
+# cache holds it in the clear anyway, so this is not what keeps it secret; it
+# just means a file name is never a cheap way to test a guessed key. 100k
+# rounds cost a few milliseconds per kubectl command.
+_KEY_DERIVATION_SALT = b"prime-cli/kube-token-cache/v1"
+_KEY_DERIVATION_ROUNDS = 100_000
+
+
 def entry_path(*, base_url: str, cluster: str, pool: Optional[str], api_key: str) -> Path:
-    # Only a short digest of the key goes into the material, and the material
-    # itself is hashed again, so nothing on disk can be turned back into it.
-    identity = json.dumps([base_url, cluster, pool, _sha256(api_key)[:16]])
-    return _cluster_dir(cluster) / f"{_sha256(identity)[:32]}.json"
+    identity = json.dumps([base_url, cluster, pool, api_key]).encode()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", identity, _KEY_DERIVATION_SALT, _KEY_DERIVATION_ROUNDS
+    ).hex()
+    return _cluster_dir(cluster) / f"{digest[:32]}.json"
 
 
 def load(path: Path) -> Optional[Dict[str, Any]]:

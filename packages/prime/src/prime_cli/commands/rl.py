@@ -84,14 +84,12 @@ RL_MODELS_JSON_HELP = json_output_help(
 )
 
 DEDICATED_CAPACITY_HINT = (
-    "[dim]Need a GPU type that is at capacity? Contact us at contact@primeintellect.ai "
+    "[dim]Need a GPU type that is at capacity? Contact support@primeintellect.ai "
     "for dedicated capacity.[/dim]"
 )
 
-_PLACEMENT_FAILURE = re.compile(
-    r"capacity|inventory|insufficient|unavailable|no (available|free)|no \S*\s*clusters?",
-    re.IGNORECASE,
-)
+# The platform's launch rejection reads "<type> is at capacity ...".
+_PLACEMENT_FAILURE = re.compile(r"\bat capacity\b", re.IGNORECASE)
 
 RL_LIST_JSON_HELP = json_output_help(
     ".runs[] = {id, name?, status, base_model, environments[], max_steps, "

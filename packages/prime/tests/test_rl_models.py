@@ -783,7 +783,7 @@ def test_on_demand_table_escapes_promo_markup(monkeypatch: pytest.MonkeyPatch) -
 
 # --- at-capacity GPU types (priced, no inventory) --------------------------
 
-_CAPACITY_HINT = "Contact us at contact@primeintellect.ai for dedicated capacity."
+_CAPACITY_HINT = "Contact support@primeintellect.ai for dedicated capacity."
 
 
 def _capacity_line(plain: str, gpu_type: str) -> str:
@@ -849,7 +849,7 @@ def test_no_capacity_hint_without_at_capacity_entries(monkeypatch: pytest.Monkey
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "At capacity" not in plain
-    assert "contact@primeintellect.ai" not in plain
+    assert "support@primeintellect.ai" not in plain
 
 
 def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -869,3 +869,36 @@ def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyP
         ("H100_80GB", False),
         ("B200_180GB", True),
     ]
+
+
+@pytest.mark.parametrize(
+    ("flags", "label", "absent"),
+    [
+        ({"availableNow": False, "atCapacity": True}, "At capacity", ("available", "busy")),
+        ({"availableNow": False, "atCapacity": False}, "busy", ("available", "At capacity")),
+        ({"availableNow": True, "atCapacity": False}, "available", ("busy", "At capacity")),
+    ],
+    ids=["at-capacity", "busy", "available"],
+)
+def test_platform_capacity_states_render_one_label(
+    monkeypatch: pytest.MonkeyPatch, flags: dict[str, bool], label: str, absent: tuple[str, ...]
+) -> None:
+    """The platform contract: atCapacity always pairs with availableNow
+    false, and only atCapacity reads as "At capacity"; a busy pool keeps
+    the queue label."""
+    entry = {"gpuType": "B300_262GB", "pricePerGpuHour": 9.0, "isBeta": False, **flags}
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _discovery_mock({"models": [], "onDemand": [entry]}),
+    )
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    row = _capacity_line(plain, "B300_262GB")
+    assert label in row
+    assert not any(other in row for other in absent)
+    normalized = " ".join(plain.split())
+    assert "Runs may queue depending on GPU count and topology." in normalized
+    assert (_CAPACITY_HINT in normalized) is (label == "At capacity")

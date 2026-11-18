@@ -1287,7 +1287,14 @@ def test_create_run_waits_out_a_cold_validator():
 
 # --- dispatch onto an at-capacity GPU type ---------------------------------
 
-_BACKEND_CAPACITY_ERROR = "HTTP 409: no capacity for gpu_type B200_180GB"
+# Verbatim from platform `_pick_on_demand_cluster` (raised as HTTP 400).
+_BACKEND_CAPACITY_ERROR = (
+    "HTTP 400: gpu_type=B200_180GB is at capacity: this account has no reserved "
+    "cluster with that GPU type, and there is no on-demand capacity for it right now. "
+    "Contact support@primeintellect.ai for dedicated B200_180GB capacity, or pick a "
+    "GPU type that `prime train models` does not list as at capacity."
+)
+_BACKEND_DETAIL = "this account has no reserved cluster with that GPU type"
 
 
 def _mock_capacity_discovery(monkeypatch, *, reserved: tuple[str, ...] = ()) -> None:
@@ -1326,7 +1333,7 @@ def _dispatch_on(tmp_path: Path, gpu_type: str):
     )
 
 
-def test_dispatch_on_at_capacity_gpu_explains_instead_of_raw_error(
+def test_dispatch_on_at_capacity_gpu_replaces_exact_backend_message(
     monkeypatch, tmp_path: Path
 ) -> None:
     _mock_capacity_discovery(monkeypatch)
@@ -1337,8 +1344,8 @@ def test_dispatch_on_at_capacity_gpu_explains_instead_of_raw_error(
     assert result.exit_code == 1, result.output
     plain = " ".join(result.output.split())
     assert "B200_180GB is at capacity for Hosted Training right now." in plain
-    assert "contact@primeintellect.ai" in plain
-    assert "no capacity for gpu_type" not in plain
+    assert "Contact support@primeintellect.ai for dedicated capacity." in plain
+    assert _BACKEND_DETAIL not in plain
 
 
 def test_dispatch_error_on_available_gpu_keeps_backend_detail(monkeypatch, tmp_path: Path) -> None:
@@ -1362,7 +1369,7 @@ def test_dispatch_error_with_reserved_capacity_keeps_backend_detail(
     result = _dispatch_on(tmp_path, "B200_180GB")
 
     assert result.exit_code == 1, result.output
-    assert "no capacity for gpu_type B200_180GB" in result.output
+    assert _BACKEND_DETAIL in " ".join(result.output.split())
     assert "is at capacity for Hosted Training" not in result.output
 
 
@@ -1391,7 +1398,7 @@ def test_dispatch_error_survives_failed_capacity_lookup(monkeypatch, tmp_path: P
     result = _dispatch_on(tmp_path, "B200_180GB")
 
     assert result.exit_code == 1, result.output
-    assert "no capacity for gpu_type B200_180GB" in result.output
+    assert _BACKEND_DETAIL in " ".join(result.output.split())
 
 
 def test_resume_on_at_capacity_gpu_explains(monkeypatch) -> None:
@@ -1433,3 +1440,18 @@ def test_resume_state_error_on_at_capacity_gpu_keeps_detail(monkeypatch) -> None
     assert f"Error: {RESUME_CONFLICT}" in plain
     assert "Note: B200_180GB is also at capacity right now." in plain
     assert "is at capacity for Hosted Training" not in plain
+
+
+def test_capacity_wording_without_at_capacity_is_not_replaced(monkeypatch, tmp_path: Path) -> None:
+    """Detection is narrow: only "at capacity" marks the placement refusal,
+    so the pre-ENG-8405 "No capacity available" wording keeps its detail."""
+    _mock_capacity_discovery(monkeypatch)
+    legacy = "No capacity available for gpu_type=B200_180GB: try another GPU type."
+    _fail_create_run(monkeypatch, APIError(f"HTTP 400: {legacy}"))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert f"Error: {legacy}" in plain
+    assert "Note: B200_180GB is also at capacity right now." in plain

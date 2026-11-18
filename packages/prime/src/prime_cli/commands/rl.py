@@ -32,7 +32,9 @@ from ..client import (
     APITimeoutError,
     MethodNotAllowedError,
     NotFoundError,
+    PaymentRequiredError,
     ServerError,
+    UnauthorizedError,
 )
 from ..utils import (
     DefaultCommandGroup,
@@ -72,12 +74,22 @@ RL_DISPATCH_JSON_HELP = json_output_help(
 
 RL_MODELS_JSON_HELP = json_output_help(
     ".available_fft_models[] = {name, clusters[{cluster_id, cluster_name, gpu_type?}]}",
-    ".on_demand[]? = {gpu_type, price_per_gpu_hour, available_now, discount_label?, is_beta}",
+    ".on_demand[]? = {gpu_type, price_per_gpu_hour, available_now, discount_label?, is_beta, "
+    "at_capacity}",
     # available_now = the backend reports some free pool headroom for the
-    # GPU type; a run can still queue on GPU count/topology.
+    # GPU type; a run can still queue on GPU count/topology. at_capacity =
+    # priced but no inventory at all; listed after the sellable types.
     ".on_demand_beta_access? = true | false — known on-demand beta enrollment; "
     "false means 'not enrolled', absent means the backend did not report it",
 )
+
+DEDICATED_CAPACITY_HINT = (
+    "[dim]Need a GPU type that is at capacity? Contact support@primeintellect.ai "
+    "for dedicated capacity.[/dim]"
+)
+
+# The platform's launch rejection reads "<type> is at capacity ...".
+_PLACEMENT_FAILURE = re.compile(r"\bat capacity\b", re.IGNORECASE)
 
 RL_LIST_JSON_HELP = json_output_help(
     ".runs[] = {id, name?, status, base_model, environments[], max_steps, "
@@ -793,7 +805,7 @@ def _dispatch_dedicated_run(
         with status_ctx:
             result = client.create_run(payload)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {rich_escape(api_detail(e))}")
+        _report_dispatch_error(e, client, resolved_gpu_type, team_id)
         if resume_from:
             console.print(
                 f"[yellow]Tip:[/yellow] a run resumes once "
@@ -1372,7 +1384,7 @@ def list_models(
         raise typer.Exit(1)
 
     fft_models = response.models
-    on_demand = response.on_demand
+    on_demand = sorted(response.on_demand, key=lambda entry: entry.at_capacity)
     on_demand_beta_access = response.on_demand_beta_access
 
     if output == "json":
@@ -1478,11 +1490,13 @@ def _render_on_demand_table(on_demand: list) -> None:
 
     promos = []
     for entry in on_demand:
-        table.add_row(
-            entry.gpu_type,
-            f"${entry.price_per_gpu_hour:.2f}",
-            "[green]available[/green]" if entry.available_now else "[yellow]busy[/yellow]",
-        )
+        if entry.at_capacity:
+            capacity = "[dim]At capacity[/dim]"
+        elif entry.available_now:
+            capacity = "[green]available[/green]"
+        else:
+            capacity = "[yellow]busy[/yellow]"
+        table.add_row(entry.gpu_type, f"${entry.price_per_gpu_hour:.2f}", capacity)
         if entry.discount_label:
             promos.append(entry.discount_label)
 
@@ -1499,6 +1513,53 @@ def _render_on_demand_table(on_demand: list) -> None:
         caption.append(f"[bold yellow]{joined}[/bold yellow]")
     table.caption = "\n".join(caption)
     console.print(table)
+    if any(entry.at_capacity for entry in on_demand):
+        console.print(DEDICATED_CAPACITY_HINT)
+
+
+def _at_capacity_rejection(
+    client: HostedTrainingClient, gpu_type: Optional[str], team_id: Optional[str]
+) -> bool:
+    """Whether a failed dispatch on `gpu_type` is explained by it being at
+    capacity on the shared pool. Best effort: the lookup only runs after the
+    backend already refused the run, and any failure keeps the original
+    error. Reserved capacity for the type means the pool state is not the
+    cause."""
+    if not gpu_type:
+        return False
+    try:
+        discovery = client.get_available_fft(team_id=team_id)
+    except Exception:
+        return False
+    reserved = {c.gpu_type for m in discovery.models for c in m.clusters}
+    if gpu_type in reserved:
+        return False
+    return any(o.gpu_type == gpu_type and o.at_capacity for o in discovery.on_demand)
+
+
+def _report_dispatch_error(
+    exc: APIError,
+    client: HostedTrainingClient,
+    gpu_type: Optional[str],
+    team_id: Optional[str],
+) -> None:
+    detail = api_detail(exc)
+    capacity_unrelated = (UnauthorizedError, PaymentRequiredError, ServerError, APITimeoutError)
+    if isinstance(exc, capacity_unrelated) or not _at_capacity_rejection(client, gpu_type, team_id):
+        console.print(f"[red]Error:[/red] {rich_escape(detail)}")
+        return
+    gpu = rich_escape(gpu_type or "")
+    # Only a placement failure is replaced; anything else (e.g. resuming a
+    # run that is not PAUSED) stays actionable and just gains the note.
+    if _PLACEMENT_FAILURE.search(detail):
+        console.print(
+            f"[red]Error:[/red] {gpu} is at capacity for Hosted Training right now. "
+            "Pick another GPU type from `prime train models`."
+        )
+    else:
+        console.print(f"[red]Error:[/red] {rich_escape(detail)}")
+        console.print(f"[dim]Note: {gpu} is also at capacity right now.[/dim]")
+    console.print(DEDICATED_CAPACITY_HINT)
 
 
 @app.command("gpus", rich_help_panel="Commands")
@@ -1970,11 +2031,12 @@ def resume_run(
         if output != "json"
         else nullcontext()
     )
+    client = HostedTrainingClient(APIClient())
     try:
         with status_ctx:
-            result = HostedTrainingClient(APIClient()).resume_run(run_id, payload)
+            result = client.resume_run(run_id, payload)
     except APIError as e:
-        console.print(f"[red]Error:[/red] {rich_escape(api_detail(e))}")
+        _report_dispatch_error(e, client, gpu_type, Config().team_id)
         raise typer.Exit(1)
 
     _report_dispatch(result, output=output)

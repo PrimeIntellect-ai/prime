@@ -1196,6 +1196,37 @@ def test_workloads_state_all_shows_duration_and_default_limit(
     assert dummy.workloads_params()["limit"] == 50
 
 
+def test_workloads_renders_a_stopped_row_in_an_all_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A `--state all` page may already carry stopped rows. Rendering
+    # treats them as terminal (DURATION column) even though
+    # `--state stopped` is not an offered query yet.
+    row = _workload("training:run-1", "training", "stopped")
+    _install(monkeypatch, _workloads_payload([row]))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "all"], env=TEST_ENV)
+    output = strip_ansi(result.output)
+
+    assert result.exit_code == 0, result.output
+    assert "stopped" in output
+    assert "DURATION" in output
+
+
+def test_workloads_does_not_offer_the_unsupported_stopped_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The deployed backend's filter vocabulary has no "stopped", so
+    # offering it would send a query the server rejects. Fail fast
+    # client-side until the platform side is live.
+    _install(monkeypatch, _workloads_payload([]))
+
+    result = runner.invoke(app, ["factory", "workloads", "--state", "stopped"], env=TEST_ENV)
+
+    assert result.exit_code != 0, result.output
+    assert "Choose one of" in strip_ansi(result.output)
+
+
 def test_workloads_live_state_sends_no_default_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

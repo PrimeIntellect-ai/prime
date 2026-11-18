@@ -415,20 +415,27 @@ DEPLOYMENTS_JSON_HELP = json_output_help(
 @deployments_app.command("list", epilog=DEPLOYMENTS_JSON_HELP)
 def list_deployments(
     team: Optional[str] = typer.Option(
-        None, "--team", "-t", help="Team ID (default: your personal deployments)"
+        None, "--team", "-t", help="Team ID (defaults to the selected account context)"
+    ),
+    personal: bool = typer.Option(
+        False, "--personal", help="Your own deployments, ignoring the account context"
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List running inference deployments.
 
-    Without --team this is your personal deployments; the account context is
-    not applied, because the API scopes a teamless call to the caller.
+    Scoped like every other resource command: the selected account context
+    unless --team overrides it. The API scopes a teamless call to the caller,
+    which is what --personal asks for from inside a team context.
     """
     validate_output_format(output, console)
+    err = _err_console(output)
+    if personal and team:
+        _fail(err, "Pass either --team or --personal, not both.")
     try:
-        raw = _client().list_deployments(team)
+        raw = _client().list_deployments(None if personal else team or Config().team_id)
     except APIError as e:
-        _fail(_err_console(output), str(e))
+        _fail(err, str(e))
 
     if output == "json":
         output_data_as_json(raw, console)

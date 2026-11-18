@@ -1940,3 +1940,38 @@ def test_checkpoint_list_rejects_checkpoint_id_without_sandbox(
         result = runner.invoke(app, ["sandbox", "checkpoint", "list", *args])
         assert result.exit_code == 1, result.output
         assert "--checkpoint-id needs a sandbox ID" in result.output
+
+
+def test_checkpoint_delete_all_scopes_to_caller_unless_all_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRIME_API_KEY", "dummy")
+    monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    calls: list[dict[str, Any]] = []
+
+    def delete_all(self: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(deleted=["c1"], errors=[])
+
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.delete_all_checkpoints", delete_all
+    )
+    base = ["sandbox", "checkpoint", "delete", "--all", "--team-id", "team-1"]
+
+    result = runner.invoke(app, [*base, "--label", "run-1"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "ALL your checkpoints with labels run-1 in team team-1" in strip_ansi(result.output)
+    assert calls[-1]["labels"] == ["run-1"] and calls[-1]["all_users"] is False
+    assert calls[-1]["user_id"] is None
+
+    result = runner.invoke(app, [*base, "--all-users"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "ALL of EVERY team member's checkpoints" in strip_ansi(result.output)
+    assert calls[-1]["all_users"] is True
+
+    for bad in (["--all-users", "--user-id", "u-2"],):
+        result = runner.invoke(app, [*base, *bad, "--yes"])
+        assert result.exit_code == 1
+    result = runner.invoke(app, ["sandbox", "checkpoint", "delete", "c1", "--label", "x", "--yes"])
+    assert result.exit_code == 1 and "need --all" in strip_ansi(result.output)
+    assert len(calls) == 2

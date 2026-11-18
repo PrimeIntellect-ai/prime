@@ -31,16 +31,18 @@ class _AsyncFakeCache:
         return _auth_payload()
 
 
-def _start_event(pid, response_type=pb.StartResponse):
-    return response_type(event=_EV(start=_EV.StartEvent(pid=pid)))
+def _start_event(pid, response_type=pb.StartResponse, *, output_replay=False):
+    return response_type(event=_EV(start=_EV.StartEvent(pid=pid, output_replay=output_replay)))
 
 
-def _stdout_event(data, response_type=pb.StartResponse):
-    return response_type(event=_EV(data=_EV.DataEvent(stdout=data)))
+def _stdout_event(data, response_type=pb.StartResponse, *, sequence=0):
+    return response_type(event=_EV(data=_EV.DataEvent(stdout=data, sequence=sequence)))
 
 
-def _end_event(code, response_type=pb.StartResponse):
-    return response_type(event=_EV(end=_EV.EndEvent(exit_code=code)))
+def _end_event(code, response_type=pb.StartResponse, *, output_sequence=0):
+    return response_type(
+        event=_EV(end=_EV.EndEvent(exit_code=code, output_sequence=output_sequence))
+    )
 
 
 @pytest.fixture(scope="session")

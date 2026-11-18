@@ -19,6 +19,12 @@ class SandboxFileTooLargeError(APIError):
     pass
 
 
+class SandboxDiskFullError(APIError):
+    """Raised when the sandbox filesystem has no space left (507)."""
+
+    pass
+
+
 class BatchStatusUnsupportedError(APIError):
     """Raised when batch status is unsupported for the requested sandbox runtime."""
 
@@ -92,3 +98,7 @@ class SandboxImagePullError(SandboxNotRunningError):
     """Raised when Docker image cannot be pulled."""
 
     pass
+
+
+class ProcessOutputLostError(APIError):
+    """Raised when a command's complete output cannot be recovered safely."""

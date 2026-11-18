@@ -279,8 +279,8 @@ def test_ls_short_h_flag_is_human_readable(storage):
     assert "4" in result.stdout and ("KiB" in result.stdout or "Ki" in result.stdout)
 
 
-def test_existing_list_command_keeps_volume_inventory(storage):
-    result = _run("list", "--output", "json")
+def test_list_all_users_keeps_volume_inventory(storage):
+    result = _run("list", "--all-users", "--output", "json")
     assert result.exit_code == 0, result.output
     assert _json(result)[0]["name"] == "data"
     assert storage.listing == [{"team_id": "team1"}]

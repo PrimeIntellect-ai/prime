@@ -160,7 +160,8 @@ def run(
         "--launch",
         help="With a package: a TOML or JSON file with two tables. `config` is the package's own "
         "settings for this run. `capabilities` declares what the run may do besides run the "
-        "package: publish, evaluate, train, metrics, traces and spend_limit.",
+        "package: packages (other Hub packages it installs, each owner/name@version), publish, "
+        "evaluate, train, metrics, traces and spend_limit.",
     ),
     team: Optional[str] = typer.Option(
         None,

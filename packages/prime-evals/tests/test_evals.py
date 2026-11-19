@@ -3,8 +3,10 @@
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from prime_evals.core import APIClient as EvalsAPIClient
 from prime_evals.evals import AsyncEvalsClient, EvalsClient
 from prime_evals.models import (
     CreateEvaluationRequest,
@@ -142,6 +144,33 @@ def test_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():
 
     assert env_id == "env-123"
     assert calls == [("get", "/environmentshub/d42me/opencode-cp/@latest")]
+
+
+@pytest.mark.parametrize("owner_slug", ["gutchapa", "research"])
+def test_lookup_environment_by_slug_uses_mocked_http_for_user_and_team(owner_slug):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": "env-123",
+                    "slug": f"{owner_slug}/rtk-compression",
+                }
+            },
+        )
+
+    api_client = EvalsAPIClient(api_key="test-api-key")
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        api_client.client = http_client
+        env_id = EvalsClient(api_client)._lookup_environment_by_slug(owner_slug, "rtk-compression")
+
+    assert env_id == "env-123"
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.path == (f"/api/v1/environmentshub/{owner_slug}/rtk-compression/@latest")
 
 
 def test_async_lookup_environment_by_slug_uses_owner_aware_detail_endpoint():

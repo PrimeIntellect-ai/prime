@@ -28,11 +28,12 @@ from urllib.parse import urlparse
 
 import typer
 import yaml
+from rich.markup import escape
+from rich.table import Table
 
 from ..client import APIClient, APIError
 from ..utils import (
     PlainTyper,
-    build_table,
     get_console,
     output_data_as_json,
     validate_output_format,
@@ -210,37 +211,45 @@ def list_clusters(
         console.print(NO_RESERVATION_HINT)
         return
 
-    table = build_table(
-        "Kubernetes reservations",
-        [
-            ("Cluster", "cyan"),
-            ("Pool", "blue"),
-            ("Namespace", "white"),
-            ("Status", "white"),
-            ("Proxy", "white"),
-            ("Next step", "white"),
-        ],
-    )
+    # The table holds only short values. Namespaces and login commands are long
+    # and meant to be copied, so they go below it, one reservation per block,
+    # printed whole: Rich would cut a cell to "…" to fit the terminal.
+    table = Table(title="Kubernetes reservations", show_lines=True)
+    table.add_column("Cluster", style="cyan", overflow="fold")
+    table.add_column("Pool", style="blue", overflow="fold")
+    table.add_column("Status", style="white", no_wrap=True)
+    table.add_column("Proxy", style="white", no_wrap=True)
+    details: List[List[str]] = []
     for entry in clusters:
         cluster = entry.get("cluster") or "?"
         reservations = entry.get("reservations") or []
         loginable = [r for r in reservations if r.get("server")]
         for reservation in reservations:
+            pool = reservation.get("pool") or "?"
             table.add_row(
                 _cluster_label(entry),
-                reservation.get("pool") or "?",
-                reservation.get("namespace") or "",
+                escape(pool),
                 _status_label(reservation.get("status")),
                 _proxy_label(reservation.get("proxyReady")),
-                _next_step(cluster, reservation, several=len(loginable) > 1),
+            )
+            details.append(
+                [
+                    f"[bold]{escape(cluster)}[/bold] / [bold]{escape(pool)}[/bold]",
+                    f"  Namespace: {escape(reservation.get('namespace') or '-')}",
+                    "  " + _next_step(cluster, reservation, several=len(loginable) > 1),
+                ]
             )
     console.print(table)
+    for block in details:
+        console.print()
+        for line in block:
+            console.print(line, soft_wrap=True, highlight=False)
 
 
 def _cluster_label(entry: Dict[str, Any]) -> str:
-    name = entry.get("cluster") or "?"
+    name = escape(entry.get("cluster") or "?")
     display = entry.get("displayName")
-    return f"{name}\n[dim]{display}[/dim]" if display and display != name else name
+    return f"{name}\n[dim]{escape(display)}[/dim]" if display and display != name else name
 
 
 def _proxy_label(ready: Any) -> str:
@@ -266,8 +275,9 @@ def _next_step(cluster: str, reservation: Dict[str, Any], *, several: bool) -> s
         command = f"prime factory k8s login {cluster}"
         if several:
             command += f" --pool {reservation.get('pool')}"
-        return command
-    return f"[dim]{reservation.get('unavailableReason') or 'Not ready yet.'}[/dim]"
+        return f"Log in:    {escape(command)}"
+    reason = reservation.get("unavailableReason") or "Not ready yet."
+    return f"Not ready: [dim]{escape(reason)}[/dim]"
 
 
 @app.command("login")

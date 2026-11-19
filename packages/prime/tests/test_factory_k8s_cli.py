@@ -795,6 +795,40 @@ class TestFactoryK8sList:
         ):
             assert text in output, text
 
+    @pytest.mark.parametrize("columns", ["60", "80", "120"])
+    def test_long_values_are_never_cut_off(self, cluster_list, monkeypatch, columns):
+        """Namespaces and login commands are meant to be copied, so no
+        terminal width may shorten them to "…"."""
+        long_cluster = "dell-h100-nj-local-minh"
+        long_ns = "prime-user-cmpm13dx20000wv33iwqk1sh7-k8s-dev"
+        _FakeAPIClient.payload = {
+            "clusters": [
+                {
+                    "cluster": long_cluster,
+                    "displayName": None,
+                    "reservations": [
+                        {
+                            "pool": "dev",
+                            "namespace": long_ns,
+                            "teamId": "t",
+                            "status": "Ready",
+                            "proxyReady": True,
+                            "server": "https://dev-1.tail1234.ts.net",
+                            "unavailableReason": None,
+                        }
+                    ],
+                }
+            ]
+        }
+        from prime_cli.main import app as root_app
+
+        result = runner.invoke(root_app, ["factory", "k8s", "list"], env={"COLUMNS": columns})
+
+        assert result.exit_code == 0, result.output
+        assert "…" not in result.output
+        assert long_ns in result.output
+        assert f"prime factory k8s login {long_cluster}" in result.output
+
     def test_one_loginable_pool_needs_no_pool_flag(self, cluster_list):
         _FakeAPIClient.payload = {
             "clusters": [

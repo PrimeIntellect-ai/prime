@@ -137,6 +137,7 @@ VOLUME_DEFAULT_SIZE = "5Ti"  # same default as `prime volumes create`
 TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED", "PAUSED"}
 
 RUN_NAME_MAX_LENGTH = 255
+LIST_NAME_MAX_WIDTH = 24
 
 # Log level colors for rich console
 LEVEL_STYLES = {
@@ -1018,6 +1019,10 @@ def _render_restarts(run_id: str, restarts: RunRestarts, *, every_failure: bool)
         _print_log_tail(latest.exit_message, LOG_TAIL_LINES)
 
 
+def _truncate(text: str, max_width: int) -> str:
+    return text if len(text) <= max_width else text[: max_width - 1] + "…"
+
+
 def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
@@ -1028,8 +1033,10 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     if len(env_names) > 3:
         envs_display += f" (+{len(env_names) - 3})"
 
+    name = run.name.strip() if run.name else ""
     return {
         "id": run.id,
+        "name": name or "-",
         "status": run.status,
         "model": run.base_model or "-",
         "environments": envs_display,
@@ -1737,6 +1744,7 @@ def _list_runs_impl(
 
         table = Table(title="Hosted Training Runs")
         table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Name")
         table.add_column("Status", style="bold")
         table.add_column("Model", style="magenta")
         table.add_column("Environments", style="green")
@@ -1749,6 +1757,13 @@ def _list_runs_impl(
             status_color = _get_status_color(run.status)
             table.add_row(
                 formatted["id"],
+                # A no_wrap Text in a wrapable column: Rich can still shrink the
+                # column to fit the terminal, but the name stays on one line.
+                Text(
+                    _truncate(formatted["name"], LIST_NAME_MAX_WIDTH),
+                    no_wrap=True,
+                    overflow="ellipsis",
+                ),
                 f"[{status_color}]{formatted['status']}[/{status_color}]",
                 formatted["model"][:30],
                 formatted["environments"],
@@ -1823,6 +1838,7 @@ def get_run(
         status_color = _get_status_color(run.status)
 
         console.print(f"[bold]Run {run_id}[/bold]\n")
+        console.print(f"  Name: {rich_escape(formatted['name'])}")
         status_text = run.status
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"

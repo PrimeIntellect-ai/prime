@@ -200,6 +200,105 @@ def test_train_list_shows_gpu_count(monkeypatch) -> None:
     assert gpus == {"run-gpu": "16", "run-legacy": "-"}
 
 
+def _mock_list_runs(monkeypatch, runs: list[dict[str, Any]]) -> None:
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        return {"runs": runs, "total": len(runs)}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+
+
+def test_train_list_shows_name_column_after_id(monkeypatch) -> None:
+    _mock_list_runs(
+        monkeypatch,
+        [
+            {**_fake_run_payload("RUNNING", run_id="run-named"), "name": "renametest"},
+            {**_fake_run_payload("RUNNING", run_id="run-long"), "name": "x" * 40},
+            {**_fake_run_payload("RUNNING", run_id="run-markup"), "name": "[bold]sweep[/bold]"},
+            _fake_run_payload("COMPLETED", run_id="run-unnamed"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["train", "list"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    header = next(cells for line in lines if (cells := _table_cells(line))[:1] == ["ID"])
+    assert header[:3] == ["ID", "Name", "Status"]
+    names = {
+        cells[0]: cells[1]
+        for line in lines
+        if (cells := _table_cells(line))[:1] and cells[0].startswith("run-")
+    }
+    assert names == {
+        "run-named": "renametest",
+        "run-long": "x" * 23 + "…",
+        "run-markup": "[bold]sweep[/bold]",
+        "run-unnamed": "-",
+    }
+
+
+def test_train_list_json_includes_name(monkeypatch) -> None:
+    _mock_list_runs(
+        monkeypatch,
+        [
+            {**_fake_run_payload("RUNNING", run_id="run-named"), "name": "renametest"},
+            _fake_run_payload("COMPLETED", run_id="run-unnamed"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["train", "list", "-o", "json"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    runs = json.loads(result.output)["runs"]
+    assert [(r["id"], r["name"]) for r in runs] == [
+        ("run-named", "renametest"),
+        ("run-unnamed", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("renametest", "Name: renametest"), (None, "Name: -"), ("[red]x[/red]", "Name: [red]x[/red]")],
+)
+def test_train_get_shows_name(monkeypatch, name, expected) -> None:
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate({**_fake_run_payload("RUNNING"), "name": name})
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-1"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    lines = [line.strip() for line in result.output.splitlines() if line.strip()]
+    assert lines[1] == expected
+    assert lines[2].startswith("Status:")
+
+
+def test_train_get_json_includes_name(monkeypatch) -> None:
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate({**_fake_run_payload("RUNNING"), "name": "renametest"})
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-1", "-o", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["run"]["name"] == "renametest"
+
+
 def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
 

@@ -2368,6 +2368,15 @@ def install(
             for env_id, reason in install_failed_envs:
                 console.print(f"[red]✗ {env_id} - {reason}")
 
+        # Any environment the caller asked for that did not install is a failure
+        # of the command, not a warning: `prime env install a b` exiting 0 with
+        # only `b` installed means a caller chaining on && runs on without `a`,
+        # and only finds out when importing it fails, far from the cause.
+        # failed_envs and skipped_envs are the ones dropped before the install
+        # loop (resolution, private-env build, no installation method).
+        if install_failed_envs or failed_envs or skipped_envs:
+            raise typer.Exit(1)
+
     except typer.Exit:
         raise
     except APIError as e:

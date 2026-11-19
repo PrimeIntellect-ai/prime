@@ -1096,48 +1096,30 @@ def checkpoint_restore(
 def fork(
     sandbox_id: str,
     name: Optional[str] = typer.Option(None, help="Name for the new sandbox"),
-    cpu_cores: Optional[float] = typer.Option(None, help="CPU cores (default: source's)"),
-    memory_gb: Optional[float] = typer.Option(None, help="Memory in GB (default: source's)"),
     timeout_minutes: Optional[int] = typer.Option(
         None, help="Timeout in minutes (default: source's)"
     ),
-    wait_timeout: float = typer.Option(300, help="Seconds to wait for the fork to be ready"),
+    wait_timeout: float = typer.Option(300, help="Seconds to wait for the pause to finish"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Fork a running sandbox into a new sandbox with the same filesystem."""
+    """Fork a running sandbox into a new sandbox that continues its memory and disk."""
     client = SandboxClient(APIClient())
     try:
         source = client.get(sandbox_id)
         sandbox_name = name or f"{source.name}-fork"
-        prompt = f"Fork sandbox {sandbox_id} into {sandbox_name}?"
+        prompt = (
+            f"Fork sandbox {sandbox_id} into {sandbox_name}? "
+            "The source is paused for the memory snapshot, then resumed asynchronously."
+        )
         if not confirm_or_skip(prompt, yes, default=True):
             return
         with console.status("[bold blue]Forking sandbox...", spinner="dots"):
-            checkpoint = client.checkpoint(sandbox_id)
-            try:
-                checkpoint = client.wait_for_checkpoint(checkpoint.id, timeout_seconds=wait_timeout)
-            except TimeoutError as exc:
-                raise TimeoutError(
-                    f"Fork of {sandbox_id} was not ready within {wait_timeout:g}s"
-                ) from exc
-            except RuntimeError as exc:
-                raise RuntimeError(f"Fork of {sandbox_id} failed") from exc
-        request = CreateSandboxRequest(
-            name=sandbox_name,
-            checkpoint_id=checkpoint.id,
-            team_id=source.team_id,
-            region=source.region,
-            cpu_cores=cpu_cores if cpu_cores is not None else source.cpu_cores,
-            memory_gb=memory_gb if memory_gb is not None else source.memory_gb,
-            gpu_count=source.gpu_count,
-            gpu_type=source.gpu_type,
-            timeout_minutes=(
-                timeout_minutes if timeout_minutes is not None else source.timeout_minutes
-            ),
-            labels=source.labels,
-        )
-        with console.status("[bold blue]Forking sandbox...", spinner="dots"):
-            sandbox = client.create(request)
+            sandbox = client.fork(
+                sandbox_id,
+                name=sandbox_name,
+                timeout_minutes=timeout_minutes,
+                timeout_seconds=wait_timeout,
+            )
         console.print(f"[green]Successfully forked into sandbox {escape(sandbox.id)}[/green]")
         console.print(f"Use 'prime sandbox get {escape(sandbox.id)}' to check its status")
     except (APIError, ValueError, RuntimeError, TimeoutError) as exc:

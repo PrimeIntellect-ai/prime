@@ -152,6 +152,10 @@ _LAN_SYNC_POLL_SECONDS = 2.0
 # sandbox; the server refuses these fields when they differ from it.
 _MEMORY_RESTORE_SHAPE = ("cpu_cores", "memory_gb", "gpu_count", "gpu_type")
 
+# A pause's checkpoint carries its memory from FROZEN on; waiting for DURABLE
+# would add the snapshot upload to the paused source's downtime.
+_PAUSE_RESTORABLE_STATES = ("FROZEN", "DURABLE")
+
 
 def _omit_unset_memory_shape(request: CreateSandboxRequest, payload: Dict[str, Any]) -> None:
     """Drop the shape defaults a memory restore must take from the paused sandbox,
@@ -2098,6 +2102,16 @@ def _raise_not_running_error(
     raise exc
 
 
+def _error_with_hint(error: BaseException, hint: str) -> BaseException:
+    """Return ``error`` with ``hint`` appended to its message, keeping its type.
+
+    APIError, TimeoutError, RuntimeError, and SandboxNotRunningError all build
+    ``str()`` from ``args``, so callers keep their ``except`` branch and still
+    read the hint."""
+    error.args = (f"{error}; {hint}",)
+    return error
+
+
 def _auth_refresh_cutoff(auth_info: Dict[str, Any]) -> datetime:
     """Moment at which cached auth stops being usable (expiry minus margin)."""
     expires_at_str = auth_info["expires_at"].replace("Z", "+00:00")
@@ -2644,6 +2658,110 @@ class SandboxClient:
         """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
+
+    def fork(
+        self,
+        sandbox_id: str,
+        name: Optional[str] = None,
+        timeout_minutes: Optional[int] = None,
+        labels: Optional[List[str]] = None,
+        timeout_seconds: float = 300,
+    ) -> Sandbox:
+        """Fork a running sandbox's memory and disk into a new sandbox.
+
+        Pauses ``sandbox_id``, creates a new sandbox from the pause, then resumes
+        the source. Both transitions are asynchronous: the source stays PAUSED
+        until the platform reports it RUNNING, and a pause wait that times out
+        may still complete afterwards. When the pause wait or the create fails,
+        the source is resumed on a best-effort basis; if that cleanup resume
+        fails, the raised error names the source so it can be resumed by hand.
+        The fork continues the paused guest with its shape, environment, and
+        secrets, so it takes neither a shape nor a startup command: userspace
+        random state and keys or tokens already in memory are the same in every
+        fork, so rekey them in the workload. ``timeout_seconds`` bounds the pause
+        wait; ``name`` defaults to the source's name plus ``-fork``, and
+        ``timeout_minutes`` and ``labels`` to the source's. Returns the accepted
+        create, not a running sandbox; wait with ``wait_for_creation``. If the
+        create succeeds but the source does not resume, the raised error names
+        the new sandbox so it can be deleted.
+        """
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        source = self.pause(sandbox_id)
+        request = CreateSandboxRequest(
+            name=name or f"{source.name}-fork",
+            checkpoint_id=source.checkpoint_id,
+            restore_memory=True,
+            team_id=source.team_id,
+            timeout_minutes=(
+                source.timeout_minutes if timeout_minutes is None else timeout_minutes
+            ),
+            labels=source.labels if labels is None else labels,
+        )
+        try:
+            self._wait_for_pause(sandbox_id, source.checkpoint_id, timeout_seconds)
+            forked = self.create(request)
+        except BaseException as error:
+            try:
+                self.resume(sandbox_id)
+            except Exception as resume_error:
+                if isinstance(error, Exception):
+                    raise _error_with_hint(
+                        error,
+                        f"the cleanup resume of sandbox {sandbox_id} failed "
+                        f"({resume_error}); if it is PAUSED, resume it with "
+                        f"'prime sandbox resume {sandbox_id}' (or resume())",
+                    )
+            raise
+        try:
+            self.resume(sandbox_id)
+        except Exception as resume_error:
+            raise _error_with_hint(
+                resume_error,
+                f"the fork {forked.id} was created but sandbox {sandbox_id} did not "
+                f"resume; retry with 'prime sandbox resume {sandbox_id}' (resume()), "
+                f"or delete the fork with delete()",
+            )
+        return forked
+
+    def _wait_for_pause(self, sandbox_id: str, checkpoint_id: str, timeout_seconds: float) -> None:
+        """Wait until the pause checkpoint holds its memory and the source is PAUSED."""
+        deadline = time.monotonic() + timeout_seconds
+        phase_start = time.monotonic()
+        slow_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = self._checkpoint_batcher.get(checkpoint_id)
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Pause checkpoint {checkpoint_id} cannot be restored "
+                    f"(state={checkpoint.state}): {checkpoint.error or 'no error details'}"
+                )
+            if checkpoint.state in _PAUSE_RESTORABLE_STATES:
+                sandbox = self._sandbox_status_batcher.get(sandbox_id)
+                if sandbox.status == "PAUSED":
+                    return
+                if sandbox.status in ("ERROR", "TERMINATED", "TIMEOUT"):
+                    _raise_not_running_error(
+                        sandbox_id,
+                        {
+                            "status": sandbox.status,
+                            "error_type": sandbox.error_type,
+                            "error_message": sandbox.error_message,
+                        },
+                    )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
+                time.sleep(min(_creation_poll_delay(slow_index), remaining))
+                slow_index += 1
+            else:
+                time.sleep(min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining))
+        raise TimeoutError(
+            f"Sandbox {sandbox_id} did not finish pausing within {timeout_seconds:g}s; "
+            "the pause may still complete, and if it does the source stays PAUSED "
+            "until resumed"
+        )
 
     def checkpoint(self, sandbox_id: str, ttl_seconds: Optional[int] = None) -> SandboxCheckpoint:
         """Request a filesystem checkpoint; use wait_for_checkpoint before restoring.
@@ -4518,6 +4636,114 @@ class AsyncSandboxClient:
         """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
+
+    async def fork(
+        self,
+        sandbox_id: str,
+        name: Optional[str] = None,
+        timeout_minutes: Optional[int] = None,
+        labels: Optional[List[str]] = None,
+        timeout_seconds: float = 300,
+    ) -> Sandbox:
+        """Fork a running sandbox's memory and disk into a new sandbox.
+
+        Pauses ``sandbox_id``, creates a new sandbox from the pause, then resumes
+        the source. Both transitions are asynchronous: the source stays PAUSED
+        until the platform reports it RUNNING, and a pause wait that times out
+        may still complete afterwards. When the pause wait or the create fails,
+        the source is resumed on a best-effort basis; if that cleanup resume
+        fails, the raised error names the source so it can be resumed by hand.
+        The fork continues the paused guest with its shape, environment, and
+        secrets, so it takes neither a shape nor a startup command: userspace
+        random state and keys or tokens already in memory are the same in every
+        fork, so rekey them in the workload. ``timeout_seconds`` bounds the pause
+        wait; ``name`` defaults to the source's name plus ``-fork``, and
+        ``timeout_minutes`` and ``labels`` to the source's. Returns the accepted
+        create, not a running sandbox; wait with ``wait_for_creation``. If the
+        create succeeds but the source does not resume, the raised error names
+        the new sandbox so it can be deleted.
+        """
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        source = await self.pause(sandbox_id)
+        request = CreateSandboxRequest(
+            name=name or f"{source.name}-fork",
+            checkpoint_id=source.checkpoint_id,
+            restore_memory=True,
+            team_id=source.team_id,
+            timeout_minutes=(
+                source.timeout_minutes if timeout_minutes is None else timeout_minutes
+            ),
+            labels=source.labels if labels is None else labels,
+        )
+        try:
+            await self._wait_for_pause(sandbox_id, source.checkpoint_id, timeout_seconds)
+            forked = await self.create(request)
+        except BaseException as error:
+            try:
+                await self.resume(sandbox_id)
+            except Exception as resume_error:
+                if isinstance(error, Exception):
+                    raise _error_with_hint(
+                        error,
+                        f"the cleanup resume of sandbox {sandbox_id} failed "
+                        f"({resume_error}); if it is PAUSED, resume it with "
+                        f"'prime sandbox resume {sandbox_id}' (or resume())",
+                    )
+            raise
+        try:
+            await self.resume(sandbox_id)
+        except Exception as resume_error:
+            raise _error_with_hint(
+                resume_error,
+                f"the fork {forked.id} was created but sandbox {sandbox_id} did not "
+                f"resume; retry with 'prime sandbox resume {sandbox_id}' (resume()), "
+                f"or delete the fork with delete()",
+            )
+        return forked
+
+    async def _wait_for_pause(
+        self, sandbox_id: str, checkpoint_id: str, timeout_seconds: float
+    ) -> None:
+        """Wait until the pause checkpoint holds its memory and the source is PAUSED."""
+        deadline = time.monotonic() + timeout_seconds
+        phase_start = time.monotonic()
+        slow_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = await self._checkpoint_batcher.get(checkpoint_id)
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Pause checkpoint {checkpoint_id} cannot be restored "
+                    f"(state={checkpoint.state}): {checkpoint.error or 'no error details'}"
+                )
+            if checkpoint.state in _PAUSE_RESTORABLE_STATES:
+                sandbox = await self._sandbox_status_batcher.get(sandbox_id)
+                if sandbox.status == "PAUSED":
+                    return
+                if sandbox.status in ("ERROR", "TERMINATED", "TIMEOUT"):
+                    _raise_not_running_error(
+                        sandbox_id,
+                        {
+                            "status": sandbox.status,
+                            "error_type": sandbox.error_type,
+                            "error_message": sandbox.error_message,
+                        },
+                    )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
+                await asyncio.sleep(min(_creation_poll_delay(slow_index), remaining))
+                slow_index += 1
+            else:
+                await asyncio.sleep(
+                    min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining)
+                )
+        raise TimeoutError(
+            f"Sandbox {sandbox_id} did not finish pausing within {timeout_seconds:g}s; "
+            "the pause may still complete, and if it does the source stays PAUSED "
+            "until resumed"
+        )
 
     async def checkpoint(
         self, sandbox_id: str, ttl_seconds: Optional[int] = None

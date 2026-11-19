@@ -215,40 +215,33 @@ def test_restore_command_memory_forks_with_the_paused_shape(
     assert disk.cpu_cores == 1.0
 
 
-def test_fork_checkpoints_waits_and_restores(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fork_command_forks_with_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
     calls: list[Any] = []
-    source = _fake_sandbox(
-        id="sbx-1", team_id="team-1", region="us", gpu_count=0, gpu_type=None, labels=["a"]
-    )
-    pending = SimpleNamespace(id="checkpoint-1")
+    source = _fake_sandbox(id="sbx-1", team_id="team-1", labels=["a"])
 
-    def create(self: Any, request: Any) -> SimpleNamespace:
-        calls.append(request)
+    def fork(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
+        calls.append((sandbox_id, kwargs))
         return SimpleNamespace(id="forked-1")
 
-    def wait(self: Any, checkpoint_id: str, timeout_seconds: float) -> SimpleNamespace:
-        calls.append(("wait", checkpoint_id, timeout_seconds))
-        return pending
-
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
-    monkeypatch.setattr(
-        "prime_cli.commands.sandbox.SandboxClient.checkpoint", lambda self, sid: pending
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.fork", fork)
+
+    prompted = runner.invoke(
+        app, ["sandbox", "fork", "sbx-1", "--timeout-minutes", "30"], input="y\n"
     )
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.wait_for_checkpoint", wait)
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+    assert prompted.exit_code == 0, prompted.output
+    assert "paused for the memory snapshot, then resumed asynchronously" in " ".join(
+        strip_ansi(prompted.output).split()
+    )
+    assert "forked-1" in prompted.output
 
-    result = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--cpu-cores", "4", "--yes"])
-
-    assert result.exit_code == 0, result.output
-    assert calls[0] == ("wait", "checkpoint-1", 300)
-    request = calls[1]
-    assert request.checkpoint_id == "checkpoint-1"
-    assert request.name == "box-fork"
-    assert request.cpu_cores == 4
-    assert request.memory_gb == source.memory_gb
-    assert request.team_id == "team-1" and request.labels == ["a"]
-    assert "forked-1" in result.output
+    skipped = runner.invoke(app, ["sandbox", "fork", "sbx-1", "-y"])
+    assert skipped.exit_code == 0, skipped.output
+    assert calls == [
+        ("sbx-1", {"name": "box-fork", "timeout_minutes": 30, "timeout_seconds": 300}),
+        ("sbx-1", {"name": "box-fork", "timeout_minutes": None, "timeout_seconds": 300}),
+    ]
 
 
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:

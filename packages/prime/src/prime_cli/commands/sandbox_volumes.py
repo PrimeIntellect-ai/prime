@@ -73,7 +73,7 @@ def _invalid_volume_mount(spec: str, problem: str) -> None:
 
 
 def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
-    """Parse repeatable ``NAME:/mount/path[:ro]`` values into volume mounts.
+    """Parse repeatable ``NAME:/mount/path[:ro|:rw]`` values into volume mounts.
 
     Only the syntax is split here; name, mount-path, and count rules are
     enforced once by the API.
@@ -82,13 +82,13 @@ def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
     for spec in specs:
         name, sep, remainder = spec.partition(":")
         if not sep or not name or not remainder:
-            _invalid_volume_mount(spec, "expected NAME:/mount/path[:ro]")
-        mount_path, read_only = remainder, False
-        if mount_path.endswith(":ro"):
-            mount_path, read_only = mount_path[:-3], True
+            _invalid_volume_mount(spec, "expected NAME:/mount/path[:ro|:rw]")
+        mount_path, has_mode, mode = remainder.partition(":")
         if not mount_path:
-            _invalid_volume_mount(spec, "empty mount path after ':ro'")
-        mounts.append(VolumeMount(name=name, mount_path=mount_path, read_only=read_only))
+            _invalid_volume_mount(spec, "empty mount path")
+        if has_mode and mode not in ("ro", "rw"):
+            _invalid_volume_mount(spec, f"unknown mode '{mode}', expected ro or rw")
+        mounts.append(VolumeMount(name=name, mount_path=mount_path, read_only=mode == "ro"))
     return mounts
 
 
@@ -141,6 +141,13 @@ def _importer_image() -> str:
     return _IMPORTER_IMAGE_DEV
 
 
+def _rsync_progress_flag() -> str:
+    """One overall progress line needs rsync >= 3.1; macOS's bundled openrsync
+    only has per-file --progress."""
+    probe = subprocess.run(["rsync", "--help"], capture_output=True, text=True)
+    return "--info=progress2" if "--info" in probe.stdout + probe.stderr else "--progress"
+
+
 def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
     remote_shell = shlex.join(
         [
@@ -151,16 +158,22 @@ def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
             transport.key_path,
             "-o",
             f"ProxyCommand={transport.proxy_command}",
+            # The sandbox API returns no host key to pin for a session, and the
+            # ProxyCommand reaches the gateway over TLS, which authorizes this
+            # session's key. LogLevel hides the "Permanently added" notice.
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
             "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
         ]
     )
     return [
         "rsync",
         "-az",
         "--partial",
+        _rsync_progress_flag(),
         "-e",
         remote_shell,
         f"{path}/",
@@ -276,9 +289,7 @@ def _import_volume(
         )
         sandbox_client.wait_for_creation(sandbox.id)
         with ssh_transport(sandbox_client, sandbox.id) as transport:
-            # rsync progress is success-path noise; its errors go to stderr,
-            # which stays attached to the terminal.
-            result = subprocess.run(_rsync_command(transport, path), stdout=subprocess.DEVNULL)
+            result = subprocess.run(_rsync_command(transport, path))
         if result.returncode != 0:
             console.print(
                 "[red]Error:[/red] rsync failed. Nothing was published by this "
@@ -349,7 +360,12 @@ def create(
         None, help="Team ID (uses config team_id if not specified)"
     ),
     from_path: Optional[str] = typer.Option(
-        None, "--from", help="Import this local directory into the new volume"
+        None,
+        "--from",
+        help=(
+            "Import this local directory into the new volume. Files keep their local "
+            "uid and gid; chown them in a sandbox if a non-root user needs to write."
+        ),
     ),
     size_gb: Optional[int] = typer.Option(
         None, "--size-gb", help="Volume capacity in GiB (default: 100)"
@@ -630,6 +646,11 @@ def _exit_sync_failed(failure: Optional[str]) -> NoReturn:
     console.print(f"[red]Error:[/red] volume sync failed: {escape(failure or 'unknown')}")
     if failure == "BUSY":
         console.print("A process in the sandbox holds the volume; close it and retry.")
+    if failure == "ROLLBACK_FAILED":
+        console.print(
+            "The volume could not be re-attached. Run this command with --discard to "
+            "drop the sandbox's unpublished writes and re-attach it at the committed head."
+        )
     raise typer.Exit(1)
 
 
@@ -680,8 +701,9 @@ def sync(
     if result.state == "FAILED":
         _exit_sync_failed(result.failure)
     if result.state == "DONE":
+        outcome = "Discarded unpublished changes to volume" if discard else "Synced volume"
         console.print(
-            f"[green]✓[/green] Synced volume {escape(name)} in sandbox "
+            f"[green]✓[/green] {outcome} {escape(name)} in sandbox "
             f"{escape(sandbox_id)} to its committed head"
         )
         if result.head_id:

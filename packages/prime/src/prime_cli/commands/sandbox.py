@@ -1134,7 +1134,11 @@ def fork(
     """Fork a running sandbox into a new sandbox with the same filesystem.
 
     With --with-memory the fork also continues the source's processes, memory, and
-    disk; the source is paused for the snapshot and resumed afterwards."""
+    disk; the source is paused for the snapshot and resumed afterwards.
+
+    Volumes attached to the source are mounted again at their published heads.
+    Unpublished volume writes are not carried: sync the source first.
+    """
     # Reject the incompatible shape overrides before any API request.
     if with_memory and (cpu_cores is not None or memory_gb is not None):
         console.print(
@@ -1333,7 +1337,7 @@ def create(
     volume: Optional[List[str]] = typer.Option(
         None,
         "--volume",
-        help="Attach a volume as NAME:/mount/path[:ro]. Can be specified multiple times.",
+        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
     ),
     gang: int = typer.Option(
         1,

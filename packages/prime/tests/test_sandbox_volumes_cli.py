@@ -557,16 +557,19 @@ def test_sandbox_create_volume_option(monkeypatch: pytest.MonkeyPatch, tmp_path:
             "data:/data",
             "--volume",
             "ro-data:/mnt:ro",
+            "--volume",
+            "rw-data:/work:rw",
             "--yes",
         ],
     )
 
     assert result.exit_code == 0, result.output
     output = strip_ansi(result.output)
-    assert "Volumes: data:/data, ro-data:/mnt (ro)" in output
+    assert "Volumes: data:/data, ro-data:/mnt (ro), rw-data:/work" in output
     assert captured["request"].volumes == [
         VolumeMount(name="data", mount_path="/data", read_only=False),
         VolumeMount(name="ro-data", mount_path="/mnt", read_only=True),
+        VolumeMount(name="rw-data", mount_path="/work", read_only=False),
     ]
 
 
@@ -583,11 +586,16 @@ def test_sandbox_create_volume_option_rejects_malformed_syntax(
     for spec in ("data", "data:", ":/data"):
         result = runner.invoke(app, ["sandbox", "create", "--volume", spec, "--yes"])
         assert result.exit_code == 1, result.output
-        assert "expected NAME:/mount/path[:ro]" in strip_ansi(result.output)
+        assert "expected NAME:/mount/path[:ro|:rw]" in strip_ansi(result.output)
 
     result = runner.invoke(app, ["sandbox", "create", "--volume", "data::ro", "--yes"])
     assert result.exit_code == 1, result.output
     assert "empty mount path" in strip_ansi(result.output)
+
+    for spec in ("data:/work:rx", "data:/work:", "data:/work:ro:rw"):
+        result = runner.invoke(app, ["sandbox", "create", "--volume", spec, "--yes"])
+        assert result.exit_code == 1, result.output
+        assert "unknown mode" in strip_ansi(result.output)
 
     assert created == []
 
@@ -631,6 +639,9 @@ class _DevConfig:
     def __init__(self) -> None:
         self.base_url = "https://api.dev.example"
         self.team_id = None
+
+
+fake_rsync_help = SimpleNamespace(stdout="usage: rsync\n --info=FLAGS  verbosity", stderr="")
 
 
 def _configure_import_mocks(
@@ -679,6 +690,8 @@ def _configure_import_mocks(
         state["closed_sessions"].append((sandbox_id, session_id))
 
     def fake_rsync(command: Any, **kwargs: Any) -> Any:
+        if command == ["rsync", "--help"]:
+            return fake_rsync_help
         state["order"].append("rsync")
         state["rsync_calls"].append(list(command))
         state["rsync_kwargs"] = kwargs
@@ -747,8 +760,8 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     assert "rsync" not in output
     assert "Copied data into volume" not in output
     assert "Publish requested" not in output
-    # Success-path rsync progress is suppressed; stderr stays attached.
-    assert state["rsync_kwargs"] == {"stdout": subprocess.DEVNULL}
+    # rsync's progress stays attached to the terminal.
+    assert state["rsync_kwargs"] == {}
 
     assert state["volume_creates"] == [("data", None, None)]
     sandbox_request = state["sandbox_request"]
@@ -768,15 +781,16 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     assert state["closed_sessions"] == [("sbx-import-1", "sess-1")]
 
     (command,) = state["rsync_calls"]
-    assert command[:4] == ["rsync", "-az", "--partial", "-e"]
-    assert command[5] == f"{data_dir}/"
-    assert command[6] == "sess-1@gw.example.com:/volume/"
-    remote_shell = command[4]
+    assert command[:5] == ["rsync", "-az", "--partial", "--info=progress2", "-e"]
+    assert command[6] == f"{data_dir}/"
+    assert command[7] == "sess-1@gw.example.com:/volume/"
+    remote_shell = command[5]
     assert remote_shell.startswith("ssh -p 2022 -i ")
     assert "ProxyCommand=" in remote_shell
     assert "prime_cli.ssh_proxy gw.example.com 2022 sess-1" in remote_shell
     assert "-o StrictHostKeyChecking=no" in remote_shell
     assert "-o UserKnownHostsFile=/dev/null" in remote_shell
+    assert "-o LogLevel=ERROR" in remote_shell
 
     assert state["deleted"] == ["sbx-import-1"]
     # Publish and durability checks sit strictly between rsync and cleanup,
@@ -852,6 +866,29 @@ def test_volume_import_rsync_failure_keeps_volume_and_cleans_up(
     assert state["closed_sessions"] == [("sbx-import-1", "sess-1")]
 
 
+def test_volume_import_progress_flag_follows_rsync_support(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    state = _configure_import_mocks(monkeypatch, tmp_path)
+    run = subprocess.run
+
+    def openrsync(command: Any, **kwargs: Any) -> Any:
+        if command == ["rsync", "--help"]:
+            return SimpleNamespace(stdout="", stderr="usage: rsync [-abc]")
+        return run(command, **kwargs)
+
+    monkeypatch.setattr("prime_cli.commands.sandbox_volumes.subprocess.run", openrsync)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    result = runner.invoke(app, ["sandbox", "volumes", "create", "data", "--from", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "--progress" in state["rsync_calls"][0]
+    assert "--info=progress2" not in state["rsync_calls"][0]
+
+
 def test_volume_import_rejects_missing_rsync_before_any_api_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
@@ -896,6 +933,8 @@ def test_volume_import_reuses_existing_volume_scope(
     monkeypatch.setattr("prime_sandboxes.volumes.Volumes.create", taken)
 
     def succeeding_rsync(command: Any, **kwargs: Any) -> Any:
+        if command == ["rsync", "--help"]:
+            return fake_rsync_help
         state["rsync_calls"].append(list(command))
         return SimpleNamespace(returncode=0)
 
@@ -1032,6 +1071,8 @@ def test_volume_import_interrupt_before_publish_cleans_up(
     state = _configure_import_mocks(monkeypatch, tmp_path)
 
     def interrupted_run(command: Any, **kwargs: Any) -> Any:
+        if command == ["rsync", "--help"]:
+            return fake_rsync_help
         state["rsync_calls"].append(list(command))
         raise KeyboardInterrupt()
 
@@ -1303,6 +1344,46 @@ def test_volume_sync_waits_by_default_and_prints_ids(
     assert captured["args"] == ("sbx-1", "data", False, True)
     assert "Synced volume data in sandbox sbx-1" in output
     assert "Head checkpoint: ckpt-9" in output
+
+
+def test_volume_sync_discard_says_the_changes_were_discarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.sync",
+        lambda self, sandbox_id, name, *, discard=False, wait=True: VolumeSync(
+            sync_id="sync-1", state="DONE", head_id="ckpt-9"
+        ),
+    )
+
+    result = runner.invoke(
+        app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1", "--discard"]
+    )
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert "Discarded unpublished changes to volume data in sandbox sbx-1" in output
+    assert "Synced volume" not in output
+
+
+def test_volume_sync_rollback_failed_hints_discard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.sync",
+        lambda self, sandbox_id, name, *, discard=False, wait=True: (_ for _ in ()).throw(
+            VolumeSyncFailedError("sbx-1", "data", "ROLLBACK_FAILED")
+        ),
+    )
+
+    result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])
+
+    assert result.exit_code == 1, result.output
+    output = " ".join(strip_ansi(result.output).split())
+    assert "volume sync failed: ROLLBACK_FAILED" in output
+    assert "Run this command with --discard" in output
 
 
 def test_volume_sync_no_wait_done_in_response_reports_completion(

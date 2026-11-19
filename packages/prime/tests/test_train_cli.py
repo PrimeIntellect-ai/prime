@@ -361,6 +361,67 @@ def test_train_get_json_includes_name(monkeypatch) -> None:
     assert json.loads(result.output)["run"]["name"] == "renametest"
 
 
+STOP_PROMPT = "Are you sure you want to stop run run-1?"
+
+
+def _mock_stop(monkeypatch) -> list[tuple[str, str]]:
+    calls: list[tuple[str, str]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint))
+        return {"run": _fake_run_payload("STOPPED")}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    return calls
+
+
+@pytest.mark.parametrize("flag", ["--yes", "-y", "--force", "-f"])
+def test_train_stop_skip_flags_stop_without_prompting(monkeypatch, flag) -> None:
+    calls = _mock_stop(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1", flag],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert STOP_PROMPT not in result.output
+    assert "stopped successfully" in result.output
+    assert calls == [("PUT", "/rft/runs/run-1/stop")]
+
+
+@pytest.mark.parametrize(
+    ("answer", "stopped"),
+    [("y\n", True), ("n\n", False), ("\n", False)],
+)
+def test_train_stop_prompts_without_skip_flag(monkeypatch, answer, stopped) -> None:
+    calls = _mock_stop(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1"],
+        input=answer,
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"{STOP_PROMPT} [y/N]" in result.output
+    if stopped:
+        assert "stopped successfully" in result.output
+        assert calls == [("PUT", "/rft/runs/run-1/stop")]
+    else:
+        assert "Cancelled." in result.output
+        assert calls == []
+
+
+def test_train_stop_help_lists_yes_flag() -> None:
+    result = runner.invoke(app, ["train", "stop", "--help"], env={**TEST_ENV, "COLUMNS": "120"})
+
+    assert result.exit_code == 0, result.output
+    assert re.search(r"--yes\s+-y\s+Skip confirmation", result.output)
+
+
 def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
 

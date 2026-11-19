@@ -145,7 +145,19 @@ class _DummyAPIClient:
         return self._payloads[endpoint]
 
     def workloads_params(self) -> Optional[Dict[str, Any]]:
-        return next(c["params"] for c in self.calls if c["endpoint"] == "/factory/workloads")
+        """Params of the user's listing request.
+
+        The table view fetches running slurm jobs for node usage on another
+        thread at the same time, so recording order is not stable. When the
+        user's filters equal that query the two requests are identical."""
+        calls = [c["params"] for c in self.calls if c["endpoint"] == "/factory/workloads"]
+        usage_query = {"workload_type": "slurm", "state": "running"}
+        listing = [
+            params
+            for params in calls
+            if {k: v for k, v in (params or {}).items() if k != "team_id"} != usage_query
+        ]
+        return (listing or calls)[0]
 
 
 def _install(

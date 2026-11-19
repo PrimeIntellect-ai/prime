@@ -18,6 +18,7 @@ from .exceptions import (
     CommandTimeoutError,
     DownloadTimeoutError,
     ProcessOutputLostError,
+    SandboxDiskFullError,
     SandboxFileNotFoundError,
     SandboxFileTooLargeError,
     SandboxImagePullError,
@@ -90,7 +91,7 @@ from .models import (
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
 
-__version__ = "0.5.11"
+__version__ = "0.5.12"
 
 # Deprecated alias for backward compatibility
 TimeoutError = APITimeoutError
@@ -170,6 +171,7 @@ __all__ = [
     "BatchStatusUnsupportedError",
     "UnauthorizedError",
     "PaymentRequiredError",
+    "SandboxDiskFullError",
     "SandboxFileNotFoundError",
     "SandboxFileTooLargeError",
     "APITimeoutError",

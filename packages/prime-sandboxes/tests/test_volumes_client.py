@@ -588,8 +588,8 @@ def test_publish_wait_timeout_raises_timeout_error(waiter_clock):
     with pytest.raises(TimeoutError, match="ckpt-1.*did not become DURABLE"):
         volumes.publish("sb-1", "dataset")
 
-    # The 200 queued responses exhaust the waiter's default 300s deadline.
-    assert len(client.calls[1:]) < 200
+    # The 400 queued responses exhaust the waiter's default 300s deadline.
+    assert len(client.calls[1:]) < 400
 
 
 def _async_publish_client(handler: Any) -> tuple[AsyncSandboxClient, list[tuple[str, str, Any]]]:
@@ -903,7 +903,7 @@ def test_sync_wait_polls_fast_then_backs_off(sync_waiter_clock):
     sync = volumes.sync("sb-1", "dataset")
 
     assert sync.state == "DONE"
-    assert sync_waiter_clock == [1.0] * 10 + [1.0, 1.5, 2.25]
+    assert sync_waiter_clock == [1.0] * 10 + [1.0, 1.5, 2.0]
 
 
 def test_sync_wait_returns_immediately_when_request_done(sync_waiter_clock):
@@ -930,14 +930,14 @@ def test_sync_wait_failed_raises_volume_sync_failed_error(sync_waiter_clock):
 
 
 def test_sync_wait_timeout_raises_timeout_error(sync_waiter_clock):
-    client = RoutingAPIClient(_sync_handler([_sync("PUBLISHING")] * 200))
+    client = RoutingAPIClient(_sync_handler([_sync("PUBLISHING")] * 400))
     volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
 
     with pytest.raises(TimeoutError, match="did not finish syncing"):
         volumes.sync("sb-1", "dataset")
 
-    # The 200 queued responses exhaust the waiter's default 600s deadline.
-    assert len(client.calls[1:]) < 200
+    # The 400 queued responses exhaust the waiter's default 600s deadline.
+    assert len(client.calls[1:]) < 400
 
 
 def test_sync_rejects_non_positive_timeout():
@@ -989,7 +989,7 @@ def test_async_sync_wait_failed_raises_volume_sync_failed_error(sync_waiter_cloc
 
 
 def test_async_sync_wait_timeout_raises_timeout_error(sync_waiter_clock):
-    client, _ = _async_publish_client(_sync_handler([_sync("PUBLISHING")] * 200))
+    client, _ = _async_publish_client(_sync_handler([_sync("PUBLISHING")] * 400))
 
     async def scenario() -> None:
         async with client:

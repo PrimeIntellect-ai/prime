@@ -57,6 +57,7 @@ from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC, raise_if_cancelled
 from ._polling import (
     CHECKPOINT_POLL_FAST_DELAY,
     CHECKPOINT_POLL_FAST_WINDOW,
+    _checkpoint_poll_delay,
     _creation_poll_delay,
     _jittered_poll_delay,
 )
@@ -3081,7 +3082,7 @@ class SandboxClient:
             if remaining <= 0:
                 break
             if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
-                time.sleep(min(_creation_poll_delay(slow_index), remaining))
+                time.sleep(min(_checkpoint_poll_delay(slow_index), remaining))
                 slow_index += 1
             else:
                 time.sleep(min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining))
@@ -5156,7 +5157,7 @@ class AsyncSandboxClient:
             if remaining <= 0:
                 break
             if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
-                await asyncio.sleep(min(_creation_poll_delay(slow_index), remaining))
+                await asyncio.sleep(min(_checkpoint_poll_delay(slow_index), remaining))
                 slow_index += 1
             else:
                 await asyncio.sleep(

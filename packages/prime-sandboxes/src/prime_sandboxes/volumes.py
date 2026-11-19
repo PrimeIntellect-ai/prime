@@ -9,7 +9,7 @@ from urllib.parse import quote
 from ._polling import (
     CHECKPOINT_POLL_FAST_DELAY,
     CHECKPOINT_POLL_FAST_WINDOW,
-    _creation_poll_delay,
+    _checkpoint_poll_delay,
     _jittered_poll_delay,
 )
 from .exceptions import VolumeSyncFailedError
@@ -210,7 +210,7 @@ class Volumes:
             if remaining <= 0:
                 raise TimeoutError(_sync_timeout_message(sandbox_id, name, timeout_seconds, sync))
             if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
-                time.sleep(min(_creation_poll_delay(slow_index), remaining))
+                time.sleep(min(_checkpoint_poll_delay(slow_index), remaining))
                 slow_index += 1
             else:
                 time.sleep(min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining))
@@ -364,7 +364,7 @@ class AsyncVolumes:
             if remaining <= 0:
                 raise TimeoutError(_sync_timeout_message(sandbox_id, name, timeout_seconds, sync))
             if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
-                await asyncio.sleep(min(_creation_poll_delay(slow_index), remaining))
+                await asyncio.sleep(min(_checkpoint_poll_delay(slow_index), remaining))
                 slow_index += 1
             else:
                 await asyncio.sleep(

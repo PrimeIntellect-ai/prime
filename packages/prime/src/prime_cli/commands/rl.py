@@ -1910,15 +1910,19 @@ def get_run(
 @app.command("stop", rich_help_panel="Commands")
 def stop_run(
     run_id: str = typer.Argument(..., help="Run ID to stop"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
 ) -> None:
-    """Stop a run."""
+    """Stop a run.
+
+    Example:
+
+        prime train stop <run_id> --yes
+    """
     try:
-        if not force:
-            confirm = typer.confirm(f"Are you sure you want to stop run {run_id}?")
-            if not confirm:
-                console.print("Cancelled.")
-                raise typer.Exit(0)
+        if not confirm_or_skip(f"Are you sure you want to stop run {run_id}?", yes or force):
+            console.print("Cancelled.")
+            raise typer.Exit(0)
 
         api_client = APIClient()
         rl_client = RLClient(api_client)

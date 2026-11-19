@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 def _api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_FRONTEND_URL", "https://frontend.test/")
 
 
 def _fft_models_payload() -> dict[str, Any]:
@@ -811,7 +812,9 @@ def test_on_demand_table_escapes_promo_markup(monkeypatch: pytest.MonkeyPatch) -
 
 # --- at-capacity GPU types (priced, no inventory) --------------------------
 
-_CAPACITY_HINT = "Contact support@primeintellect.ai for dedicated capacity."
+# The URL follows the configured frontend (PRIME_FRONTEND_URL, set above),
+# so staging and dev point at their own Request Compute page.
+_CAPACITY_HINT = "Request dedicated capacity: https://frontend.test/dashboard/quotes"
 _CAPACITY_HINT_LINE = f"Need a GPU type that's at capacity? {_CAPACITY_HINT}"
 
 
@@ -865,6 +868,7 @@ def test_at_capacity_entries_render_last_with_one_hint(monkeypatch: pytest.Monke
     # Priced types keep their rate even with no inventory.
     assert "$5.00" in _capacity_line(plain, "B200_180GB")
     assert " ".join(plain.split()).count(_CAPACITY_HINT) == 1
+    assert "support@" not in plain
 
 
 def test_no_capacity_hint_without_at_capacity_entries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -878,7 +882,7 @@ def test_no_capacity_hint_without_at_capacity_entries(monkeypatch: pytest.Monkey
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "At capacity" not in plain
-    assert "support@primeintellect.ai" not in plain
+    assert "/dashboard/quotes" not in plain
 
 
 def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyPatch) -> None:

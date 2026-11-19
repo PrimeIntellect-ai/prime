@@ -1442,7 +1442,12 @@ def _dispatch_on(tmp_path: Path, gpu_type: str):
     return runner.invoke(
         app,
         ["train", str(cfg), "--gpu-type", gpu_type, "-y"],
-        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+        env={
+            **TEST_ENV,
+            "PRIME_API_KEY": "test-key",
+            "PRIME_FRONTEND_URL": "https://frontend.test",
+            "COLUMNS": "200",
+        },
     )
 
 
@@ -1457,7 +1462,8 @@ def test_dispatch_on_at_capacity_gpu_replaces_exact_backend_message(
     assert result.exit_code == 1, result.output
     plain = " ".join(result.output.split())
     assert "B200_180GB is at capacity for Hosted Training right now." in plain
-    assert "Contact support@primeintellect.ai for dedicated capacity." in plain
+    assert "Request dedicated capacity: https://frontend.test/dashboard/quotes" in plain
+    assert "support@" not in plain
     assert _BACKEND_DETAIL not in plain
 
 

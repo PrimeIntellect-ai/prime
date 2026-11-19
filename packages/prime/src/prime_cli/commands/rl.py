@@ -83,10 +83,19 @@ RL_MODELS_JSON_HELP = json_output_help(
     "false means 'not enrolled', absent means the backend did not report it",
 )
 
-DEDICATED_CAPACITY_HINT = (
-    "[dim]Need a GPU type that's at capacity? Contact support@primeintellect.ai "
-    "for dedicated capacity.[/dim]"
-)
+
+def print_dedicated_capacity_hint() -> None:
+    """Point at the platform's Request Compute page (`/dashboard/quotes`).
+
+    soft_wrap keeps the URL on one logical line so it stays clickable."""
+    url = f"{Config().frontend_url}/dashboard/quotes"
+    console.print(
+        f"[dim]Need a GPU type that's at capacity? Request dedicated capacity: "
+        f"[link={url}]{rich_escape(url)}[/link][/dim]",
+        soft_wrap=True,
+        highlight=False,
+    )
+
 
 # The platform's launch rejection reads "<type> is at capacity ...".
 _PLACEMENT_FAILURE = re.compile(r"\bat capacity\b", re.IGNORECASE)
@@ -1513,7 +1522,7 @@ def _render_on_demand_table(on_demand: list) -> None:
     )
     console.print("[dim]Runs may queue depending on GPU count and topology.[/dim]")
     if any(entry.at_capacity for entry in on_demand):
-        console.print(DEDICATED_CAPACITY_HINT)
+        print_dedicated_capacity_hint()
 
 
 def _at_capacity_rejection(
@@ -1558,7 +1567,7 @@ def _report_dispatch_error(
     else:
         console.print(f"[red]Error:[/red] {rich_escape(detail)}")
         console.print(f"[dim]Note: {gpu} is also at capacity right now.[/dim]")
-    console.print(DEDICATED_CAPACITY_HINT)
+    print_dedicated_capacity_hint()
 
 
 @app.command("gpus", rich_help_panel="Commands")

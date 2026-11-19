@@ -7,10 +7,12 @@ import pytest_asyncio
 
 from prime_sandboxes import (
     APIClient,
+    APIError,
     AsyncSandboxClient,
     CreateSandboxRequest,
     SandboxCheckpoint,
     SandboxClient,
+    SandboxStatusSnapshot,
 )
 
 
@@ -824,6 +826,167 @@ async def test_async_pause_and_resume_requests(monkeypatch: pytest.MonkeyPatch) 
     assert paused.checkpoint_id == "pause-1"
 
     assert calls == [("POST", "/sandbox/sandbox-1/pause"), ("POST", "/sandbox/sandbox-1/resume")]
+
+
+def paused_response() -> dict:
+    return {
+        **sandbox_response(),
+        "id": "sandbox-1",
+        "name": "box",
+        "status": "RUNNING",
+        "team_id": "team-1",
+        "labels": ["a"],
+        "timeout_minutes": 90,
+        "checkpointId": "pause-1",
+    }
+
+
+def mock_fork_http(client, monkeypatch, calls, payloads, create_error=None):
+    def handle(method, path, **kwargs):
+        calls.append((method, path))
+        if path.endswith("/pause"):
+            return paused_response()
+        if path.endswith("/resume"):
+            return {**sandbox_response(), "status": "RUNNING"}
+        payloads.append(kwargs["json"])
+        if create_error is not None:
+            raise create_error
+        return sandbox_response()
+
+    async def async_handle(method, path, **kwargs):
+        return handle(method, path, **kwargs)
+
+    monkeypatch.setattr(
+        client.client,
+        "request",
+        async_handle if isinstance(client, AsyncSandboxClient) else handle,
+    )
+
+
+def mock_fork_polls(client, monkeypatch, calls, checkpoint_states, statuses, error=None):
+    checkpoint_states = iter(checkpoint_states)
+    statuses = iter(statuses)
+
+    def checkpoint_get(checkpoint_id):
+        calls.append(("checkpoint", checkpoint_id))
+        return SandboxCheckpoint.model_validate(
+            {**checkpoint_response(next(checkpoint_states)), "error": error}
+        )
+
+    def status_get(sandbox_id):
+        calls.append(("status", sandbox_id))
+        return SandboxStatusSnapshot(sandbox_id=sandbox_id, status=next(statuses))
+
+    async def async_checkpoint_get(checkpoint_id):
+        return checkpoint_get(checkpoint_id)
+
+    async def async_status_get(sandbox_id):
+        return status_get(sandbox_id)
+
+    is_async = isinstance(client, AsyncSandboxClient)
+    monkeypatch.setattr(
+        client._checkpoint_batcher,
+        "get",
+        async_checkpoint_get if is_async else checkpoint_get,
+    )
+    monkeypatch.setattr(
+        client._sandbox_status_batcher,
+        "get",
+        async_status_get if is_async else status_get,
+    )
+
+
+async def fork(client, **kwargs):
+    if isinstance(client, AsyncSandboxClient):
+        return await client.fork("sandbox-1", **kwargs)
+    return client.fork("sandbox-1", **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_fork_pauses_creates_with_memory_and_resumes(checkpoint_client, monkeypatch):
+    calls = []
+    payloads = []
+    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+    mock_fork_polls(checkpoint_client, monkeypatch, calls, ["FROZEN"], ["PAUSED"])
+
+    forked = await fork(checkpoint_client)
+
+    assert forked.id == "restored-1"
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/pause"),
+        ("checkpoint", "pause-1"),
+        ("status", "sandbox-1"),
+        ("POST", "/sandbox"),
+        ("POST", "/sandbox/sandbox-1/resume"),
+    ]
+    payload = payloads[0]
+    assert payload["checkpoint_id"] == "pause-1"
+    assert payload["restore_memory"] is True
+    assert payload["name"] == "box-fork"
+    assert payload["team_id"] == "team-1"
+    assert payload["labels"] == ["a"]
+    assert payload["timeout_minutes"] == 90
+    # The paused sandbox's shape cannot be overridden.
+    for field in ("cpu_cores", "memory_gb", "gpu_count", "gpu_type"):
+        assert field not in payload
+    for field in ("start_command", "environment_vars", "secrets", "volumes"):
+        assert field not in payload
+
+
+@pytest.mark.asyncio
+async def test_fork_waits_for_the_pause_and_resumes_after_a_failed_create(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = []
+    payloads = []
+    failure = APIError("HTTP 500: create failed")
+    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads, create_error=failure)
+    # A frozen checkpoint alone is not enough: the source must be PAUSED.
+    mock_fork_polls(
+        checkpoint_client,
+        monkeypatch,
+        calls,
+        ["PENDING", "FROZEN", "FROZEN"],
+        ["RUNNING", "PAUSED"],
+    )
+
+    with pytest.raises(APIError, match="create failed"):
+        await fork(checkpoint_client)
+
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/pause"),
+        ("checkpoint", "pause-1"),
+        ("checkpoint", "pause-1"),
+        ("status", "sandbox-1"),
+        ("checkpoint", "pause-1"),
+        ("status", "sandbox-1"),
+        ("POST", "/sandbox"),
+        ("POST", "/sandbox/sandbox-1/resume"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fork_leaves_the_source_alone_when_the_pause_fails(checkpoint_client, monkeypatch):
+    calls = []
+    payloads = []
+    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+    mock_fork_polls(
+        checkpoint_client,
+        monkeypatch,
+        calls,
+        ["FAILED"],
+        [],
+        error="sandboxes with volumes cannot be paused",
+    )
+
+    with pytest.raises(RuntimeError, match="cannot be restored.*volumes cannot be paused"):
+        await fork(checkpoint_client)
+
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/pause"),
+        ("checkpoint", "pause-1"),
+    ]
+    assert payloads == []
 
 
 def test_account_wide_list_and_delete_follow_cursors(monkeypatch: pytest.MonkeyPatch) -> None:

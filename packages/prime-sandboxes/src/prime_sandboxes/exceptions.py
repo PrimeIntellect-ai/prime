@@ -76,6 +76,26 @@ class VolumeSyncFailedError(RuntimeError):
         )
 
 
+class VolumeSyncSupersededError(RuntimeError):
+    """Raised when the polled sync is no longer the one this call started.
+
+    Another request began a new sync after this one ended, so this sync's
+    outcome can no longer be read; check the volume and sync again.
+    """
+
+    def __init__(
+        self, sandbox_id: str, name: str, sync_id: Optional[str], current_sync_id: Optional[str]
+    ):
+        self.sandbox_id = sandbox_id
+        self.volume_name = name
+        self.sync_id = sync_id
+        self.current_sync_id = current_sync_id
+        super().__init__(
+            f"Volume sync {sync_id} of '{name}' in sandbox {sandbox_id} was replaced by "
+            f"sync {current_sync_id} before its result was read"
+        )
+
+
 class CommandTimeoutError(RuntimeError):
     """Raised when a command execution times out."""
 

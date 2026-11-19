@@ -12,7 +12,7 @@ from ._polling import (
     _checkpoint_poll_delay,
     _jittered_poll_delay,
 )
-from .exceptions import VolumeSyncFailedError
+from .exceptions import VolumeSyncFailedError, VolumeSyncSupersededError
 from .models import SandboxCheckpoint, Volume, VolumeListResponse, VolumeSync
 
 if TYPE_CHECKING:
@@ -41,14 +41,24 @@ def _sync_path(sandbox_id: str, name: str) -> str:
     return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/sync"
 
 
-# The server fails a sync past its own 10-minute deadline (design S11), so
-# the default wait budget covers the whole server-side lifecycle.
-SYNC_WAIT_TIMEOUT_SECONDS = 600.0
+# The server fails a sync past its 10-minute deadline, enforced on a ~1-minute
+# tick, so the wait must outlast both for DEADLINE and ROLLBACK_FAILED to
+# reach the caller instead of a client-side timeout.
+SYNC_WAIT_TIMEOUT_SECONDS = 720.0
 
 
 def _validate_sync_timeout(timeout_seconds: float) -> None:
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be finite and greater than zero")
+
+
+def _require_pinned_sync(
+    sandbox_id: str, name: str, started: VolumeSync, polled: VolumeSync
+) -> None:
+    # A new sync starts only after the previous one is terminal, so a different
+    # sync_id means the polled row no longer describes the sync this call started.
+    if polled.sync_id != started.sync_id:
+        raise VolumeSyncSupersededError(sandbox_id, name, started.sync_id, polled.sync_id)
 
 
 def _sync_timeout_message(
@@ -215,7 +225,9 @@ class Volumes:
             else:
                 time.sleep(min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining))
             response = self._parent.client.request("GET", _sync_path(sandbox_id, name))
-            sync = VolumeSync.model_validate(response)
+            polled = VolumeSync.model_validate(response)
+            _require_pinned_sync(sandbox_id, name, sync, polled)
+            sync = polled
         if sync.state == "FAILED":
             raise VolumeSyncFailedError(sandbox_id, name, sync.failure)
         return sync
@@ -371,7 +383,9 @@ class AsyncVolumes:
                     min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining)
                 )
             response = await self._parent.client.request("GET", _sync_path(sandbox_id, name))
-            sync = VolumeSync.model_validate(response)
+            polled = VolumeSync.model_validate(response)
+            _require_pinned_sync(sandbox_id, name, sync, polled)
+            sync = polled
         if sync.state == "FAILED":
             raise VolumeSyncFailedError(sandbox_id, name, sync.failure)
         return sync

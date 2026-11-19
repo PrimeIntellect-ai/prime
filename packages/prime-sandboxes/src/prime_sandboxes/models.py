@@ -626,11 +626,14 @@ class VolumeSync(BaseModel):
     """One sandbox attachment's current volume sync.
 
     state is null before the first sync, then one of UNMOUNTING,
-    PUBLISHING, REMOUNTING, DONE, or FAILED; head_id is the attachment's
+    PUBLISHING, REMOUNTING, ROLLING_BACK, DONE, or FAILED; ROLLING_BACK means
+    the sync failed after the unmount and is re-attaching the volume at its
+    previous head (failure is already set). head_id is the attachment's
     current head (the synced head once state is DONE); updated_at is the
-    last transition time. failure says why a FAILED sync failed (BUSY,
-    PUBLISH_FAILED, MERGE_FAILED, DEADLINE, NODE_ERROR or ROLLBACK_FAILED) and
-    is null otherwise, including when the sandbox itself left RUNNING.
+    last transition time. failure says why the sync failed or is rolling back
+    (BUSY, PUBLISH_FAILED, MERGE_FAILED, DEADLINE, NODE_ERROR or
+    ROLLBACK_FAILED) and is null otherwise. It stays set when the sandbox
+    leaves RUNNING mid-rollback.
     """
 
     sync_id: Optional[str] = None

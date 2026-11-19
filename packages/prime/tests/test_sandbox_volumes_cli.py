@@ -16,6 +16,7 @@ from prime_sandboxes import (
     VolumeMount,
     VolumeSync,
     VolumeSyncFailedError,
+    VolumeSyncSupersededError,
 )
 from typer.testing import CliRunner
 
@@ -1397,6 +1398,26 @@ def test_volume_sync_failed_exits_nonzero_with_error(
     output = " ".join(strip_ansi(result.output).split())
     assert "volume sync failed: MERGE_FAILED" in output
     assert "holds the volume" not in output
+    assert "Unexpected error" not in output
+
+
+def test_volume_sync_replaced_sync_exits_nonzero_with_hint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.sync",
+        lambda self, sandbox_id, name, *, discard=False, wait=True: (_ for _ in ()).throw(
+            VolumeSyncSupersededError("sbx-1", "data", "sync-1", "sync-2")
+        ),
+    )
+
+    result = runner.invoke(app, ["sandbox", "volumes", "sync", "data", "--sandbox", "sbx-1"])
+
+    assert result.exit_code == 1, result.output
+    output = " ".join(strip_ansi(result.output).split())
+    assert "replaced by sync sync-2" in output
+    assert "Run this command again" in output
     assert "Unexpected error" not in output
 
 

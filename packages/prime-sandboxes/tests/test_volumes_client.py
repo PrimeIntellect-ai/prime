@@ -19,6 +19,7 @@ from prime_sandboxes import (
     VolumeMount,
     VolumeSync,
     VolumeSyncFailedError,
+    VolumeSyncSupersededError,
 )
 
 
@@ -936,8 +937,37 @@ def test_sync_wait_timeout_raises_timeout_error(sync_waiter_clock):
     with pytest.raises(TimeoutError, match="did not finish syncing"):
         volumes.sync("sb-1", "dataset")
 
-    # The 400 queued responses exhaust the waiter's default 600s deadline.
+    # The 400 queued responses exhaust the waiter's default deadline.
     assert len(client.calls[1:]) < 400
+
+
+def test_sync_wait_outlasts_the_server_deadline(sync_waiter_clock):
+    # The server fails a stuck sync at 600s on a ~1 minute tick; the wait must
+    # still be polling then so DEADLINE reaches the caller.
+    client = RoutingAPIClient(
+        _sync_handler(
+            [_sync("UNMOUNTING")]
+            + [_sync("ROLLING_BACK", failure="MERGE_FAILED")] * 330
+            + [_sync("FAILED", failure="ROLLBACK_FAILED")]
+        )
+    )
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    with pytest.raises(VolumeSyncFailedError, match="ROLLBACK_FAILED"):
+        volumes.sync("sb-1", "dataset")
+
+    assert sum(sync_waiter_clock) > 600
+
+
+def test_sync_wait_rejects_a_replaced_sync(sync_waiter_clock):
+    client = RoutingAPIClient(_sync_handler([_sync("UNMOUNTING"), _sync("DONE", sync_id="sync-2")]))
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    with pytest.raises(VolumeSyncSupersededError, match="sync-1.*replaced by sync sync-2") as error:
+        volumes.sync("sb-1", "dataset")
+
+    assert error.value.sync_id == "sync-1"
+    assert error.value.current_sync_id == "sync-2"
 
 
 def test_sync_rejects_non_positive_timeout():
@@ -994,6 +1024,19 @@ def test_async_sync_wait_timeout_raises_timeout_error(sync_waiter_clock):
     async def scenario() -> None:
         async with client:
             with pytest.raises(TimeoutError, match="did not finish syncing"):
+                await client.volumes.sync("sb-1", "dataset")
+
+    asyncio.run(scenario())
+
+
+def test_async_sync_wait_rejects_a_replaced_sync(sync_waiter_clock):
+    client, _ = _async_publish_client(
+        _sync_handler([_sync("UNMOUNTING"), _sync("DONE", sync_id="sync-2")])
+    )
+
+    async def scenario() -> None:
+        async with client:
+            with pytest.raises(VolumeSyncSupersededError):
                 await client.volumes.sync("sb-1", "dataset")
 
     asyncio.run(scenario())

@@ -22,6 +22,7 @@ from prime_sandboxes import (
     Volume,
     VolumeMount,
     VolumeSyncFailedError,
+    VolumeSyncSupersededError,
 )
 from rich.markup import escape
 
@@ -665,6 +666,10 @@ def sync(
         raise typer.Exit(1)
     except VolumeSyncFailedError as e:
         _exit_sync_failed(e.failure)
+    except VolumeSyncSupersededError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        console.print("Run this command again to sync to the current head.")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)

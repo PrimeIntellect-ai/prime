@@ -27,6 +27,7 @@ from .exceptions import (
     SandboxTimeoutError,
     UploadTimeoutError,
     VolumeSyncFailedError,
+    VolumeSyncSupersededError,
 )
 from .images import AsyncImageClient, ImageClient
 from .models import (
@@ -188,4 +189,5 @@ __all__ = [
     "DownloadTimeoutError",
     "ProcessOutputLostError",
     "VolumeSyncFailedError",
+    "VolumeSyncSupersededError",
 ]

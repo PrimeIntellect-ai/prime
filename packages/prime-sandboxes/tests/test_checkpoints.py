@@ -1075,6 +1075,60 @@ async def test_fork_keeps_a_poll_error_and_names_the_source(checkpoint_client, m
     assert "cleanup resume of sandbox sandbox-1 failed" in str(raised.value)
 
 
+def test_fork_propagates_a_keyboard_interrupt_after_a_failed_cleanup_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+    payloads = []
+    mock_fork_http(client, monkeypatch, calls, payloads, resume_error=APIError(RESUME_409))
+
+    def checkpoint_get(checkpoint_id):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(client._checkpoint_batcher, "get", checkpoint_get)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            client.fork("sandbox-1")
+    finally:
+        client.client.client.close()
+
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/pause"),
+        ("POST", "/sandbox/sandbox-1/resume"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fork_propagates_cancellation_after_a_failed_cleanup_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    async with AsyncSandboxClient(api_key="test-key") as client:
+        calls = []
+        payloads = []
+        mock_fork_http(client, monkeypatch, calls, payloads, resume_error=APIError(RESUME_409))
+        polling = asyncio.Event()
+
+        async def checkpoint_get(checkpoint_id):
+            polling.set()
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(client._checkpoint_batcher, "get", checkpoint_get)
+        task = asyncio.create_task(client.fork("sandbox-1"))
+        await polling.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/pause"),
+        ("POST", "/sandbox/sandbox-1/resume"),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_fork_names_the_created_fork_when_the_source_does_not_resume(
     checkpoint_client, monkeypatch

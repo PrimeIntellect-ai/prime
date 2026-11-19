@@ -2712,7 +2712,6 @@ class SandboxClient:
                         f"({resume_error}); if it is PAUSED, resume it with "
                         f"'prime sandbox resume {sandbox_id}' (or resume())",
                     )
-                raise
             raise
         try:
             self.resume(sandbox_id)
@@ -4691,7 +4690,6 @@ class AsyncSandboxClient:
                         f"({resume_error}); if it is PAUSED, resume it with "
                         f"'prime sandbox resume {sandbox_id}' (or resume())",
                     )
-                raise
             raise
         try:
             await self.resume(sandbox_id)

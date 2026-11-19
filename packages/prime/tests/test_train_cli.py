@@ -419,7 +419,9 @@ def test_train_stop_help_lists_yes_flag() -> None:
     result = runner.invoke(app, ["train", "stop", "--help"], env={**TEST_ENV, "COLUMNS": "120"})
 
     assert result.exit_code == 0, result.output
-    assert re.search(r"--yes\s+-y\s+Skip confirmation", result.output)
+    # CI forces color, and Rich styles option names, so strip ANSI codes first.
+    plain = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert re.search(r"--yes\s+-y\s+Skip confirmation", plain)
 
 
 def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:

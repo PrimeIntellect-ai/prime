@@ -685,7 +685,7 @@ def test_on_demand_only_discovery_renders_no_empty_banner(
 def test_on_demand_table_renders_capacity_not_start_promise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The column is a coarse capacity hint (available/busy) with a queue
+    """The column is a coarse capacity hint (Available/Busy) with a queue
     caveat — never a `Starts: now` scheduling promise the endpoint cannot
     make: discovery only sees pool headroom, not the run's GPU count or
     topology."""
@@ -702,8 +702,8 @@ def test_on_demand_table_renders_capacity_not_start_promise(
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "Capacity" in plain
-    assert "available" in plain
-    assert "busy" in plain
+    assert "Available" in plain
+    assert "Busy" in plain
     # The old immediate-start promise is gone.
     assert "Starts" not in plain
     assert "queued" not in plain
@@ -733,11 +733,41 @@ def test_on_demand_table_caption_rates_lock_at_dispatch(
     plain = strip_ansi(result.output)
     normalized = " ".join(plain.split())
     expected = (
-        "Rate fixed at dispatch; billed per GPU-hour from when pods are "
-        "ready, prorated to the second."
+        "Rates are fixed at dispatch and billed per GPU-hour from pod ready, prorated per second."
     )
     assert expected in normalized
     assert "fixed when the run starts" not in normalized
+
+
+def test_on_demand_footer_lines_are_not_wrapped_to_table_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Footer notes print under the table at console width, not as a caption
+    that Rich wraps to the (much narrower) table width, and share one dim,
+    non-italic style with the dedicated-capacity hint."""
+    entries = [
+        _on_demand_entry("H100_80GB", 2.0),
+        {**_on_demand_entry("B200_180GB", 5.0, available_now=False), "atCapacity": True},
+    ]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+
+    result = CliRunner().invoke(
+        app, ["train", "models"], env={"COLUMNS": "120", "FORCE_COLOR": "1", "TERM": "xterm"}
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = [ln.rstrip() for ln in strip_ansi(result.output).splitlines()]
+    for note in (
+        "Rates are fixed at dispatch and billed per GPU-hour from pod ready, prorated per second.",
+        "Runs may queue depending on GPU count and topology.",
+        _CAPACITY_HINT_LINE,
+    ):
+        assert note in lines
+    # Dim (2) only; italic (3) was the caption style.
+    assert "\x1b[3m" not in result.output
+    assert "\x1b[2;3m" not in result.output
 
 
 @pytest.mark.parametrize("is_beta", [False, True], ids=["stable", "beta"])
@@ -776,14 +806,13 @@ def test_on_demand_table_escapes_promo_markup(monkeypatch: pytest.MonkeyPatch) -
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
-    # Rich may still wrap the caption to the table width, so compare on
-    # whitespace-normalized text.
     assert " ".join(plain.split()).count(" ".join(label.split())) == 1
 
 
 # --- at-capacity GPU types (priced, no inventory) --------------------------
 
 _CAPACITY_HINT = "Contact support@primeintellect.ai for dedicated capacity."
+_CAPACITY_HINT_LINE = f"Need a GPU type that's at capacity? {_CAPACITY_HINT}"
 
 
 def _capacity_line(plain: str, gpu_type: str) -> str:
@@ -831,8 +860,8 @@ def test_at_capacity_entries_render_last_with_one_hint(monkeypatch: pytest.Monke
     assert order == ["H100_80GB", "H200_141GB", "B200_180GB", "GB200_186GB"]
     assert "At capacity" in _capacity_line(plain, "B200_180GB")
     assert "At capacity" in _capacity_line(plain, "GB200_186GB")
-    assert "available" in _capacity_line(plain, "H100_80GB")
-    assert "busy" in _capacity_line(plain, "H200_141GB")
+    assert "Available" in _capacity_line(plain, "H100_80GB")
+    assert "Busy" in _capacity_line(plain, "H200_141GB")
     # Priced types keep their rate even with no inventory.
     assert "$5.00" in _capacity_line(plain, "B200_180GB")
     assert " ".join(plain.split()).count(_CAPACITY_HINT) == 1
@@ -874,9 +903,9 @@ def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyP
 @pytest.mark.parametrize(
     ("flags", "label", "absent"),
     [
-        ({"availableNow": False, "atCapacity": True}, "At capacity", ("available", "busy")),
-        ({"availableNow": False, "atCapacity": False}, "busy", ("available", "At capacity")),
-        ({"availableNow": True, "atCapacity": False}, "available", ("busy", "At capacity")),
+        ({"availableNow": False, "atCapacity": True}, "At capacity", ("Available", "Busy")),
+        ({"availableNow": False, "atCapacity": False}, "Busy", ("Available", "At capacity")),
+        ({"availableNow": True, "atCapacity": False}, "Available", ("Busy", "At capacity")),
     ],
     ids=["at-capacity", "busy", "available"],
 )

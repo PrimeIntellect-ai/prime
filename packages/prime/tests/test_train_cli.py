@@ -1408,6 +1408,8 @@ _BACKEND_CAPACITY_ERROR = (
     "GPU type that `prime train models` does not list as at capacity."
 )
 _BACKEND_DETAIL = "this account has no reserved cluster with that GPU type"
+_OSC8 = re.compile(r"\x1b\]8;[^;]*;([^\x1b]*)\x1b\\")
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _mock_capacity_discovery(monkeypatch, *, reserved: tuple[str, ...] = ()) -> None:
@@ -1457,13 +1459,25 @@ def test_dispatch_on_at_capacity_gpu_replaces_exact_backend_message(
     _mock_capacity_discovery(monkeypatch)
     _fail_create_run(monkeypatch, APIError(_BACKEND_CAPACITY_ERROR))
 
+    from prime_cli.utils import get_console
+
+    # rl.py builds its console at import, before CliRunner's env applies.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console",
+        get_console(force_terminal=True, color_system="standard", width=200),
+    )
+
     result = _dispatch_on(tmp_path, "B200_180GB")
 
     assert result.exit_code == 1, result.output
-    plain = " ".join(result.output.split())
+    targets = [t for t in _OSC8.findall(result.output) if t]
+    assert targets == ["https://frontend.test/dashboard/quotes"]
+    plain = " ".join(_ANSI.sub("", _OSC8.sub("", result.output)).split())
     assert "B200_180GB is at capacity for Hosted Training right now." in plain
-    assert "Request dedicated capacity: https://frontend.test/dashboard/quotes" in plain
-    assert "support@" not in plain
+    assert "Need a GPU type that's at capacity? Request dedicated capacity" in plain
+    assert "support@" not in result.output
     assert _BACKEND_DETAIL not in plain
 
 

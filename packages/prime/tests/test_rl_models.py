@@ -1,6 +1,7 @@
 """Tests for `prime rl models` — focused on price column rendering."""
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -754,21 +755,41 @@ def test_on_demand_footer_lines_are_not_wrapped_to_table_width(
         "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
     )
 
-    result = CliRunner().invoke(
-        app, ["train", "models"], env={"COLUMNS": "120", "FORCE_COLOR": "1", "TERM": "xterm"}
-    )
+    _force_color_console(monkeypatch)
+
+    result = CliRunner().invoke(app, ["train", "models"])
 
     assert result.exit_code == 0, result.output
-    lines = [ln.rstrip() for ln in strip_ansi(result.output).splitlines()]
+    raw_lines = _OSC8.sub("", result.output).splitlines()
+    lines = [strip_ansi(ln).rstrip() for ln in raw_lines]
     for note in (
         "Rates are fixed at dispatch and billed per GPU-hour from pod ready, prorated per second.",
         "Runs may queue depending on GPU count and topology.",
-        _CAPACITY_HINT_LINE,
+        _CAPACITY_HINT,
     ):
-        assert note in lines
-    # Dim (2) only; italic (3) was the caption style.
-    assert "\x1b[3m" not in result.output
-    assert "\x1b[2;3m" not in result.output
+        raw = raw_lines[lines.index(note)]
+        # Dim; never italic, which was the caption style.
+        assert raw.startswith("\x1b[2m"), repr(raw)
+        assert not _ITALIC.search(raw), repr(raw)
+
+
+def test_capacity_hint_links_request_compute_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The link text itself is an underlined OSC 8 hyperlink to the configured
+    frontend's Request Compute page; no raw URL or support email is printed."""
+    entries = [{**_on_demand_entry("B200_180GB", 5.0, available_now=False), "atCapacity": True}]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+    _force_color_console(monkeypatch)
+
+    result = CliRunner().invoke(app, ["train", "models"])
+
+    assert result.exit_code == 0, result.output
+    assert _osc8_targets(result.output) == [_QUOTES_URL]
+    assert "\x1b[2;4mRequest dedicated capacity" in result.output
+    visible = strip_ansi(_OSC8.sub("", result.output))
+    assert _QUOTES_URL not in visible
+    assert "support@" not in result.output
 
 
 @pytest.mark.parametrize("is_beta", [False, True], ids=["stable", "beta"])
@@ -814,8 +835,26 @@ def test_on_demand_table_escapes_promo_markup(monkeypatch: pytest.MonkeyPatch) -
 
 # The URL follows the configured frontend (PRIME_FRONTEND_URL, set above),
 # so staging and dev point at their own Request Compute page.
-_CAPACITY_HINT = "Request dedicated capacity: https://frontend.test/dashboard/quotes"
-_CAPACITY_HINT_LINE = f"Need a GPU type that's at capacity? {_CAPACITY_HINT}"
+_QUOTES_URL = "https://frontend.test/dashboard/quotes"
+_CAPACITY_HINT = "Need a GPU type that's at capacity? Request dedicated capacity"
+_OSC8 = re.compile(r"\x1b\]8;[^;]*;([^\x1b]*)\x1b\\")
+_ITALIC = re.compile(r"\x1b\[(?:[0-9;]*;)?3(?:;[0-9;]*)?m")
+
+
+def _osc8_targets(output: str) -> list[str]:
+    return [target for target in _OSC8.findall(output) if target]
+
+
+def _force_color_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rl.py builds its console at import, before CliRunner's env applies."""
+    from prime_cli.utils import get_console
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console",
+        get_console(force_terminal=True, color_system="standard", width=120),
+    )
 
 
 def _capacity_line(plain: str, gpu_type: str) -> str:
@@ -882,7 +921,7 @@ def test_no_capacity_hint_without_at_capacity_entries(monkeypatch: pytest.Monkey
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "At capacity" not in plain
-    assert "/dashboard/quotes" not in plain
+    assert "Request dedicated capacity" not in plain
 
 
 def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -87,13 +87,11 @@ RL_MODELS_JSON_HELP = json_output_help(
 def print_dedicated_capacity_hint() -> None:
     """Point at the platform's Request Compute page (`/dashboard/quotes`).
 
-    soft_wrap keeps the URL on one logical line so it stays clickable."""
+    The link is an OSC 8 hyperlink, which Rich only emits on a terminal."""
     url = f"{Config().frontend_url}/dashboard/quotes"
     console.print(
-        f"[dim]Need a GPU type that's at capacity? Request dedicated capacity: "
-        f"[link={url}]{rich_escape(url)}[/link][/dim]",
-        soft_wrap=True,
-        highlight=False,
+        "[dim]Need a GPU type that's at capacity? "
+        f"[underline][link={url}]Request dedicated capacity[/link][/underline][/dim]"
     )
 
 

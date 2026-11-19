@@ -242,6 +242,68 @@ def test_train_list_shows_name_column_after_id(monkeypatch) -> None:
     }
 
 
+INJECTED_NAME = "ok\n  Status: COMPLETED\tx\r\ny"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (INJECTED_NAME, "ok Status: COMPLETED x y"),
+        ("a\u2028b\u2029c\u0085d\x00e\x1bf", "a b c d e f"),
+        ("  spaced   out  ", "spaced out"),
+    ],
+)
+def test_single_line_collapses_control_characters(raw, expected) -> None:
+    from prime_cli.commands.rl import _single_line
+
+    assert _single_line(raw) == expected
+
+
+def test_train_list_keeps_names_with_line_breaks_on_one_line(monkeypatch) -> None:
+    _mock_list_runs(
+        monkeypatch,
+        [
+            {**_fake_run_payload("RUNNING", run_id="run-injected"), "name": "ok\n Status:\tX\r\ny"},
+            _fake_run_payload("FAILED", run_id="run-next"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["train", "list"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [
+        cells
+        for line in result.output.splitlines()
+        if (cells := _table_cells(line))[:1] and cells[0].startswith("run-")
+    ]
+    assert [(cells[0], cells[1], cells[2]) for cells in rows] == [
+        ("run-injected", "ok Status: X y", "RUNNING"),
+        ("run-next", "-", "FAILED"),
+    ]
+    # One table line per run: no continuation line carrying a fake status.
+    assert sum("Status: X" in line for line in result.output.splitlines()) == 1
+
+
+def test_train_get_keeps_names_with_line_breaks_on_one_line(monkeypatch) -> None:
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate({**_fake_run_payload("RUNNING"), "name": INJECTED_NAME})
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-1"], env={**TEST_ENV, "COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    lines = [line.strip() for line in result.output.splitlines() if line.strip()]
+    assert lines[1] == "Name: ok Status: COMPLETED x y"
+    assert [line for line in lines if line.startswith("Status:")] == ["Status: RUNNING"]
+
+
 def test_train_list_json_includes_name(monkeypatch) -> None:
     _mock_list_runs(
         monkeypatch,
@@ -560,6 +622,9 @@ def test_train_rename_reports_api_errors(monkeypatch, error, expected_output) ->
         ("", "Run name cannot be empty"),
         ("   ", "Run name cannot be empty"),
         ("x" * 256, "Run name must be at most 255 characters (got 256)"),
+        ("ok\n  Status: COMPLETED", "cannot contain line breaks"),
+        ("a\tb", "cannot contain line breaks"),
+        ("a\u2028b", "cannot contain line breaks"),
     ],
 )
 def test_train_rename_validates_name_locally(monkeypatch, name, expected_output) -> None:

@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import time
+import unicodedata
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
@@ -1019,6 +1020,17 @@ def _render_restarts(run_id: str, restarts: RunRestarts, *, every_failure: bool)
         _print_log_tail(latest.exit_message, LOG_TAIL_LINES)
 
 
+def _is_line_breaking(char: str) -> bool:
+    # Cc covers \t \n \r and U+0085 (NEL); Zl/Zp are U+2028/U+2029.
+    return unicodedata.category(char) in ("Cc", "Zl", "Zp")
+
+
+def _single_line(text: str) -> str:
+    """Collapse control characters and whitespace runs so a server-supplied
+    value can't break a table cell or fake extra `prime train get` lines."""
+    return " ".join("".join(" " if _is_line_breaking(c) else c for c in text).split())
+
+
 def _truncate(text: str, max_width: int) -> str:
     return text if len(text) <= max_width else text[: max_width - 1] + "…"
 
@@ -1033,7 +1045,7 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     if len(env_names) > 3:
         envs_display += f" (+{len(env_names) - 3})"
 
-    name = run.name.strip() if run.name else ""
+    name = _single_line(run.name) if run.name else ""
     return {
         "id": run.id,
         "name": name or "-",
@@ -2111,6 +2123,12 @@ def rename_run(
     name = name.strip()
     if not name:
         console.print("[red]Error:[/red] Run name cannot be empty.")
+        raise typer.Exit(1)
+    if any(_is_line_breaking(c) for c in name):
+        console.print(
+            "[red]Error:[/red] Run name cannot contain line breaks, tabs or other "
+            "control characters."
+        )
         raise typer.Exit(1)
     if len(name) > RUN_NAME_MAX_LENGTH:
         console.print(

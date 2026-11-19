@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import time
+import unicodedata
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
@@ -144,6 +145,7 @@ VOLUME_DEFAULT_SIZE = "5Ti"  # same default as `prime volumes create`
 TERMINAL_RUN_STATUSES = {"STOPPED", "FAILED", "COMPLETED", "PAUSED"}
 
 RUN_NAME_MAX_LENGTH = 255
+LIST_NAME_MAX_WIDTH = 24
 
 # Log level colors for rich console
 LEVEL_STYLES = {
@@ -1025,6 +1027,21 @@ def _render_restarts(run_id: str, restarts: RunRestarts, *, every_failure: bool)
         _print_log_tail(latest.exit_message, LOG_TAIL_LINES)
 
 
+def _is_line_breaking(char: str) -> bool:
+    # Cc covers \t \n \r and U+0085 (NEL); Zl/Zp are U+2028/U+2029.
+    return unicodedata.category(char) in ("Cc", "Zl", "Zp")
+
+
+def _single_line(text: str) -> str:
+    """Collapse control characters and whitespace runs so a server-supplied
+    value can't break a table cell or fake extra `prime train get` lines."""
+    return " ".join("".join(" " if _is_line_breaking(c) else c for c in text).split())
+
+
+def _truncate(text: str, max_width: int) -> str:
+    return text if len(text) <= max_width else text[: max_width - 1] + "…"
+
+
 def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     created_at = run.created_at.strftime("%Y-%m-%d %H:%M") if run.created_at else ""
     env_names = [
@@ -1035,8 +1052,10 @@ def _format_run_for_display(run: RLRun) -> Dict[str, Any]:
     if len(env_names) > 3:
         envs_display += f" (+{len(env_names) - 3})"
 
+    name = _single_line(run.name) if run.name else ""
     return {
         "id": run.id,
+        "name": name or "-",
         "status": run.status,
         "model": run.base_model or "-",
         "environments": envs_display,
@@ -1741,6 +1760,7 @@ def _list_runs_impl(
 
         table = Table(title="Hosted Training Runs")
         table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Name")
         table.add_column("Status", style="bold")
         table.add_column("Model", style="magenta")
         table.add_column("Environments", style="green")
@@ -1753,6 +1773,13 @@ def _list_runs_impl(
             status_color = _get_status_color(run.status)
             table.add_row(
                 formatted["id"],
+                # A no_wrap Text in a wrapable column: Rich can still shrink the
+                # column to fit the terminal, but the name stays on one line.
+                Text(
+                    _truncate(formatted["name"], LIST_NAME_MAX_WIDTH),
+                    no_wrap=True,
+                    overflow="ellipsis",
+                ),
                 f"[{status_color}]{formatted['status']}[/{status_color}]",
                 formatted["model"][:30],
                 formatted["environments"],
@@ -1827,6 +1854,7 @@ def get_run(
         status_color = _get_status_color(run.status)
 
         console.print(f"[bold]Run {run_id}[/bold]\n")
+        console.print(f"  Name: {rich_escape(formatted['name'])}")
         status_text = run.status
         if run.status == "QUEUED" and run.runs_ahead is not None:
             status_text += f" (~{run.runs_ahead} runs ahead)"
@@ -2099,6 +2127,12 @@ def rename_run(
     name = name.strip()
     if not name:
         console.print("[red]Error:[/red] Run name cannot be empty.")
+        raise typer.Exit(1)
+    if any(_is_line_breaking(c) for c in name):
+        console.print(
+            "[red]Error:[/red] Run name cannot contain line breaks, tabs or other "
+            "control characters."
+        )
         raise typer.Exit(1)
     if len(name) > RUN_NAME_MAX_LENGTH:
         console.print(

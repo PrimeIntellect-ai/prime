@@ -251,6 +251,36 @@ The SDK looks for credentials in this order:
 2. **Environment variable**: `export PRIME_API_KEY="sk-..."`
 3. **Config file**: `~/.prime/config.json` (created by `prime login` CLI command)
 
+### Isolated backend clients
+
+Use explicit configuration when a backend serves multiple owners. This skips
+Prime's home directory, CLI profiles, and `PRIME_*` configuration variables.
+`team_id=None` stays personal even when the process has a configured team.
+Gateway tokens remain in the individual client's memory:
+
+```python
+from prime_sandboxes import AsyncSandboxClient, Config
+
+config = Config.from_values(
+    api_key=owner_api_key,
+    base_url="https://api.primeintellect.ai",
+    team_id=None,
+)
+async with AsyncSandboxClient(config=config, persist_auth_cache=False) as client:
+    sandbox = await client.get(sandbox_id)
+```
+
+For synchronous use, pass `APIClient(config=config)` to
+`SandboxClient(api_client, persist_auth_cache=False)`. `AsyncAPIClient` also
+accepts `config=`. Pass either `api_key=` or `config=`, never both.
+
+Explicit configs require a nonempty API key and base URL and have no profile
+directory. Using one with the default `persist_auth_cache=True` raises
+`ValueError`; it never falls back to a shared disk cache. Memory-only caches
+retain automatic expiry, refresh, and concurrent-request coalescing. Existing
+constructors keep their CLI/environment lookup and persistent-cache defaults.
+HTTP libraries' proxy and TLS environment handling is unchanged.
+
 ## Advanced Features
 
 ### Environment Variables and Secrets

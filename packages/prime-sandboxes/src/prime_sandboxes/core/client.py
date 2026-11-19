@@ -112,8 +112,12 @@ class APIClient:
         api_key: Optional[str] = None,
         require_auth: bool = True,
         user_agent: Optional[str] = None,
+        *,
+        config: Optional[Config] = None,
     ):
-        self.config = Config()
+        if api_key is not None and config is not None:
+            raise ValueError("Pass either api_key or config, not both")
+        self.config = config if config is not None else Config()
         self.api_key = api_key or self.config.api_key
         self.require_auth = require_auth
         self.base_url = self.config.base_url
@@ -278,8 +282,12 @@ class AsyncAPIClient:
         api_key: Optional[str] = None,
         require_auth: bool = True,
         user_agent: Optional[str] = None,
+        *,
+        config: Optional[Config] = None,
     ):
-        self.config = Config()
+        if api_key is not None and config is not None:
+            raise ValueError("Pass either api_key or config, not both")
+        self.config = config if config is not None else Config()
         self.api_key = api_key or self.config.api_key
         self.require_auth = require_auth
         self.base_url = self.config.base_url

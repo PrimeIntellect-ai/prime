@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import (
     Any,
     Awaitable,
@@ -54,7 +55,7 @@ from tenacity import (
 )
 
 from ._connectrpc import GOOGLE_PROTOBUF_BINARY_CODEC, raise_if_cancelled
-from .core import APIClient, APIError, AsyncAPIClient
+from .core import APIClient, APIError, AsyncAPIClient, Config
 from .core.client import _RateLimitAwareWait
 from .exceptions import (
     BatchStatusUnsupportedError,
@@ -2121,6 +2122,14 @@ def _auth_refresh_cutoff(auth_info: Dict[str, Any]) -> datetime:
     return expires_at - timedelta(seconds=AUTH_REFRESH_MARGIN_SECONDS)
 
 
+def _auth_cache_file(config: Config, persist: bool) -> Optional[Path]:
+    if not persist:
+        return None
+    if config.config_dir is None:
+        raise ValueError("Explicit config requires persist_auth_cache=False")
+    return config.config_dir / "sandbox_auth_cache.json"
+
+
 def _write_auth_cache(cache_file: Any, data: str) -> None:
     cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with os.fdopen(os.open(cache_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
@@ -2168,12 +2177,16 @@ class SandboxAuthCache:
         self.client = client
         self._lock = threading.Lock()
         self._inflight: Dict[str, threading.Event] = {}
-        self._auth_cache, needs_save = _load_auth_cache(self._cache_file)
+        self._auth_cache, needs_save = (
+            _load_auth_cache(self._cache_file) if self._cache_file is not None else ({}, False)
+        )
         if needs_save:
             self._save_cache()
 
     def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
+        if self._cache_file is None:
+            return
         try:
             _write_auth_cache(self._cache_file, json.dumps(self._auth_cache))
         except Exception:
@@ -2247,7 +2260,7 @@ class AsyncSandboxAuthCache:
         self._lock = asyncio.Lock()
         self._inflight: Dict[str, asyncio.Event] = {}
         self._auth_cache: Dict[str, Any] = {}
-        self._loaded = False
+        self._loaded = cache_file_path is None
 
     async def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -2259,6 +2272,8 @@ class AsyncSandboxAuthCache:
 
     async def _save_cache(self) -> None:
         """Write current in-memory cache to disk. Must be called under self._lock."""
+        if self._cache_file is None:
+            return
         data = json.dumps(self._auth_cache)
         try:
             await asyncio.to_thread(_write_auth_cache, self._cache_file, data)
@@ -2364,6 +2379,7 @@ class SandboxClient:
         self,
         api_client: APIClient,
         *,
+        persist_auth_cache: bool = True,
         background_job_output_concurrency: int = MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS,
         background_job_output_queue_size: int = MAX_PENDING_BACKGROUND_JOB_OUTPUTS,
         background_job_output_cache_bytes: int = BACKGROUND_JOB_OUTPUT_CACHE_BYTES,
@@ -2375,7 +2391,7 @@ class SandboxClient:
         )
         self.client = api_client
         self._auth_cache = SandboxAuthCache(
-            self.client.config.config_dir / "sandbox_auth_cache.json",
+            _auth_cache_file(self.client.config, persist_auth_cache),
             self.client,
         )
         self._operation_leases = _SyncPollLeaseRegistry()
@@ -4308,6 +4324,8 @@ class AsyncSandboxClient:
         max_connections: int = 1000,
         max_keepalive_connections: int = 200,
         *,
+        config: Optional[Config] = None,
+        persist_auth_cache: bool = True,
         background_job_output_concurrency: int = MAX_CONCURRENT_BACKGROUND_JOB_OUTPUT_READS,
         background_job_output_queue_size: int = MAX_PENDING_BACKGROUND_JOB_OUTPUTS,
         background_job_output_cache_bytes: int = BACKGROUND_JOB_OUTPUT_CACHE_BYTES,
@@ -4316,6 +4334,9 @@ class AsyncSandboxClient:
 
         Args:
             api_key: Optional API key (reads from config if not provided)
+            config: Explicit or profile config; mutually exclusive with api_key
+            persist_auth_cache: Save gateway tokens to the profile directory. Must
+                be False with Config.from_values(); tokens then stay in memory.
             max_connections: Maximum number of concurrent connections (default: 1000)
             max_keepalive_connections: Maximum keep-alive connections (default: 200)
             background_job_output_concurrency: Maximum completed jobs downloading output at once
@@ -4327,9 +4348,12 @@ class AsyncSandboxClient:
             background_job_output_queue_size,
             background_job_output_cache_bytes,
         )
-        self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent())
+        if config is not None:
+            # Reject incompatible cache settings before allocating the HTTP client.
+            _auth_cache_file(config, persist_auth_cache)
+        self.client = AsyncAPIClient(api_key=api_key, user_agent=_build_user_agent(), config=config)
         self._auth_cache = AsyncSandboxAuthCache(
-            self.client.config.config_dir / "sandbox_auth_cache.json",
+            _auth_cache_file(self.client.config, persist_auth_cache),
             self.client,
         )
         # Connection pool configuration

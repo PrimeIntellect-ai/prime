@@ -10,22 +10,52 @@ from typing import Optional
 class Config:
     """Minimal configuration class for SDK packages.
 
-    Reads from ~/.prime/config.json and environment variables.
-    This is a simplified version that doesn't write configs.
+    Config() reads from ~/.prime/config.json and environment variables.
+    from_values() uses only the supplied values. Neither writes config files.
     """
 
     DEFAULT_BASE_URL: str = "https://api.primeintellect.ai"
 
     def __init__(self) -> None:
-        self.config_dir = Path.home() / ".prime"
-        self.config_file = self.config_dir / "config.json"
-        self.environments_dir = self.config_dir / "environments"
+        self._explicit = False
+        self.config_dir: Optional[Path] = Path.home() / ".prime"
+        self.config_file: Optional[Path] = self.config_dir / "config.json"
+        self.environments_dir: Optional[Path] = self.config_dir / "environments"
         self._load_config()
         self._load_context()
 
+    @classmethod
+    def from_values(
+        cls,
+        *,
+        api_key: str,
+        base_url: str,
+        team_id: Optional[str] = None,
+    ) -> "Config":
+        """Resolve explicit values without reading the environment or local profiles.
+
+        ``team_id=None`` means personal scope. This config has no filesystem
+        directory; sandbox clients must use ``persist_auth_cache=False``.
+        """
+        if not api_key.strip():
+            raise ValueError("An explicit API key is required")
+        if not base_url.strip():
+            raise ValueError("An explicit API base URL is required")
+        config = cls.__new__(cls)
+        config._explicit = True
+        config.config_dir = None
+        config.config_file = None
+        config.environments_dir = None
+        config.config = {
+            "api_key": api_key,
+            "base_url": cls._strip_api_v1(base_url),
+            "team_id": team_id or None,
+        }
+        return config
+
     def _load_config(self) -> None:
         """Load configuration from file"""
-        if self.config_file.exists():
+        if self.config_file is not None and self.config_file.exists():
             try:
                 config_data = json.loads(self.config_file.read_text())
                 self.config = config_data
@@ -54,6 +84,7 @@ class Config:
         if re.fullmatch(r"[a-zA-Z0-9_-]+", context) is None:
             raise ValueError(f"Invalid context name: {context!r}")
 
+        assert self.environments_dir is not None
         environment_file = self.environments_dir / f"{context}.json"
         if not environment_file.exists():
             raise ValueError(f"Context file not found: {environment_file}")
@@ -72,6 +103,8 @@ class Config:
     @property
     def api_key(self) -> str:
         """Get API key with precedence: env > file > empty."""
+        if self._explicit:
+            return self.config["api_key"]
         return os.getenv("PRIME_API_KEY") or self.config.get("api_key", "")
 
     @property
@@ -82,6 +115,8 @@ class Config:
         fall back to the file's team, and must never leak onto the wire as
         ``teamId: ""``.
         """
+        if self._explicit:
+            return self.config["team_id"]
         team_id = os.getenv("PRIME_TEAM_ID")
         if team_id is not None:
             return team_id or None
@@ -90,6 +125,8 @@ class Config:
     @property
     def user_id(self) -> Optional[str]:
         """Get user ID with precedence: env > file > None."""
+        if self._explicit:
+            return None
         user_id = os.getenv("PRIME_USER_ID")
         if user_id is not None:
             return user_id
@@ -98,6 +135,8 @@ class Config:
     @property
     def base_url(self) -> str:
         """Get API base URL with precedence: env > file > default."""
+        if self._explicit:
+            return self.config["base_url"]
         env_val = os.getenv("PRIME_API_BASE_URL") or os.getenv("PRIME_BASE_URL")
         if env_val:
             return self._strip_api_v1(env_val)

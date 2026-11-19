@@ -1244,7 +1244,7 @@ def test_logs_on_ended_run_points_at_all(
     result = CliRunner().invoke(app, args, env={"COLUMNS": "200"})
 
     assert result.exit_code == 1, result.output
-    out = " ".join(result.output.split())
+    out = " ".join(_plain(result.output).split())
     assert f"Error: {ENDED_MESSAGE}" in out
     assert "404" not in out
     assert out.count("Error:") == 1
@@ -1256,7 +1256,7 @@ def test_logs_without_logs_on_live_run_keeps_api_error(monkeypatch: pytest.Monke
     result = CliRunner().invoke(app, ["train", "logs", RUN_ID], env={"COLUMNS": "200"})
 
     assert result.exit_code == 1, result.output
-    out = " ".join(result.output.split())
+    out = " ".join(_plain(result.output).split())
     assert "has ended" not in out
     assert "No logs available for run" in out
 
@@ -1271,7 +1271,7 @@ def test_logs_for_unknown_run_keeps_not_found(monkeypatch: pytest.MonkeyPatch) -
     result = CliRunner().invoke(app, ["train", "logs", RUN_ID], env={"COLUMNS": "200"})
 
     assert result.exit_code == 1, result.output
-    out = " ".join(result.output.split())
+    out = " ".join(_plain(result.output).split())
     assert f"Run {RUN_ID} not found" in out
     assert "has ended" not in out
     assert calls == [f"/rft/runs/{RUN_ID}/logs"]
@@ -1283,6 +1283,6 @@ def test_logs_keeps_api_error_when_status_lookup_fails(monkeypatch: pytest.Monke
     result = CliRunner().invoke(app, ["train", "logs", RUN_ID], env={"COLUMNS": "200"})
 
     assert result.exit_code == 1, result.output
-    out = " ".join(result.output.split())
+    out = " ".join(_plain(result.output).split())
     assert "has ended" not in out
     assert "No logs available for run" in out

@@ -1,6 +1,7 @@
 """Tests for `prime rl models` — focused on price column rendering."""
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from typer.testing import CliRunner
 def _api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_FRONTEND_URL", "https://frontend.test/")
 
 
 def _fft_models_payload() -> dict[str, Any]:
@@ -685,7 +687,7 @@ def test_on_demand_only_discovery_renders_no_empty_banner(
 def test_on_demand_table_renders_capacity_not_start_promise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The column is a coarse capacity hint (available/busy) with a queue
+    """The column is a coarse capacity hint (Available/Busy) with a queue
     caveat — never a `Starts: now` scheduling promise the endpoint cannot
     make: discovery only sees pool headroom, not the run's GPU count or
     topology."""
@@ -702,8 +704,8 @@ def test_on_demand_table_renders_capacity_not_start_promise(
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "Capacity" in plain
-    assert "available" in plain
-    assert "busy" in plain
+    assert "Available" in plain
+    assert "Busy" in plain
     # The old immediate-start promise is gone.
     assert "Starts" not in plain
     assert "queued" not in plain
@@ -733,11 +735,61 @@ def test_on_demand_table_caption_rates_lock_at_dispatch(
     plain = strip_ansi(result.output)
     normalized = " ".join(plain.split())
     expected = (
-        "Rate fixed at dispatch; billed per GPU-hour from when pods are "
-        "ready, prorated to the second."
+        "Rates are fixed at dispatch and billed per GPU-hour from pod ready, prorated per second."
     )
     assert expected in normalized
     assert "fixed when the run starts" not in normalized
+
+
+def test_on_demand_footer_lines_are_not_wrapped_to_table_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Footer notes print under the table at console width, not as a caption
+    that Rich wraps to the (much narrower) table width, and share one dim,
+    non-italic style with the dedicated-capacity hint."""
+    entries = [
+        _on_demand_entry("H100_80GB", 2.0),
+        {**_on_demand_entry("B200_180GB", 5.0, available_now=False), "atCapacity": True},
+    ]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+
+    _force_color_console(monkeypatch)
+
+    result = CliRunner().invoke(app, ["train", "models"])
+
+    assert result.exit_code == 0, result.output
+    raw_lines = _OSC8.sub("", result.output).splitlines()
+    lines = [strip_ansi(ln).rstrip() for ln in raw_lines]
+    for note in (
+        "Rates are fixed at dispatch and billed per GPU-hour from pod ready, prorated per second.",
+        "Runs may queue depending on GPU count and topology.",
+        _CAPACITY_HINT,
+    ):
+        raw = raw_lines[lines.index(note)]
+        # Dim; never italic, which was the caption style.
+        assert raw.startswith("\x1b[2m"), repr(raw)
+        assert not _ITALIC.search(raw), repr(raw)
+
+
+def test_capacity_hint_links_request_compute_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The link text itself is an underlined OSC 8 hyperlink to the configured
+    frontend's Request Compute page; no raw URL or support email is printed."""
+    entries = [{**_on_demand_entry("B200_180GB", 5.0, available_now=False), "atCapacity": True}]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+    _force_color_console(monkeypatch)
+
+    result = CliRunner().invoke(app, ["train", "models"])
+
+    assert result.exit_code == 0, result.output
+    assert _osc8_targets(result.output) == [_QUOTES_URL]
+    assert "\x1b[2;4mRequest dedicated capacity" in result.output
+    visible = strip_ansi(_OSC8.sub("", result.output))
+    assert _QUOTES_URL not in visible
+    assert "support@" not in result.output
 
 
 @pytest.mark.parametrize("is_beta", [False, True], ids=["stable", "beta"])
@@ -776,14 +828,33 @@ def test_on_demand_table_escapes_promo_markup(monkeypatch: pytest.MonkeyPatch) -
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
-    # Rich may still wrap the caption to the table width, so compare on
-    # whitespace-normalized text.
     assert " ".join(plain.split()).count(" ".join(label.split())) == 1
 
 
 # --- at-capacity GPU types (priced, no inventory) --------------------------
 
-_CAPACITY_HINT = "Contact support@primeintellect.ai for dedicated capacity."
+# The URL follows the configured frontend (PRIME_FRONTEND_URL, set above),
+# so staging and dev point at their own Request Compute page.
+_QUOTES_URL = "https://frontend.test/dashboard/quotes"
+_CAPACITY_HINT = "Need a GPU type that's at capacity? Request dedicated capacity"
+_OSC8 = re.compile(r"\x1b\]8;[^;]*;([^\x1b]*)\x1b\\")
+_ITALIC = re.compile(r"\x1b\[(?:[0-9;]*;)?3(?:;[0-9;]*)?m")
+
+
+def _osc8_targets(output: str) -> list[str]:
+    return [target for target in _OSC8.findall(output) if target]
+
+
+def _force_color_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rl.py builds its console at import, before CliRunner's env applies."""
+    from prime_cli.utils import get_console
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console",
+        get_console(force_terminal=True, color_system="standard", width=120),
+    )
 
 
 def _capacity_line(plain: str, gpu_type: str) -> str:
@@ -831,11 +902,12 @@ def test_at_capacity_entries_render_last_with_one_hint(monkeypatch: pytest.Monke
     assert order == ["H100_80GB", "H200_141GB", "B200_180GB", "GB200_186GB"]
     assert "At capacity" in _capacity_line(plain, "B200_180GB")
     assert "At capacity" in _capacity_line(plain, "GB200_186GB")
-    assert "available" in _capacity_line(plain, "H100_80GB")
-    assert "busy" in _capacity_line(plain, "H200_141GB")
+    assert "Available" in _capacity_line(plain, "H100_80GB")
+    assert "Busy" in _capacity_line(plain, "H200_141GB")
     # Priced types keep their rate even with no inventory.
     assert "$5.00" in _capacity_line(plain, "B200_180GB")
     assert " ".join(plain.split()).count(_CAPACITY_HINT) == 1
+    assert "support@" not in plain
 
 
 def test_no_capacity_hint_without_at_capacity_entries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -849,7 +921,7 @@ def test_no_capacity_hint_without_at_capacity_entries(monkeypatch: pytest.Monkey
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "At capacity" not in plain
-    assert "support@primeintellect.ai" not in plain
+    assert "Request dedicated capacity" not in plain
 
 
 def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -874,9 +946,9 @@ def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyP
 @pytest.mark.parametrize(
     ("flags", "label", "absent"),
     [
-        ({"availableNow": False, "atCapacity": True}, "At capacity", ("available", "busy")),
-        ({"availableNow": False, "atCapacity": False}, "busy", ("available", "At capacity")),
-        ({"availableNow": True, "atCapacity": False}, "available", ("busy", "At capacity")),
+        ({"availableNow": False, "atCapacity": True}, "At capacity", ("Available", "Busy")),
+        ({"availableNow": False, "atCapacity": False}, "Busy", ("Available", "At capacity")),
+        ({"availableNow": True, "atCapacity": False}, "Available", ("Busy", "At capacity")),
     ],
     ids=["at-capacity", "busy", "available"],
 )

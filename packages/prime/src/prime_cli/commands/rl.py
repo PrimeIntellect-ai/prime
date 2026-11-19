@@ -83,10 +83,17 @@ RL_MODELS_JSON_HELP = json_output_help(
     "false means 'not enrolled', absent means the backend did not report it",
 )
 
-DEDICATED_CAPACITY_HINT = (
-    "[dim]Need a GPU type that is at capacity? Contact support@primeintellect.ai "
-    "for dedicated capacity.[/dim]"
-)
+
+def print_dedicated_capacity_hint() -> None:
+    """Point at the platform's Request Compute page (`/dashboard/quotes`).
+
+    The link is an OSC 8 hyperlink, which Rich only emits on a terminal."""
+    url = f"{Config().frontend_url}/dashboard/quotes"
+    console.print(
+        "[dim]Need a GPU type that's at capacity? "
+        f"[underline][link={url}]Request dedicated capacity[/link][/underline][/dim]"
+    )
+
 
 # The platform's launch rejection reads "<type> is at capacity ...".
 _PLACEMENT_FAILURE = re.compile(r"\bat capacity\b", re.IGNORECASE)
@@ -1447,11 +1454,7 @@ def _render_fft_models_table(fft_models: list) -> None:
     those into a single row with cluster+GPU joined so the table stays
     scannable when a large model is warm everywhere.
     """
-    table = Table(
-        title="Models",
-        title_justify="left",
-        caption_justify="left",
-    )
+    table = Table(title="Models", title_justify="left")
     table.add_column("Model", style="cyan")
     table.add_column("GPU Type(s)", style="magenta")
 
@@ -1462,8 +1465,8 @@ def _render_fft_models_table(fft_models: list) -> None:
             ", ".join(gpu_types) or "-",
         )
 
-    table.caption = "[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]"
     console.print(table)
+    console.print("[dim]Models pre-cached on clusters you can dispatch FFT runs to.[/dim]")
 
 
 def _render_on_demand_table(on_demand: list) -> None:
@@ -1477,14 +1480,16 @@ def _render_on_demand_table(on_demand: list) -> None:
     pool headroom for the GPU type — a coarse capacity hint, not an
     admission decision: whether a run starts or queues also depends on
     its GPU count and topology, which the discovery endpoint knows
-    nothing about. Hence a `Capacity` column (available/busy) plus a
+    nothing about. Hence a `Capacity` column (Available/Busy) plus a
     queue caveat, never a start-time promise.
+
+    Notes are printed under the table rather than as its caption, which
+    Rich wraps to the table's width and styles italic.
     """
     beta = any(entry.is_beta for entry in on_demand)
     table = Table(
         title="On-Demand Capacity" + (" [yellow](beta)[/yellow]" if beta else ""),
         title_justify="left",
-        caption_justify="left",
     )
     table.add_column("GPU Type", style="magenta")
     table.add_column("$/GPU-hr", style="green", justify="right")
@@ -1495,28 +1500,27 @@ def _render_on_demand_table(on_demand: list) -> None:
         if entry.at_capacity:
             capacity = "[dim]At capacity[/dim]"
         elif entry.available_now:
-            capacity = "[green]available[/green]"
+            capacity = "[green]Available[/green]"
         else:
-            capacity = "[yellow]busy[/yellow]"
+            capacity = "[yellow]Busy[/yellow]"
         table.add_row(entry.gpu_type, f"${entry.price_per_gpu_hour:.2f}", capacity)
         if entry.discount_label:
             promos.append(entry.discount_label)
 
-    # The rate is snapshotted at dispatch (queue promotion reuses it),
-    # while billable time only starts once pods are ready — two different
-    # events the old caption conflated into "when the run starts".
-    caption = [
-        "[dim]Rate fixed at dispatch; billed per GPU-hour from when pods "
-        "are ready, prorated to the second.[/dim]",
-        "[dim]Runs may queue depending on GPU count and topology.[/dim]",
-    ]
+    console.print(table)
     if promos:
         joined = ", ".join(rich_escape(label) for label in sorted(set(promos)))
-        caption.append(f"[bold yellow]{joined}[/bold yellow]")
-    table.caption = "\n".join(caption)
-    console.print(table)
+        console.print(f"[bold yellow]{joined}[/bold yellow]")
+    # The rate is snapshotted at dispatch (queue promotion reuses it),
+    # while billable time only starts once pods are ready — two different
+    # events, not "when the run starts".
+    console.print(
+        "[dim]Rates are fixed at dispatch and billed per GPU-hour from pod ready, "
+        "prorated per second.[/dim]"
+    )
+    console.print("[dim]Runs may queue depending on GPU count and topology.[/dim]")
     if any(entry.at_capacity for entry in on_demand):
-        console.print(DEDICATED_CAPACITY_HINT)
+        print_dedicated_capacity_hint()
 
 
 def _at_capacity_rejection(
@@ -1561,7 +1565,7 @@ def _report_dispatch_error(
     else:
         console.print(f"[red]Error:[/red] {rich_escape(detail)}")
         console.print(f"[dim]Note: {gpu} is also at capacity right now.[/dim]")
-    console.print(DEDICATED_CAPACITY_HINT)
+    print_dedicated_capacity_hint()
 
 
 @app.command("gpus", rich_help_panel="Commands")

@@ -133,7 +133,7 @@ class OnDemandGpuTypeAvailability(BaseModel):
     GPU type, never that this run will start now — actual placement also
     needs headroom for the run's GPU count and topology, which the
     discovery endpoint knows nothing about (and the backend's physical
-    free capacity can even be unknown). Rendered as available/busy with a
+    free capacity can even be unknown). Rendered as Available/Busy with a
     queue caveat, never a start-time promise.
 
     `at_capacity` marks a GPU type that is priced but has no inventory at

@@ -226,14 +226,15 @@ prime sandbox volumes create data --from ~/datasets/my-data
 prime sandbox delete <sandbox-id>
 ```
 
-`prime sandbox fork` pauses the source briefly, creates a new sandbox that
-continues its memory and disk, then resumes the source. The fork keeps the
-paused sandbox's shape, environment, and secrets. It is an exact copy of the
-paused guest: userspace random generators and keys, tokens, or IDs already in
-memory are the same in every fork, so rekey or regenerate them in the workload.
-GPU sandboxes and sandboxes with volumes cannot be paused, so they cannot be
-forked this way. For a disk-only copy, use `prime sandbox checkpoint create`
-and `prime sandbox checkpoint restore`.
+`prime sandbox fork` pauses the source for the memory snapshot, creates a new
+sandbox that continues its memory and disk, then requests the source's resume,
+which completes asynchronously (`prime sandbox get` shows when it runs again).
+The fork keeps the paused sandbox's shape, environment, and secrets. It is an
+exact copy of the paused guest: userspace random generators and keys, tokens, or
+IDs already in memory are the same in every fork, so rekey or regenerate them in
+the workload. GPU sandboxes and sandboxes with volumes cannot be paused, so they
+cannot be forked this way. For a disk-only copy, use
+`prime sandbox checkpoint create` and `prime sandbox checkpoint restore`.
 
 Volume writes are private to a sandbox until a publish reaches DURABLE
 and its merge finishes. A

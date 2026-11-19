@@ -227,14 +227,21 @@ def test_fork_command_forks_with_memory(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.fork", fork)
 
-    result = runner.invoke(
+    prompted = runner.invoke(
         app, ["sandbox", "fork", "sbx-1", "--timeout-minutes", "30"], input="y\n"
     )
+    assert prompted.exit_code == 0, prompted.output
+    assert "paused for the memory snapshot, then resumed asynchronously" in " ".join(
+        strip_ansi(prompted.output).split()
+    )
+    assert "forked-1" in prompted.output
 
-    assert result.exit_code == 0, result.output
-    assert "paused briefly, then resumed" in " ".join(strip_ansi(result.output).split())
-    assert calls == [("sbx-1", {"name": "box-fork", "timeout_minutes": 30, "timeout_seconds": 300})]
-    assert "forked-1" in result.output
+    skipped = runner.invoke(app, ["sandbox", "fork", "sbx-1", "-y"])
+    assert skipped.exit_code == 0, skipped.output
+    assert calls == [
+        ("sbx-1", {"name": "box-fork", "timeout_minutes": 30, "timeout_seconds": 300}),
+        ("sbx-1", {"name": "box-fork", "timeout_minutes": None, "timeout_seconds": 300}),
+    ]
 
 
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:

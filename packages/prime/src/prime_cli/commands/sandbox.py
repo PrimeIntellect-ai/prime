@@ -1109,7 +1109,7 @@ def fork(
         sandbox_name = name or f"{source.name}-fork"
         prompt = (
             f"Fork sandbox {sandbox_id} into {sandbox_name}? "
-            "The source is paused briefly, then resumed."
+            "The source is paused for the memory snapshot, then resumed asynchronously."
         )
         if not confirm_or_skip(prompt, yes, default=True):
             return

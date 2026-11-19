@@ -2,6 +2,7 @@
 
 import asyncio
 import errno
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +10,6 @@ from types import SimpleNamespace
 from typing import Any, Optional, cast
 
 import pytest
-
 from prime_sandboxes import BatchStatusUnsupportedError
 from prime_sandboxes.core.client import APIClient, APIError
 from prime_sandboxes.exceptions import SandboxNotRunningError
@@ -31,6 +31,15 @@ def _job(sandbox_id: str, job_id: str) -> BackgroundJob:
         stderr_log_file=f"/tmp/job_{job_id}.stderr.log",
         exit_file=f"/tmp/job_{job_id}.exit",
     )
+
+
+def _live_probe(_sandbox_id: str, command: str, **_kwargs: Any) -> CommandResponse:
+    ids = re.findall(r"printf '%s %s\\n' ([0-9a-f]{8})", command)
+    return CommandResponse(stdout="".join(f"{job_id} \n" for job_id in ids), stderr="", exit_code=0)
+
+
+async def _async_live_probe(*args: Any, **kwargs: Any) -> CommandResponse:
+    return _live_probe(*args, **kwargs)
 
 
 class _SyncPlatformClient:
@@ -419,6 +428,7 @@ def test_sync_get_background_jobs_uses_one_platform_batch_across_vm_sandboxes() 
     client.client.client.close()
     platform = _SyncBackgroundJobPlatformClient()
     cast(Any, client).client = platform
+    cast(Any, client).execute_command = _live_probe
 
     def read_file(
         _sandbox_id: str,
@@ -469,8 +479,8 @@ def test_sync_background_batch_capability_falls_back_once_per_client() -> None:
     platform = _SyncUnsupportedPlatformClient()
     cast(Any, client).client = platform
     cast(Any, client)._auth_cache = _SyncVMAuthCache()
-    cast(Any, client)._get_background_job_status_unleased = (
-        lambda sandbox_id, job, timeout=None: BackgroundJobStatusSnapshot(
+    cast(Any, client)._get_background_job_status_unleased = lambda sandbox_id, job, timeout=None: (
+        BackgroundJobStatusSnapshot(
             sandbox_id=sandbox_id,
             job_id=job.job_id,
             completed=False,
@@ -490,6 +500,7 @@ def test_concurrent_sync_background_waiters_share_one_platform_batch() -> None:
     client.client.client.close()
     platform = _SyncBackgroundJobPlatformClient()
     cast(Any, client).client = platform
+    cast(Any, client).execute_command = _live_probe
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
@@ -517,6 +528,7 @@ def test_sync_background_batch_errors_only_fail_the_matching_waiter() -> None:
     client.client.client.close()
     platform = _SyncBackgroundJobPlatformClient(error_job_id="cafebabe")
     cast(Any, client).client = platform
+    cast(Any, client).execute_command = _live_probe
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         running = executor.submit(
@@ -541,6 +553,7 @@ async def test_async_get_background_jobs_uses_one_platform_batch() -> None:
     await client.client.aclose()
     platform = _AsyncBackgroundJobPlatformClient()
     cast(Any, client).client = platform
+    cast(Any, client).execute_command = _async_live_probe
     try:
         statuses = await client.get_background_jobs(
             [_job("sandbox-a", "deadbeef"), _job("sandbox-b", "feedface")]
@@ -678,6 +691,7 @@ async def test_concurrent_async_background_waiters_share_one_platform_batch() ->
     await client.client.aclose()
     platform = _AsyncBackgroundJobPlatformClient()
     cast(Any, client).client = platform
+    cast(Any, client).execute_command = _async_live_probe
     try:
         statuses = await asyncio.gather(
             cast(Any, client)._background_job_status_batcher.get(("sandbox-a", "deadbeef")),
@@ -700,6 +714,7 @@ async def test_async_background_batch_errors_only_fail_the_matching_waiter() -> 
     await client.client.aclose()
     platform = _AsyncBackgroundJobPlatformClient(error_job_id="cafebabe")
     cast(Any, client).client = platform
+    cast(Any, client).execute_command = _async_live_probe
     try:
         results = await asyncio.gather(
             cast(Any, client)._background_job_status_batcher.get(("sandbox-a", "deadbeef")),

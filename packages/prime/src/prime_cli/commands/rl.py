@@ -69,7 +69,7 @@ RESTARTS_SHOWN = 3
 LOG_TAIL_LINES = 10
 
 RL_DISPATCH_JSON_HELP = json_output_help(
-    ".run = {runId, sourceRef?, onDemand?, gpuType?, pricePerGpuHour?, "
+    ".run = {runId, sourceRef?, clusterId?, onDemand?, gpuType?, pricePerGpuHour?, "
     "estimatedCostPerHour?, isBeta?}",
 )
 
@@ -82,6 +82,8 @@ RL_MODELS_JSON_HELP = json_output_help(
     # priced but no inventory at all; listed after the sellable types.
     ".on_demand_beta_access? = true | false — known on-demand beta enrollment; "
     "false means 'not enrolled', absent means the backend did not report it",
+    ".clusters[]? = {cluster_id, cluster_name, gpu_type?, on_demand} — clusters "
+    "`--cluster-id` accepts; absent when the backend predates cluster pinning",
 )
 
 
@@ -527,6 +529,7 @@ _CLI_ONLY_KEYS = frozenset(
         "env_files",
         "image_tag",
         "gpu_type",
+        "cluster_id",
         "volume",
         "volume_size",
         "source_ref",
@@ -558,6 +561,26 @@ def _config_string(raw_cfg: Dict[str, Any], key: str, config_path: Any) -> Optio
         form = _CONFIG_STRING_FORMS.get(key, "a string")
         raise ValueError(f"{key} in {config_path} must be {form}, got {type(value).__name__}.")
     return value
+
+
+CLUSTER_ID_MAX_LENGTH = 64
+
+
+def _selected_cluster_id(
+    cluster_id: Optional[str], config_cluster_id: Optional[str], config_path: Any
+) -> Optional[str]:
+    """`--cluster-id` over top-level `cluster_id`, each checked against the
+    backend's 1-64 character limit where it was given."""
+    for label, candidate in (
+        ("--cluster-id", cluster_id),
+        (f"cluster_id in {config_path}", config_cluster_id),
+    ):
+        if candidate is not None and not 1 <= len(candidate) <= CLUSTER_ID_MAX_LENGTH:
+            raise ValueError(
+                f"{label} must be 1-{CLUSTER_ID_MAX_LENGTH} characters; "
+                "list clusters with `prime train models`."
+            )
+    return cluster_id or config_cluster_id
 
 
 def _selected_source_ref(ref: Optional[str], config_ref: Any, config_path: Any) -> Optional[str]:
@@ -594,6 +617,7 @@ def _dispatch_dedicated_run(
     yes: bool,
     image_tag: Optional[str] = None,
     gpu_type: Optional[str] = None,
+    cluster_id: Optional[str] = None,
     volume: Optional[str] = None,
     volume_size: Optional[str] = None,
     mode: Optional[str] = None,
@@ -605,9 +629,8 @@ def _dispatch_dedicated_run(
     PrimeCluster). Serves both dedicated run kinds: full-FT RL mega-TOMLs
     (mode=None/"rl") and SFT mega-TOMLs (mode="sft" — same endpoint).
 
-    Backend always auto-picks the first uncordoned PrimeCluster — the
-    CLI never threads a cluster id, so a config that targets the wrong
-    cluster can't be a footgun."""
+    The backend picks the cluster unless `cluster_id` pins one; the
+    backend validates the pin against the caller's pin-able clusters."""
     from ..utils.training_compiler import (
         CompilationError,
         SchemaEnvironmentUnavailable,
@@ -656,8 +679,13 @@ def _dispatch_dedicated_run(
         config_gpu_type = _config_string(raw_cfg, "gpu_type", config_path)
         config_volume = _config_string(raw_cfg, "volume", config_path)
         config_volume_size = _config_string(raw_cfg, "volume_size", config_path)
+        # Request-level like gpu_type: `--cluster-id` or top-level
+        # `cluster_id = "..."`, CLI flag wins.
+        resolved_cluster_id = _selected_cluster_id(
+            cluster_id, _config_string(raw_cfg, "cluster_id", config_path), config_path
+        )
     except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
         raise typer.Exit(1) from exc
     resolved_image_tag = image_tag or config_image_tag
 
@@ -712,6 +740,7 @@ def _dispatch_dedicated_run(
         wandb_api_key=secrets.get("WANDB_API_KEY"),
         hf_token=secrets.get("HF_TOKEN"),
         gpu_type=resolved_gpu_type,
+        cluster_id=resolved_cluster_id,
         volume=resolved_volume,
         mode=mode,
         source_ref=resolved_source_ref,
@@ -788,6 +817,11 @@ def _dispatch_dedicated_run(
                 highlight=False,
             )
         console.print()
+    if output != "json" and resolved_cluster_id:
+        console.print(
+            f"[cyan]Pinned to cluster[/cyan] [bold]{rich_escape(resolved_cluster_id)}[/bold]\n",
+            highlight=False,
+        )
 
     # `--output json` is a formatting switch: still dispatch the run,
     # then print the result as JSON ("create then format"), which
@@ -816,7 +850,16 @@ def _dispatch_dedicated_run(
         with status_ctx:
             result = client.create_run(payload)
     except APIError as e:
-        _report_dispatch_error(e, client, resolved_gpu_type, team_id)
+        if resolved_cluster_id:
+            # A rejected pin (unknown cluster, GPU type mismatch) is a 400
+            # whose detail names the problem; the GPU-type capacity
+            # rewrite would point at the wrong fix.
+            console.print(f"[red]Error:[/red] {rich_escape(api_detail(e))}")
+            unrelated = (UnauthorizedError, PaymentRequiredError, ServerError, APITimeoutError)
+            if not isinstance(e, unrelated):
+                console.print("[dim]Pin-able clusters: `prime train models`[/dim]")
+        else:
+            _report_dispatch_error(e, client, resolved_gpu_type, team_id)
         if resume_from:
             console.print(
                 f"[yellow]Tip:[/yellow] a run resumes once "
@@ -824,19 +867,54 @@ def _dispatch_dedicated_run(
             )
         raise typer.Exit(1)
 
-    _report_dispatch(result, output=output, source_ref=resolved_source_ref)
+    _report_dispatch(
+        result,
+        output=output,
+        source_ref=resolved_source_ref,
+        requested_cluster_id=resolved_cluster_id,
+    )
+
+
+def _warn_unhonored_pin(
+    result: HostedTrainingRunResponse, requested_cluster_id: Optional[str], out: Any
+) -> None:
+    """Older backends drop an unknown `clusterId` and schedule as usual, so
+    a pin only took effect if the response names the same cluster."""
+    if not requested_cluster_id or result.cluster_id == requested_cluster_id:
+        return
+    requested = rich_escape(requested_cluster_id)
+    if result.cluster_id is None:
+        out.print(
+            f"[yellow]Warning:[/yellow] the backend did not confirm the pin to cluster "
+            f"{requested}; it may not support cluster pinning, so the run may be on "
+            f"another cluster. Check with `prime train get {result.run_id}`.",
+            highlight=False,
+        )
+    else:
+        out.print(
+            f"[yellow]Warning:[/yellow] requested cluster {requested} but the run "
+            f"landed on {rich_escape(result.cluster_id)}.",
+            highlight=False,
+        )
 
 
 def _report_dispatch(
-    result: HostedTrainingRunResponse, *, output: str, source_ref: Optional[str] = None
+    result: HostedTrainingRunResponse,
+    *,
+    output: str,
+    source_ref: Optional[str] = None,
+    requested_cluster_id: Optional[str] = None,
 ) -> None:
     if output == "json":
+        _warn_unhonored_pin(result, requested_cluster_id, get_console(stderr=True))
         # Don't expose token_value in JSON output either — the chart
         # binds it via secretKeyRef and printing it leaks credentials
         # into automation logs.
         run_json: Dict[str, Any] = {"runId": result.run_id}
         if source_ref:
             run_json["sourceRef"] = source_ref
+        if result.cluster_id:
+            run_json["clusterId"] = result.cluster_id
         if result.on_demand:
             # Only on the billed path: a reserved run has no hourly rate,
             # and emitting nulls would read as "cost unknown".
@@ -853,6 +931,9 @@ def _report_dispatch(
     # via secretKeyRef). Surfacing it on stdout makes it easy to leak into
     # shared shell history/CI logs without buying anything for the user.
     console.print(f"[green]Dispatched[/green] hosted run [bold]{result.run_id}[/bold]")
+    if result.cluster_id:
+        console.print(f"Cluster: {rich_escape(result.cluster_id)}", highlight=False)
+    _warn_unhonored_pin(result, requested_cluster_id, console)
 
     # Placement is derived server-side, so state what it resolved to and
     # what it costs. Without this the first time anyone sees the rate is
@@ -1163,6 +1244,7 @@ def validate_training_config(
             source_ref = resolve_pull_request_head(pr)
         config_image_tag = _config_string(raw, "image_tag", config_path)
         _config_string(raw, "gpu_type", config_path)
+        _selected_cluster_id(None, _config_string(raw, "cluster_id", config_path), config_path)
         config_volume = _config_string(raw, "volume", config_path)
         config_volume_size = _config_string(raw, "volume_size", config_path)
         selected_image = image_tag or config_image_tag
@@ -1257,6 +1339,17 @@ def create_run(
             "PrimeClusters with matching gpuType. Falls back to a top-level "
             '`gpu_type = "..."` in the TOML if unset, then to the backend '
             "default (no preference, auto-pick)."
+        ),
+    ),
+    cluster_id: Optional[str] = typer.Option(
+        None,
+        "--cluster-id",
+        help=(
+            "Pin the run to one cluster (IDs: `prime train models`). A "
+            "--gpu-type given with it must match the cluster's; omitted, "
+            "the cluster's GPU type is used. Falls back to a top-level "
+            '`cluster_id = "..."` in the TOML if unset, then to the '
+            "backend's own placement."
         ),
     ),
     volume: Optional[str] = typer.Option(
@@ -1374,6 +1467,7 @@ def create_run(
         yes=yes,
         image_tag=image_tag,
         gpu_type=gpu_type,
+        cluster_id=cluster_id,
         volume=volume,
         volume_size=volume_size,
         mode=mode,
@@ -1396,10 +1490,10 @@ def list_models(
     """List available models for Hosted Training.
 
     Shows the models pre-cached on dedicated dispatch clusters, plus
-    purchasable on-demand capacity when the backend reports it. The
-    on-demand beta-enrollment flag is tri-state: explicit false/true are
-    reported as backend data; unknown (field absent) is treated as no
-    signal, never as a denial.
+    purchasable on-demand capacity and the clusters `--cluster-id` can pin
+    a run to, when the backend reports them. The on-demand beta-enrollment
+    flag is tri-state: explicit false/true are reported as backend data;
+    unknown (field absent) is treated as no signal, never as a denial.
     """
     validate_output_format(output, console)
 
@@ -1414,6 +1508,7 @@ def list_models(
     fft_models = response.models
     on_demand = sorted(response.on_demand, key=lambda entry: entry.at_capacity)
     on_demand_beta_access = response.on_demand_beta_access
+    clusters = response.clusters
 
     if output == "json":
         # Always include the models key (empty allowed) so scripts can rely
@@ -1425,6 +1520,8 @@ def list_models(
             # `is not None` so an explicit false survives (a denial is
             # data); unknown — older backend — is omitted.
             payload["on_demand_beta_access"] = on_demand_beta_access
+        if clusters is not None:
+            payload["clusters"] = [c.model_dump() for c in clusters]
         output_data_as_json(payload, console)
         return
 
@@ -1437,6 +1534,30 @@ def list_models(
         if fft_models:
             console.print()
         _render_on_demand_table(on_demand)
+
+    if clusters:
+        console.print()
+        _render_clusters_table(clusters)
+
+
+def _render_clusters_table(clusters: list) -> None:
+    """Render the clusters `--cluster-id` accepts, reserved ones first."""
+    table = Table(title="Clusters", title_justify="left")
+    table.add_column("Cluster ID", style="cyan", no_wrap=True)
+    table.add_column("Name")
+    table.add_column("GPU Type", style="magenta")
+    table.add_column("Capacity")
+
+    for cluster in sorted(clusters, key=lambda c: (c.on_demand, c.gpu_type or "", c.cluster_name)):
+        table.add_row(
+            rich_escape(cluster.cluster_id),
+            rich_escape(cluster.cluster_name),
+            rich_escape(cluster.gpu_type or "-"),
+            "On-demand" if cluster.on_demand else "Reserved",
+        )
+
+    console.print(table)
+    console.print("[dim]Pin a run to one with `prime train <config> --cluster-id <id>`.[/dim]")
 
 
 def _render_discovery_empty_state(on_demand_beta_access: bool | None) -> None:

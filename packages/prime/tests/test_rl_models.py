@@ -974,3 +974,88 @@ def test_platform_capacity_states_render_one_label(
     normalized = " ".join(plain.split())
     assert "Runs may queue depending on GPU count and topology." in normalized
     assert (_CAPACITY_HINT in normalized) is (label == "At capacity")
+
+
+_PINNABLE_CLUSTERS = [
+    {"clusterId": "od-1", "clusterName": "shared", "gpuType": "B200_180GB", "onDemand": True},
+    {"clusterId": "cluster-a", "clusterName": "athens", "gpuType": "H200_141GB", "onDemand": False},
+]
+
+
+def test_models_lists_pinnable_clusters_reserved_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {**_fft_models_payload(), "clusters": _PINNABLE_CLUSTERS}
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _discovery_mock(payload))
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "Clusters" in plain
+    rows = [ln for ln in plain.splitlines() if "cluster-a" in ln or "od-1" in ln]
+    assert len(rows) == 2
+    assert all(s in rows[0] for s in ("cluster-a", "athens", "H200_141GB", "Reserved"))
+    assert all(s in rows[1] for s in ("od-1", "shared", "B200_180GB", "On-demand"))
+    assert "--cluster-id <id>" in plain
+
+
+def test_models_clusters_render_without_cached_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"models": [], "clusters": _PINNABLE_CLUSTERS[:1]}
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _discovery_mock(payload))
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "No models available for Hosted Training." in plain
+    assert "od-1" in plain
+
+
+@pytest.mark.parametrize("payload", [{"models": []}, {"models": [], "clusters": None}])
+def test_models_without_clusters_field_keeps_old_output(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]
+) -> None:
+    """Older backends omit `clusters`: no section in the table, no key in JSON."""
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _discovery_mock(payload))
+
+    table = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+    as_json = CliRunner().invoke(app, ["train", "models", "-o", "json"])
+
+    assert table.exit_code == 0, table.output
+    assert "Clusters" not in strip_ansi(table.output)
+    assert as_json.exit_code == 0, as_json.output
+    assert json.loads(as_json.output) == {"available_fft_models": []}
+
+
+def test_models_json_carries_clusters(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"models": [], "clusters": _PINNABLE_CLUSTERS}
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _discovery_mock(payload))
+
+    result = CliRunner().invoke(app, ["train", "models", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["clusters"] == [
+        {
+            "cluster_id": "od-1",
+            "cluster_name": "shared",
+            "gpu_type": "B200_180GB",
+            "on_demand": True,
+        },
+        {
+            "cluster_id": "cluster-a",
+            "cluster_name": "athens",
+            "gpu_type": "H200_141GB",
+            "on_demand": False,
+        },
+    ]
+
+
+def test_models_json_keeps_an_empty_cluster_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit empty list (nothing pin-able) is data, unlike an omitted field."""
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "clusters": []})
+    )
+
+    result = CliRunner().invoke(app, ["train", "models", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["clusters"] == []

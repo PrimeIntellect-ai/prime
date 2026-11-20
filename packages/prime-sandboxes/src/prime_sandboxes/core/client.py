@@ -1,5 +1,6 @@
 """Lightweight HTTP client for SDK packages."""
 
+import asyncio
 import sys
 from typing import Any, Dict, Optional
 
@@ -28,6 +29,12 @@ POST_RETRYABLE_EXCEPTIONS = (
 IDEMPOTENT_RETRYABLE_EXCEPTIONS = POST_RETRYABLE_EXCEPTIONS + (
     httpx.ReadError,  # Connection broken while reading response (e.g., TCP reset)
 )
+
+# httpcore's pool rescans every queued request against every connection on the event loop
+# each time a request starts or finishes, so ~1000 concurrent calls on one client stall the
+# loop for seconds. AsyncAPIClient waits on a semaphore of the pool's size instead, which keeps
+# that queue empty without lowering throughput: the pool never ran more than this anyway.
+MAX_CONCURRENT_API_REQUESTS = 100
 
 IDEMPOTENT_RETRYABLE_STATUSES = frozenset({502, 503, 504})
 IDEMPOTENT_HTTP_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
@@ -293,7 +300,23 @@ class AsyncAPIClient:
             headers=headers,
             follow_redirects=True,
             timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(
+                max_connections=MAX_CONCURRENT_API_REQUESTS, max_keepalive_connections=20
+            ),
         )
+        # Held for one HTTP attempt only, never across a retry backoff sleep.
+        self._request_slots = asyncio.Semaphore(MAX_CONCURRENT_API_REQUESTS)
+
+    async def _send(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]],
+        json: Optional[Dict[str, Any]],
+        timeout: Optional[float],
+    ) -> httpx.Response:
+        async with self._request_slots:
+            return await self.client.request(method, url, params=params, json=json, timeout=timeout)
 
     def _check_auth_required(self) -> None:
         if self.require_auth and not self.api_key:
@@ -316,7 +339,7 @@ class AsyncAPIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async idempotent HTTP request with retry on transient failures."""
-        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = await self._send(method, url, params, json, timeout)
         response.raise_for_status()
         return response
 
@@ -335,7 +358,7 @@ class AsyncAPIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async non-idempotent request with only pre-processing safe retries."""
-        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = await self._send(method, url, params, json, timeout)
         if response.status_code == 429:
             response.raise_for_status()
         return response
@@ -355,7 +378,7 @@ class AsyncAPIClient:
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Make async idempotent POST with retries for ambiguous transient failures."""
-        response = await self.client.request(method, url, params=params, json=json, timeout=timeout)
+        response = await self._send(method, url, params, json, timeout)
         response.raise_for_status()
         return response
 

@@ -2451,6 +2451,21 @@ def _stream_logs(
             console.print("[yellow]No logs available yet.[/yellow]")
 
 
+def _is_ended_run_logs_error(error: APIError, run_id: str) -> bool:
+    """The backend 404s an unfiltered fetch with "No logs available for run"
+    once a run's recent log window is empty and it has no stored snapshot.
+    That also happens for live runs without a log backend, so confirm the
+    run is terminal before calling it ended."""
+    message = str(error).lower()
+    if "404" not in message or "no logs available for run" not in message:
+        return False
+    try:
+        run = RLClient(APIClient()).get_run(run_id)
+    except APIError:
+        return False
+    return run.status.upper() in TERMINAL_RUN_STATUSES
+
+
 def _handle_logs_api_error(e: APIError) -> None:
     if _is_log_startup_error(e):
         msg = "Hosted Training run has not started yet. Logs will be available once running."
@@ -2779,6 +2794,11 @@ def get_logs(
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching logs.[/dim]")
     except APIError as e:
+        if not all_logs and _is_ended_run_logs_error(e, run_id):
+            console.print(
+                f"[red]Error:[/red] Run {run_id} has ended; use --all to view its full logs."
+            )
+            raise typer.Exit(1)
         _handle_logs_api_error(e)
 
 

@@ -1200,7 +1200,9 @@ def fork(
 def snapshot(
     sandbox_id: str,
     wait_timeout: float = typer.Option(
-        300, "--wait-timeout", help="Seconds to wait for the memory snapshot to be captured"
+        300,
+        "--wait-timeout",
+        help="Seconds to wait for the pause-ready wait (source PAUSED)",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:

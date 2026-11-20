@@ -374,11 +374,12 @@ waits until the pause checkpoint is `FROZEN` or `DURABLE` and the source is
 observed. The resume is accepted asynchronously: the source reports `RUNNING`
 later, and `timeout_seconds` (default 300) bounds only the pause-ready wait. The
 returned checkpoint is not necessarily `DURABLE`; `wait_for_checkpoint` waits for
-the platform to finish its upload. A non-durable snapshot is usable only on the
-pausing node and is discarded if the source is deleted before its upload
-completes, so do not delete the source before the checkpoint is `DURABLE`; after
-`DURABLE` it survives source deletion. Paused time counts against the source's
-timeout, and a pause checkpoint that does not become `DURABLE` within the
+disk durability, not proof that the memory snapshot was stored. A non-durable
+snapshot is usable only on the pausing node and is discarded if the source is
+deleted before its upload completes, so do not delete the source before the
+checkpoint is `DURABLE`; after `DURABLE` it survives source deletion. Paused
+time counts against the source's timeout, and a pause checkpoint that does not
+become `DURABLE` within the
 platform's pause window (currently 6 hours) becomes `FAILED`. A `DURABLE` pause
 whose memory misses that same window stays `DURABLE` and loses its memory claim.
 If the source does not resume after the capture, the raised error names the

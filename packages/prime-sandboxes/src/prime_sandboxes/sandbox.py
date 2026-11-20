@@ -2897,8 +2897,9 @@ class SandboxClient:
         asynchronously; it reaches RUNNING when the platform reports it). The
         returned checkpoint is the one observed then, so it is not necessarily
         DURABLE: a non-durable snapshot is restorable on the pausing node while
-        the source exists, and ``wait_for_checkpoint`` waits for the platform to
-        finish its upload. ``timeout_seconds`` bounds the pause-ready wait.
+        the source exists, and ``wait_for_checkpoint`` waits for disk durability,
+        not proof that the memory snapshot was stored. ``timeout_seconds`` bounds
+        the pause-ready wait.
 
         No sandbox is created. Restore the checkpoint with ``create`` and
         ``restore_memory=True``, which creates a new sandbox and needs the source
@@ -4983,8 +4984,9 @@ class AsyncSandboxClient:
         asynchronously; it reaches RUNNING when the platform reports it). The
         returned checkpoint is the one observed then, so it is not necessarily
         DURABLE: a non-durable snapshot is restorable on the pausing node while
-        the source exists, and ``wait_for_checkpoint`` waits for the platform to
-        finish its upload. ``timeout_seconds`` bounds the pause-ready wait.
+        the source exists, and ``wait_for_checkpoint`` waits for disk durability,
+        not proof that the memory snapshot was stored. ``timeout_seconds`` bounds
+        the pause-ready wait.
 
         No sandbox is created. Restore the checkpoint with ``create`` and
         ``restore_memory=True``, which creates a new sandbox and needs the source

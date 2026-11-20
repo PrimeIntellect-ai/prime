@@ -230,7 +230,7 @@ prime sandbox volumes create data --from ~/datasets/my-data
 prime sandbox delete <sandbox-id>
 ```
 
-`prime sandbox snapshot` pauses the source, waits until the memory checkpoint is
+`prime sandbox snapshot` pauses the source, waits until the memory snapshot is
 restorable, then resumes the same source asynchronously; `--wait-timeout` bounds
 only that pause-ready wait. It prints the captured checkpoint, which is not
 necessarily `DURABLE`; `prime sandbox checkpoint get` shows the upload. A

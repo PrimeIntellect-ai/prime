@@ -9,6 +9,7 @@ from prime_cli.commands.env import (
     _safe_tar_extract,
     compute_content_hash,
 )
+from prime_cli.utils.package_archive import ARCHIVE_MTIME, write_source_archive
 
 
 def test_collect_archive_files_respects_gitignore(tmp_path):
@@ -143,3 +144,32 @@ def test_tar_add_would_record_hardlink_but_helper_does_not(tmp_path: Path) -> No
         _add_file_to_archive(tar, original, "a.txt")
         _add_file_to_archive(tar, linked, "b.txt")
         assert all(not member.islnk() for member in tar.getmembers())
+
+
+def test_source_archive_is_reproducible(tmp_path: Path) -> None:
+    package = tmp_path / "pkg"
+    (package / "pkg").mkdir(parents=True)
+    (package / "pyproject.toml").write_text("[project]\nname='pkg'\nversion='0.1.0'\n")
+    (package / "pkg" / "__init__.py").write_text("x = 1\n")
+    (package / "scripts").mkdir()
+    script = package / "scripts" / "run.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o775)
+
+    first = write_source_archive(package, tmp_path / "first.tar.gz").read_bytes()
+    os.utime(package / "pyproject.toml", (1_900_000_000, 1_900_000_000))
+    (package / "pkg" / "__init__.py").chmod(0o600)
+    second = write_source_archive(package, tmp_path / "second.tar.gz").read_bytes()
+
+    assert first == second
+    with tarfile.open(tmp_path / "first.tar.gz") as archive:
+        members = {member.name: member for member in archive.getmembers()}
+    assert sorted(members) == ["pkg/__init__.py", "pyproject.toml", "scripts/run.sh"]
+    assert {member.mtime for member in members.values()} == {ARCHIVE_MTIME}
+    assert {member.uname for member in members.values()} == {""}
+    assert members["scripts/run.sh"].mode == 0o755
+    assert members["pkg/__init__.py"].mode == 0o644
+
+    (package / "pkg" / "__init__.py").write_text("x = 2\n")
+    third = write_source_archive(package, tmp_path / "third.tar.gz").read_bytes()
+    assert third != first

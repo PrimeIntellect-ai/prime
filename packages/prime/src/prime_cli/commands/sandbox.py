@@ -835,7 +835,7 @@ def checkpoint_create(
         else:
             result = client.checkpoint(sandbox_id, ttl_seconds=ttl_seconds)
         _print_checkpoint(result, output, with_memory=with_memory)
-    except (APIError, ValueError) as exc:
+    except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
 

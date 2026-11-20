@@ -374,21 +374,23 @@ and returns the checkpoint it observed. The resume is accepted asynchronously:
 the source reports `RUNNING` later. The returned checkpoint is not necessarily
 `DURABLE`; `wait_for_checkpoint` waits for the platform to finish its upload. A
 non-durable pause checkpoint is usable only on the pausing node and is discarded
-if the source is deleted before its upload completes, so keep the source
-available if the checkpoint must outlive it. Paused time counts against the
-source's timeout, and a pause checkpoint that does not become `DURABLE` within
-the platform's upload window (currently 6 hours) becomes `FAILED`. If the source
-does not resume after the capture, the raised error names the checkpoint id and
-the source's resume command.
+if the source is deleted before its upload completes, so do not delete the source
+before the checkpoint is `DURABLE`; after `DURABLE` the checkpoint survives
+source deletion. Paused time counts against the source's timeout, and a pause
+checkpoint that does not become `DURABLE` within the platform's pause window
+(currently 6 hours) becomes `FAILED`. A `DURABLE` pause whose memory misses that
+same 6-hour window stays `DURABLE` and loses its memory claim. If the source does
+not resume after the capture, the raised error names the checkpoint id and the
+source's resume command.
 
 `timeout_seconds` bounds only the pause-ready wait. `ttl_seconds` is rejected
 because a pause checkpoint has no expiry. No sandbox is created and the capture
 does not wait for the source to run again. Restoring always creates a new
 sandbox; the platform does not restore into the same running sandbox. A memory
-restore also needs the source sandbox record to exist; the platform archives
-that record after the source is terminated, and disk-only restore is the
-remaining option then. GPU sandboxes and sandboxes with volumes cannot be
-paused, so they cannot be memory-checkpointed.
+restore also needs the source sandbox record to exist; the platform keeps that
+record for about 7 days after termination, then archives it, and disk-only
+restore is the remaining option. GPU sandboxes and sandboxes with volumes cannot
+be paused, so they cannot be memory-checkpointed.
 The public checkpoint model does not report whether a durable checkpoint includes
 memory. A memory checkpoint copies userspace random state and keys or tokens
 already in the guest's memory; rekey or regenerate them in a workload restored

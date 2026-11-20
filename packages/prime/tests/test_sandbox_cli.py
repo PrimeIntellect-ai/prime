@@ -192,6 +192,42 @@ def test_checkpoint_with_memory_rejects_ttl_before_constructing_a_client(
     assert "a pause checkpoint has no expiry" in message
 
 
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (
+            TimeoutError(
+                "Sandbox sandbox-1 did not finish pausing within 2s; "
+                "the pause may still complete (checkpoint pause-1)"
+            ),
+            "checkpoint pause-1",
+        ),
+        (
+            RuntimeError(
+                "Pause checkpoint pause-1 cannot be restored (state=FAILED): "
+                "sandboxes with volumes cannot be paused"
+            ),
+            "sandboxes with volumes cannot be paused",
+        ),
+    ],
+)
+def test_checkpoint_with_memory_prints_pause_failures(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def create(self: Any, *args: Any, **kwargs: Any) -> SandboxCheckpoint:
+        raise error
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.checkpoint", create)
+
+    result = runner.invoke(app, ["sandbox", "checkpoint", "create", "sandbox-1", "--with-memory"])
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" in result.output
+    assert expected in _flat(result.output)
+
+
 def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
     states = {

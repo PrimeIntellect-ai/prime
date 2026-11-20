@@ -2905,14 +2905,14 @@ class SandboxClient:
         checkpoint is FROZEN or DURABLE and the source is PAUSED, then the source
         is resumed (accepted asynchronously). The returned checkpoint is the one
         observed then, so it is not necessarily DURABLE; ``wait_for_checkpoint``
-        waits for the platform to finish the upload. ``timeout_seconds`` bounds
-        that pause wait, and ``ttl_seconds`` is rejected because a pause checkpoint
-        has no expiry. No sandbox is created: restore the checkpoint with
-        ``create`` and ``restore_memory=True``, which creates a new sandbox and
-        needs the source sandbox record to exist. GPU sandboxes and sandboxes with
-        volumes cannot be paused. A memory checkpoint copies userspace random state
-        and any keys or tokens already in the guest's memory, so rekey or
-        regenerate them in the workload.
+        waits for disk durability, not proof that the memory snapshot was stored.
+        ``timeout_seconds`` bounds that pause wait, and ``ttl_seconds`` is
+        rejected because a pause checkpoint has no expiry. No sandbox is created:
+        restore the checkpoint with ``create`` and ``restore_memory=True``,
+        which creates a new sandbox and needs the source sandbox record to exist.
+        GPU sandboxes and sandboxes with volumes cannot be paused. A memory
+        checkpoint copies userspace random state and any keys or tokens already
+        in the guest's memory, so rekey or regenerate them in the workload.
         """
         if with_memory:
             _validate_memory_checkpoint_arguments(ttl_seconds, timeout_seconds)
@@ -4990,14 +4990,14 @@ class AsyncSandboxClient:
         checkpoint is FROZEN or DURABLE and the source is PAUSED, then the source
         is resumed (accepted asynchronously). The returned checkpoint is the one
         observed then, so it is not necessarily DURABLE; ``wait_for_checkpoint``
-        waits for the platform to finish the upload. ``timeout_seconds`` bounds
-        that pause wait, and ``ttl_seconds`` is rejected because a pause checkpoint
-        has no expiry. No sandbox is created: restore the checkpoint with
-        ``create`` and ``restore_memory=True``, which creates a new sandbox and
-        needs the source sandbox record to exist. GPU sandboxes and sandboxes with
-        volumes cannot be paused. A memory checkpoint copies userspace random state
-        and any keys or tokens already in the guest's memory, so rekey or
-        regenerate them in the workload.
+        waits for disk durability, not proof that the memory snapshot was stored.
+        ``timeout_seconds`` bounds that pause wait, and ``ttl_seconds`` is
+        rejected because a pause checkpoint has no expiry. No sandbox is created:
+        restore the checkpoint with ``create`` and ``restore_memory=True``,
+        which creates a new sandbox and needs the source sandbox record to exist.
+        GPU sandboxes and sandboxes with volumes cannot be paused. A memory
+        checkpoint copies userspace random state and any keys or tokens already
+        in the guest's memory, so rekey or regenerate them in the workload.
         """
         if with_memory:
             _validate_memory_checkpoint_arguments(ttl_seconds, timeout_seconds)

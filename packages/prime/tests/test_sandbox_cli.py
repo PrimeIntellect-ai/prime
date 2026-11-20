@@ -251,6 +251,81 @@ def test_fork_checkpoints_waits_and_restores(monkeypatch: pytest.MonkeyPatch) ->
     assert "forked-1" in result.output
 
 
+def test_fork_with_memory_calls_the_memory_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    source = _fake_sandbox(id="sbx-1", team_id="team-1", labels=["a"])
+
+    def fork(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
+        calls.append({"sandbox_id": sandbox_id, **kwargs})
+        return SimpleNamespace(id="forked-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.fork", fork)
+
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "fork",
+            "sbx-1",
+            "--with-memory",
+            "--timeout-minutes",
+            "30",
+            "--wait-timeout",
+            "60",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {
+            "sandbox_id": "sbx-1",
+            "name": "box-fork",
+            "timeout_minutes": 30,
+            "with_memory": True,
+            "timeout_seconds": 60,
+        }
+    ]
+    assert "forked-1" in result.output
+
+
+def test_fork_with_memory_prompt_states_the_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    source = _fake_sandbox(id="sbx-1")
+
+    def fork(self: Any, *args: Any, **kwargs: Any) -> SimpleNamespace:
+        raise AssertionError("a declined prompt must not fork")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.fork", fork)
+
+    result = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--with-memory"], input="n\n")
+
+    assert result.exit_code == 0, result.output
+    assert "paused for the memory snapshot" in result.output
+
+
+def test_fork_with_memory_rejects_shape_overrides_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def get(self: Any, sandbox_id: str) -> None:
+        raise AssertionError("an invalid flag combination must not request anything")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", get)
+
+    result = runner.invoke(
+        app, ["sandbox", "fork", "sbx-1", "--with-memory", "--cpu-cores", "4", "--yes"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "--with-memory cannot be combined with --cpu-cores or --memory-gb" in result.output
+    assert "keeps the source's shape" in result.output
+
+
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:
     """A sandbox stand-in with every field the list formatter reads."""
     now = datetime.now(timezone.utc)

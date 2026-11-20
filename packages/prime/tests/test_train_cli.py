@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from prime_cli.core import APIError
+from prime_cli.core import APIError, NotFoundError, ValidationError
 from prime_cli.main import app
 from typer.testing import CliRunner
 
@@ -200,6 +200,230 @@ def test_train_list_shows_gpu_count(monkeypatch) -> None:
     assert gpus == {"run-gpu": "16", "run-legacy": "-"}
 
 
+def _mock_list_runs(monkeypatch, runs: list[dict[str, Any]]) -> None:
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        return {"runs": runs, "total": len(runs)}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+
+
+def test_train_list_shows_name_column_after_id(monkeypatch) -> None:
+    _mock_list_runs(
+        monkeypatch,
+        [
+            {**_fake_run_payload("RUNNING", run_id="run-named"), "name": "renametest"},
+            {**_fake_run_payload("RUNNING", run_id="run-long"), "name": "x" * 40},
+            {**_fake_run_payload("RUNNING", run_id="run-markup"), "name": "[bold]sweep[/bold]"},
+            _fake_run_payload("COMPLETED", run_id="run-unnamed"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["train", "list"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    header = next(cells for line in lines if (cells := _table_cells(line))[:1] == ["ID"])
+    assert header[:3] == ["ID", "Name", "Status"]
+    names = {
+        cells[0]: cells[1]
+        for line in lines
+        if (cells := _table_cells(line))[:1] and cells[0].startswith("run-")
+    }
+    assert names == {
+        "run-named": "renametest",
+        "run-long": "x" * 23 + "…",
+        "run-markup": "[bold]sweep[/bold]",
+        "run-unnamed": "-",
+    }
+
+
+INJECTED_NAME = "ok\n  Status: COMPLETED\tx\r\ny"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (INJECTED_NAME, "ok Status: COMPLETED x y"),
+        ("a\u2028b\u2029c\u0085d\x00e\x1bf", "a b c d e f"),
+        ("  spaced   out  ", "spaced out"),
+    ],
+)
+def test_single_line_collapses_control_characters(raw, expected) -> None:
+    from prime_cli.commands.rl import _single_line
+
+    assert _single_line(raw) == expected
+
+
+def test_train_list_keeps_names_with_line_breaks_on_one_line(monkeypatch) -> None:
+    _mock_list_runs(
+        monkeypatch,
+        [
+            {**_fake_run_payload("RUNNING", run_id="run-injected"), "name": "ok\n Status:\tX\r\ny"},
+            _fake_run_payload("FAILED", run_id="run-next"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["train", "list"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [
+        cells
+        for line in result.output.splitlines()
+        if (cells := _table_cells(line))[:1] and cells[0].startswith("run-")
+    ]
+    assert [(cells[0], cells[1], cells[2]) for cells in rows] == [
+        ("run-injected", "ok Status: X y", "RUNNING"),
+        ("run-next", "-", "FAILED"),
+    ]
+    # One table line per run: no continuation line carrying a fake status.
+    assert sum("Status: X" in line for line in result.output.splitlines()) == 1
+
+
+def test_train_get_keeps_names_with_line_breaks_on_one_line(monkeypatch) -> None:
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate({**_fake_run_payload("RUNNING"), "name": INJECTED_NAME})
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-1"], env={**TEST_ENV, "COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    lines = [line.strip() for line in result.output.splitlines() if line.strip()]
+    assert lines[1] == "Name: ok Status: COMPLETED x y"
+    assert [line for line in lines if line.startswith("Status:")] == ["Status: RUNNING"]
+
+
+def test_train_list_json_includes_name(monkeypatch) -> None:
+    _mock_list_runs(
+        monkeypatch,
+        [
+            {**_fake_run_payload("RUNNING", run_id="run-named"), "name": "renametest"},
+            _fake_run_payload("COMPLETED", run_id="run-unnamed"),
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["train", "list", "-o", "json"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    runs = json.loads(result.output)["runs"]
+    assert [(r["id"], r["name"]) for r in runs] == [
+        ("run-named", "renametest"),
+        ("run-unnamed", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("renametest", "Name: renametest"), (None, "Name: -"), ("[red]x[/red]", "Name: [red]x[/red]")],
+)
+def test_train_get_shows_name(monkeypatch, name, expected) -> None:
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate({**_fake_run_payload("RUNNING"), "name": name})
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-1"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    lines = [line.strip() for line in result.output.splitlines() if line.strip()]
+    assert lines[1] == expected
+    assert lines[2].startswith("Status:")
+
+
+def test_train_get_json_includes_name(monkeypatch) -> None:
+    from prime_cli.api.rl import RLRun
+
+    run = RLRun.model_validate({**_fake_run_payload("RUNNING"), "name": "renametest"})
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.RLClient.get_run", lambda self, run_id, timeout=None: run
+    )
+
+    result = runner.invoke(app, ["train", "get", "run-1", "-o", "json"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["run"]["name"] == "renametest"
+
+
+STOP_PROMPT = "Are you sure you want to stop run run-1?"
+
+
+def _mock_stop(monkeypatch) -> list[tuple[str, str]]:
+    calls: list[tuple[str, str]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint))
+        return {"run": _fake_run_payload("STOPPED")}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    return calls
+
+
+@pytest.mark.parametrize("flag", ["--yes", "-y", "--force", "-f"])
+def test_train_stop_skip_flags_stop_without_prompting(monkeypatch, flag) -> None:
+    calls = _mock_stop(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1", flag],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert STOP_PROMPT not in result.output
+    assert "stopped successfully" in result.output
+    assert calls == [("PUT", "/rft/runs/run-1/stop")]
+
+
+@pytest.mark.parametrize(
+    ("answer", "stopped"),
+    [("y\n", True), ("n\n", False), ("\n", False)],
+)
+def test_train_stop_prompts_without_skip_flag(monkeypatch, answer, stopped) -> None:
+    calls = _mock_stop(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["train", "stop", "run-1"],
+        input=answer,
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"{STOP_PROMPT} [y/N]" in result.output
+    if stopped:
+        assert "stopped successfully" in result.output
+        assert calls == [("PUT", "/rft/runs/run-1/stop")]
+    else:
+        assert "Cancelled." in result.output
+        assert calls == []
+
+
+def test_train_stop_help_lists_yes_flag() -> None:
+    result = runner.invoke(app, ["train", "stop", "--help"], env={**TEST_ENV, "COLUMNS": "120"})
+
+    assert result.exit_code == 0, result.output
+    # CI forces color, and Rich styles option names, so strip ANSI codes first.
+    plain = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert re.search(r"--yes\s+-y\s+Skip confirmation", plain)
+
+
 def test_train_stop_returns_immediately_when_already_terminal(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
 
@@ -378,6 +602,122 @@ def test_train_pause(monkeypatch, response, exit_code, expected_output) -> None:
     assert calls == [("POST", "/training/runs/run-1/pause")]
 
 
+def _mock_rename(monkeypatch, response: Any) -> list[tuple[str, str, Any]]:
+    calls: list[tuple[str, str, Any]] = []
+
+    def mock_request(self, method, endpoint, params=None, json=None, timeout=None):
+        calls.append((method, endpoint, json))
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.request", mock_request)
+    return calls
+
+
+def test_train_rename(monkeypatch) -> None:
+    calls = _mock_rename(monkeypatch, {"run": {**_fake_run_payload("RUNNING"), "name": "new"}})
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", "  new  "],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Run run-1 renamed" in result.output
+    assert "Name: new" in result.output
+    assert calls == [("PATCH", "/rft/runs/run-1", {"name": "new"})]
+
+
+def test_train_rename_json_output(monkeypatch) -> None:
+    _mock_rename(monkeypatch, {"run": {**_fake_run_payload("RUNNING"), "name": "new"}})
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", "new", "-o", "json"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    run = json.loads(result.output)["run"]
+    assert (run["id"], run["name"]) == ("run-1", "new")
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_output"),
+    [
+        (NotFoundError("HTTP 404: Run run-1 not found"), "Error: HTTP 404: Run run-1 not found"),
+        (
+            APIError("HTTP 403: You don't have access to this run"),
+            "Error: HTTP 403: You don't have access to this run",
+        ),
+        (
+            ValidationError(
+                [
+                    {
+                        "loc": ["body", "name"],
+                        "msg": "String should have at most 255 characters",
+                    }
+                ]
+            ),
+            "name: String should have at most 255 characters",
+        ),
+    ],
+)
+def test_train_rename_reports_api_errors(monkeypatch, error, expected_output) -> None:
+    _mock_rename(monkeypatch, error)
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", "new"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert expected_output in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_output"),
+    [
+        ("", "Run name cannot be empty"),
+        ("   ", "Run name cannot be empty"),
+        ("x" * 256, "Run name must be at most 255 characters (got 256)"),
+        ("ok\n  Status: COMPLETED", "cannot contain line breaks"),
+        ("a\tb", "cannot contain line breaks"),
+        ("a\u2028b", "cannot contain line breaks"),
+    ],
+)
+def test_train_rename_validates_name_locally(monkeypatch, name, expected_output) -> None:
+    calls = _mock_rename(monkeypatch, {"run": _fake_run_payload("RUNNING")})
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", name],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert expected_output in result.output
+    assert calls == []
+
+
+def test_train_rename_accepts_max_length_name(monkeypatch) -> None:
+    name = "x" * 255
+    calls = _mock_rename(monkeypatch, {"run": {**_fake_run_payload("RUNNING"), "name": name}})
+
+    result = runner.invoke(
+        app,
+        ["train", "rename", "run-1", name],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("PATCH", "/rft/runs/run-1", {"name": name})]
+
+
 RESUME_CONFLICT = "Run run-1 is RUNNING; only a PAUSED run can be resumed."
 
 
@@ -416,7 +756,8 @@ def test_train_resume(monkeypatch, response, exit_code, expected_output) -> None
 
     assert result.exit_code == exit_code, result.output
     assert expected_output in result.output
-    assert calls == [
+    # A failed resume may also look up GPU capacity to explain the error.
+    assert [c for c in calls if c[0] == "POST"] == [
         (
             "POST",
             "/training/runs/run-1/resume",
@@ -1282,3 +1623,330 @@ def test_create_run_waits_out_a_cold_validator():
     assert timeout is CREATE_RUN_TIMEOUT
     # The read wait outlasts the validator; connecting still fails fast.
     assert timeout.read > 60 and timeout.connect == 10.0
+
+
+# --- dispatch onto an at-capacity GPU type ---------------------------------
+
+# Verbatim from platform `_pick_on_demand_cluster` (raised as HTTP 400).
+_BACKEND_CAPACITY_ERROR = (
+    "HTTP 400: gpu_type=B200_180GB is at capacity: this account has no reserved "
+    "cluster with that GPU type, and there is no on-demand capacity for it right now. "
+    "Contact support@primeintellect.ai for dedicated B200_180GB capacity, or pick a "
+    "GPU type that `prime train models` does not list as at capacity."
+)
+_BACKEND_DETAIL = "this account has no reserved cluster with that GPU type"
+_OSC8 = re.compile(r"\x1b\]8;[^;]*;([^\x1b]*)\x1b\\")
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _mock_capacity_discovery(monkeypatch, *, reserved: tuple[str, ...] = ()) -> None:
+    from prime_cli.api.training import AvailableFFTModelsResponse
+
+    payload = {
+        "models": [
+            {"name": "m", "clusters": [{"clusterId": "c", "clusterName": "n", "gpuType": g}]}
+            for g in reserved
+        ],
+        "onDemand": [
+            {"gpuType": "H100_80GB", "pricePerGpuHour": 2.0, "availableNow": True},
+            {"gpuType": "B200_180GB", "pricePerGpuHour": 5.0, "atCapacity": True},
+        ],
+    }
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.get_available_fft",
+        lambda self, team_id=None: AvailableFFTModelsResponse.model_validate(payload),
+    )
+
+
+def _fail_create_run(monkeypatch, error: APIError) -> None:
+    def create_run(self, payload):
+        raise error
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", create_run)
+
+
+def _dispatch_on(tmp_path: Path, gpu_type: str):
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    return runner.invoke(
+        app,
+        ["train", str(cfg), "--gpu-type", gpu_type, "-y"],
+        env={
+            **TEST_ENV,
+            "PRIME_API_KEY": "test-key",
+            "PRIME_FRONTEND_URL": "https://frontend.test",
+            "COLUMNS": "200",
+        },
+    )
+
+
+def test_dispatch_on_at_capacity_gpu_replaces_exact_backend_message(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _mock_capacity_discovery(monkeypatch)
+    _fail_create_run(monkeypatch, APIError(_BACKEND_CAPACITY_ERROR))
+
+    from prime_cli.utils import get_console
+
+    # rl.py builds its console at import, before CliRunner's env applies.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console",
+        get_console(force_terminal=True, color_system="standard", width=200),
+    )
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    targets = [t for t in _OSC8.findall(result.output) if t]
+    assert targets == ["https://frontend.test/dashboard/quotes"]
+    plain = " ".join(_ANSI.sub("", _OSC8.sub("", result.output)).split())
+    assert "B200_180GB is at capacity for Hosted Training right now." in plain
+    assert "Need a GPU type that's at capacity? Request dedicated capacity" in plain
+    assert "support@" not in result.output
+    assert _BACKEND_DETAIL not in plain
+
+
+def test_dispatch_error_on_available_gpu_keeps_backend_detail(monkeypatch, tmp_path: Path) -> None:
+    _mock_capacity_discovery(monkeypatch)
+    _fail_create_run(monkeypatch, APIError("HTTP 400: bad config"))
+
+    result = _dispatch_on(tmp_path, "H100_80GB")
+
+    assert result.exit_code == 1, result.output
+    assert "Error: bad config" in result.output
+    assert "at capacity" not in result.output
+
+
+def test_dispatch_error_with_reserved_capacity_keeps_backend_detail(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Pool capacity is irrelevant when the caller holds reserved B200s."""
+    _mock_capacity_discovery(monkeypatch, reserved=("B200_180GB",))
+    _fail_create_run(monkeypatch, APIError(_BACKEND_CAPACITY_ERROR))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    assert _BACKEND_DETAIL in " ".join(result.output.split())
+    assert "is at capacity for Hosted Training" not in result.output
+
+
+def test_dispatch_auth_error_is_not_blamed_on_capacity(monkeypatch, tmp_path: Path) -> None:
+    from prime_cli.core.client import UnauthorizedError
+
+    _mock_capacity_discovery(monkeypatch)
+    _fail_create_run(monkeypatch, UnauthorizedError("API key unauthorized."))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    assert "unauthorized" in result.output.lower()
+    assert "is at capacity" not in result.output
+
+
+def test_dispatch_error_survives_failed_capacity_lookup(monkeypatch, tmp_path: Path) -> None:
+    def broken_discovery(self, team_id=None):
+        raise APIError("HTTP 500: discovery down")
+
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.get_available_fft", broken_discovery
+    )
+    _fail_create_run(monkeypatch, APIError(_BACKEND_CAPACITY_ERROR))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    assert _BACKEND_DETAIL in " ".join(result.output.split())
+
+
+def test_resume_on_at_capacity_gpu_explains(monkeypatch) -> None:
+    _mock_capacity_discovery(monkeypatch)
+
+    def resume_run(self, run_id, payload):
+        raise APIError(_BACKEND_CAPACITY_ERROR)
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.resume_run", resume_run)
+
+    result = runner.invoke(
+        app,
+        ["train", "resume", "run-1", "--gpu-type", "B200_180GB", "-y"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "B200_180GB is at capacity" in " ".join(result.output.split())
+
+
+def test_resume_state_error_on_at_capacity_gpu_keeps_detail(monkeypatch) -> None:
+    """A non-placement rejection stays actionable even when the GPU is at
+    capacity: the backend detail is kept and the capacity state is a note."""
+    _mock_capacity_discovery(monkeypatch)
+
+    def resume_run(self, run_id, payload):
+        raise APIError(f"HTTP 409: {RESUME_CONFLICT}")
+
+    monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.resume_run", resume_run)
+
+    result = runner.invoke(
+        app,
+        ["train", "resume", "run-1", "--gpu-type", "B200_180GB", "-y"],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert f"Error: {RESUME_CONFLICT}" in plain
+    assert "Note: B200_180GB is also at capacity right now." in plain
+    assert "is at capacity for Hosted Training" not in plain
+
+
+def test_capacity_wording_without_at_capacity_is_not_replaced(monkeypatch, tmp_path: Path) -> None:
+    """Detection is narrow: only "at capacity" marks the placement refusal,
+    so the pre-ENG-8405 "No capacity available" wording keeps its detail."""
+    _mock_capacity_discovery(monkeypatch)
+    legacy = "No capacity available for gpu_type=B200_180GB: try another GPU type."
+    _fail_create_run(monkeypatch, APIError(f"HTTP 400: {legacy}"))
+
+    result = _dispatch_on(tmp_path, "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert f"Error: {legacy}" in plain
+    assert "Note: B200_180GB is also at capacity right now." in plain
+
+
+# --- cluster pinning (platform#8297) ----------------------------------------
+
+
+def _pin_dispatch(tmp_path: Path, *args: str, toml_extra: str = ""):
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(toml_extra + _FFT_BODY)
+    return runner.invoke(
+        app,
+        ["train", str(cfg), "-y", *args],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+
+def test_train_cluster_id_flag_and_toml_key_reach_the_payload(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+
+    assert _pin_dispatch(tmp_path, "--cluster-id", "c-flag", "-o", "json").exit_code == 0
+    toml_pin = 'cluster_id = "c-toml"\n'
+    assert _pin_dispatch(tmp_path, "-o", "json", toml_extra=toml_pin).exit_code == 0
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c-flag", "-o", "json", toml_extra=toml_pin)
+    assert result.exit_code == 0, result.output
+    assert _pin_dispatch(tmp_path, "-o", "json").exit_code == 0
+
+    assert [p.get("clusterId") for p in captured] == ["c-flag", "c-toml", "c-flag", None]
+    assert all("cluster_id" not in p["config"] for p in captured)
+
+
+def test_train_cluster_id_is_sent_alongside_gpu_type(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1", "--gpu-type", "H100_80GB")
+
+    assert result.exit_code == 0, result.output
+    assert (captured[0]["clusterId"], captured[0]["gpuType"]) == ("c1", "H100_80GB")
+
+
+@pytest.mark.parametrize(
+    ("args", "toml_extra", "label"),
+    [
+        (["--cluster-id", ""], "", "--cluster-id"),
+        (["--cluster-id", "c" * 65], "", "--cluster-id"),
+        ([], 'cluster_id = ""\n', "cluster_id in"),
+        ([], "cluster_id = 7\n", "cluster_id in"),
+    ],
+    ids=["empty-flag", "long-flag", "empty-toml", "non-string-toml"],
+)
+def test_train_invalid_cluster_id_fails_before_dispatch(
+    monkeypatch, tmp_path: Path, args, toml_extra, label
+) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+
+    result = _pin_dispatch(tmp_path, *args, toml_extra=toml_extra)
+
+    assert result.exit_code == 1, result.output
+    assert label in result.output
+    assert captured == []
+
+
+def test_train_pinned_dispatch_prints_the_landed_cluster(monkeypatch, tmp_path: Path) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t", "clusterId": "c1"})
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1")
+
+    assert result.exit_code == 0, result.output
+    assert "Pinned to cluster c1" in result.output
+    assert "Cluster: c1" in result.output
+    assert "Warning" not in result.output
+
+
+def test_train_unpinned_dispatch_still_shows_the_cluster(monkeypatch, tmp_path: Path) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t", "clusterId": "auto-1"})
+
+    result = _pin_dispatch(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert "Cluster: auto-1" in result.output
+    assert "Pinned" not in result.output
+
+
+def test_train_dispatch_json_carries_cluster_id(monkeypatch, tmp_path: Path) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t", "clusterId": "c1"})
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1", "-o", "json")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"run": {"runId": "r1", "clusterId": "c1"}}
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("output", ["table", "json"])
+def test_train_pin_unconfirmed_by_an_older_backend_warns(
+    monkeypatch, tmp_path: Path, output
+) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t"})
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1", "-o", output)
+
+    assert result.exit_code == 0, result.output
+    warning = result.output if output == "table" else result.stderr
+    plain = " ".join(warning.split())
+    assert "did not confirm the pin to cluster c1" in plain
+    assert "prime train get r1" in plain
+    if output == "json":
+        assert json.loads(result.stdout) == {"run": {"runId": "r1"}}
+
+
+def test_train_pin_landing_elsewhere_warns(monkeypatch, tmp_path: Path) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t", "clusterId": "c2"})
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1")
+
+    assert result.exit_code == 0, result.output
+    assert "requested cluster c1 but the run landed on c2" in " ".join(result.output.split())
+
+
+def test_train_rejected_pin_shows_the_backend_detail(monkeypatch, tmp_path: Path) -> None:
+    detail = "gpuType B200_180GB does not match cluster c1 (H100_80GB)."
+    _fail_create_run(monkeypatch, APIError(f"HTTP 400: {detail}"))
+    lookups: list[Any] = []
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.get_available_fft",
+        lambda self, team_id=None: lookups.append(team_id),
+    )
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1", "--gpu-type", "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    lines = result.output.splitlines()
+    assert f"Error: {detail}" in lines
+    assert "Pin-able clusters: `prime train models`" in lines
+    assert "HTTP 400" not in result.output
+    # The GPU-type capacity lookup would misattribute a rejected pin.
+    assert lookups == []

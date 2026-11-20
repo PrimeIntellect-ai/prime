@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import pytest
 import typer
 from prime_cli.api.rl import RLClient
-from prime_cli.client import APIError
+from prime_cli.client import APIError, NotFoundError
 from prime_cli.commands import rl as rl_commands
 from prime_cli.main import app
 from prime_cli.utils.plain import PrimeConsole
@@ -1205,3 +1205,84 @@ def test_components_trainer_only_sft_still_hides_the_rollout_side(
     assert "trainer" in out
     assert "orchestrator" not in out
     assert "inference" not in out
+
+
+# ---------- prime train logs on an ended run (ENG-8504) ----------
+
+ENDED_MESSAGE = f"Run {RUN_ID} has ended; use --all to view its full logs."
+NO_LOGS_DETAIL = "HTTP 404: No logs available for run"
+
+
+def _mock_logs_error(
+    monkeypatch: pytest.MonkeyPatch, logs_error: APIError, run: Dict[str, Any] | APIError
+) -> List[str]:
+    """Logs fetch raises `logs_error`; the run lookup returns `run` or raises it."""
+    calls: List[str] = []
+
+    def mock_get(self: Any, endpoint: str, params: Dict[str, Any] | None = None, **_: Any) -> Any:
+        calls.append(endpoint)
+        if endpoint == f"/rft/runs/{RUN_ID}/logs":
+            raise logs_error
+        if endpoint == f"/rft/runs/{RUN_ID}":
+            if isinstance(run, APIError):
+                raise run
+            return {"run": run}
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr("prime_cli.core.APIClient.get", mock_get)
+    return calls
+
+
+@pytest.mark.parametrize("status", ["COMPLETED", "STOPPED", "FAILED"])
+@pytest.mark.parametrize("follow", [False, True])
+def test_logs_on_ended_run_points_at_all(
+    monkeypatch: pytest.MonkeyPatch, status: str, follow: bool
+) -> None:
+    _mock_logs_error(monkeypatch, NotFoundError(NO_LOGS_DETAIL), _run_payload(status))
+
+    args = ["train", "logs", RUN_ID, *(["-f"] if follow else [])]
+    result = CliRunner().invoke(app, args, env={"COLUMNS": "200"})
+
+    assert result.exit_code == 1, result.output
+    out = " ".join(_plain(result.output).split())
+    assert f"Error: {ENDED_MESSAGE}" in out
+    assert "404" not in out
+    assert out.count("Error:") == 1
+
+
+def test_logs_without_logs_on_live_run_keeps_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_logs_error(monkeypatch, NotFoundError(NO_LOGS_DETAIL), _run_payload("RUNNING"))
+
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 1, result.output
+    out = " ".join(_plain(result.output).split())
+    assert "has ended" not in out
+    assert "No logs available for run" in out
+
+
+def test_logs_for_unknown_run_keeps_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _mock_logs_error(
+        monkeypatch,
+        NotFoundError(f"HTTP 404: Run {RUN_ID} not found"),
+        NotFoundError(f"HTTP 404: Run {RUN_ID} not found"),
+    )
+
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 1, result.output
+    out = " ".join(_plain(result.output).split())
+    assert f"Run {RUN_ID} not found" in out
+    assert "has ended" not in out
+    assert calls == [f"/rft/runs/{RUN_ID}/logs"]
+
+
+def test_logs_keeps_api_error_when_status_lookup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_logs_error(monkeypatch, NotFoundError(NO_LOGS_DETAIL), APIError("HTTP 502: Bad Gateway"))
+
+    result = CliRunner().invoke(app, ["train", "logs", RUN_ID], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 1, result.output
+    out = " ".join(_plain(result.output).split())
+    assert "has ended" not in out
+    assert "No logs available for run" in out

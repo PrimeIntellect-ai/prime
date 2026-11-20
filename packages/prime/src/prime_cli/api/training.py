@@ -10,7 +10,7 @@ import os
 from typing import Any, Dict, List, Literal, Optional
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from prime_cli.core import APIClient, APIError, NotFoundError, default_user_agent
@@ -71,6 +71,9 @@ class HostedTrainingRunResponse(BaseModel):
     price_per_gpu_hour: float | None = Field(None, alias="pricePerGpuHour")
     estimated_cost_per_hour: float | None = Field(None, alias="estimatedCostPerHour")
     is_beta: bool = Field(False, alias="isBeta")
+    # The cluster the run landed on; absent from backends predating cluster
+    # pinning, which also ignore a requested `clusterId`.
+    cluster_id: str | None = Field(None, alias="clusterId")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -133,8 +136,13 @@ class OnDemandGpuTypeAvailability(BaseModel):
     GPU type, never that this run will start now — actual placement also
     needs headroom for the run's GPU count and topology, which the
     discovery endpoint knows nothing about (and the backend's physical
-    free capacity can even be unknown). Rendered as available/busy with a
+    free capacity can even be unknown). Rendered as Available/Busy with a
     queue caveat, never a start-time promise.
+
+    `at_capacity` marks a GPU type that is priced but has no inventory at
+    all right now: listed so customers can see it and ask for dedicated
+    capacity. Absent on older backends, where every listed type is
+    sellable, so it defaults to False.
     """
 
     gpu_type: str = Field(..., alias="gpuType")
@@ -143,8 +151,34 @@ class OnDemandGpuTypeAvailability(BaseModel):
     available_now: bool = Field(False, alias="availableNow")
     # Server-driven so the label retires without a CLI release.
     is_beta: bool = Field(False, alias="isBeta")
+    at_capacity: bool = Field(False, validation_alias=AliasChoices("atCapacity", "at_capacity"))
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("at_capacity", mode="before")
+    @classmethod
+    def _null_at_capacity_is_available(cls, value: Any) -> Any:
+        return False if value is None else value
+
+
+class PinnableCluster(BaseModel):
+    """A cluster a run can be pinned to with `clusterId` on create.
+
+    `on_demand` marks shared on-demand capacity (billed per GPU-hour)
+    rather than one of the caller's reserved clusters.
+    """
+
+    cluster_id: str = Field(..., alias="clusterId")
+    cluster_name: str = Field(..., alias="clusterName")
+    gpu_type: str | None = Field(None, alias="gpuType")
+    on_demand: bool = Field(False, alias="onDemand")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("on_demand", mode="before")
+    @classmethod
+    def _null_on_demand_is_reserved(cls, value: Any) -> Any:
+        return False if value is None else value
 
 
 class AvailableFFTModelsResponse(BaseModel):
@@ -152,6 +186,9 @@ class AvailableFFTModelsResponse(BaseModel):
 
     models: list[AvailableFFTModel] = Field(default_factory=list)
     on_demand: list[OnDemandGpuTypeAvailability] = Field(default_factory=list, alias="onDemand")
+    # Every cluster `clusterId` on create accepts for the caller. None, not
+    # empty, when the backend predates cluster pinning and omits the field.
+    clusters: list[PinnableCluster] | None = None
     # Three states. Explicit False: the account is not enrolled in the
     # on-demand beta, so an empty `on_demand` list is an access denial —
     # the only case where "contact support to request access" is the right
@@ -668,6 +705,7 @@ def build_payload_from_toml(
     wandb_api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
     gpu_type: Optional[str] = None,
+    cluster_id: Optional[str] = None,
     volume: Optional[str] = None,
     mode: Optional[str] = None,
     source_ref: Optional[str] = None,
@@ -690,6 +728,9 @@ def build_payload_from_toml(
       - gpu_type: narrows the backend picker to clusters with matching
         PrimeCluster.gpuType (e.g. "H200_141GB"); omit for the default
         auto-pick with no type preference.
+      - cluster_id: pins the run to one cluster from the discovery
+        response's `clusters`. A `gpu_type` sent with it must match that
+        cluster's; omitted, the cluster's type is used.
       - volume: a named volume the run writes its outputs to, under
         runs/<runId>/, instead of a per-run PVC. For SFT runs the volume
         also supplies the dataset: it is mounted read-only at /volume,
@@ -706,7 +747,7 @@ def build_payload_from_toml(
       - resume_from: a PAUSED run to continue from. The platform attaches
         that run's volume when none is given.
 
-    Cluster targeting is backend-side (auto-pick first uncordoned).
+    Without `cluster_id`, cluster targeting is backend-side.
     """
     payload: Dict[str, Any] = {"config": cfg}
     if mode:
@@ -723,6 +764,8 @@ def build_payload_from_toml(
         payload["hfToken"] = hf_token
     if gpu_type:
         payload["gpuType"] = gpu_type
+    if cluster_id:
+        payload["clusterId"] = cluster_id
     if volume:
         payload["volume"] = volume
     if source_ref:

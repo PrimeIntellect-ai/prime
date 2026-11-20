@@ -1,6 +1,7 @@
 """Tests for `prime rl models` — focused on price column rendering."""
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from typer.testing import CliRunner
 def _api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_API_KEY", "dummy")
     monkeypatch.setenv("PRIME_DISABLE_VERSION_CHECK", "1")
+    monkeypatch.setenv("PRIME_FRONTEND_URL", "https://frontend.test/")
 
 
 def _fft_models_payload() -> dict[str, Any]:
@@ -656,6 +658,7 @@ def test_models_json_retains_on_demand_rows(monkeypatch: pytest.MonkeyPatch, mod
             "discount_label": None,
             "available_now": False,
             "is_beta": False,
+            "at_capacity": False,
         }
     ]
 
@@ -684,7 +687,7 @@ def test_on_demand_only_discovery_renders_no_empty_banner(
 def test_on_demand_table_renders_capacity_not_start_promise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The column is a coarse capacity hint (available/busy) with a queue
+    """The column is a coarse capacity hint (Available/Busy) with a queue
     caveat — never a `Starts: now` scheduling promise the endpoint cannot
     make: discovery only sees pool headroom, not the run's GPU count or
     topology."""
@@ -701,8 +704,8 @@ def test_on_demand_table_renders_capacity_not_start_promise(
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
     assert "Capacity" in plain
-    assert "available" in plain
-    assert "busy" in plain
+    assert "Available" in plain
+    assert "Busy" in plain
     # The old immediate-start promise is gone.
     assert "Starts" not in plain
     assert "queued" not in plain
@@ -732,11 +735,61 @@ def test_on_demand_table_caption_rates_lock_at_dispatch(
     plain = strip_ansi(result.output)
     normalized = " ".join(plain.split())
     expected = (
-        "Rate fixed at dispatch; billed per GPU-hour from when pods are "
-        "ready, prorated to the second."
+        "Rates are fixed at dispatch and billed per GPU-hour from pod ready, prorated per second."
     )
     assert expected in normalized
     assert "fixed when the run starts" not in normalized
+
+
+def test_on_demand_footer_lines_are_not_wrapped_to_table_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Footer notes print under the table at console width, not as a caption
+    that Rich wraps to the (much narrower) table width, and share one dim,
+    non-italic style with the dedicated-capacity hint."""
+    entries = [
+        _on_demand_entry("H100_80GB", 2.0),
+        {**_on_demand_entry("B200_180GB", 5.0, available_now=False), "atCapacity": True},
+    ]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+
+    _force_color_console(monkeypatch)
+
+    result = CliRunner().invoke(app, ["train", "models"])
+
+    assert result.exit_code == 0, result.output
+    raw_lines = _OSC8.sub("", result.output).splitlines()
+    lines = [strip_ansi(ln).rstrip() for ln in raw_lines]
+    for note in (
+        "Rates are fixed at dispatch and billed per GPU-hour from pod ready, prorated per second.",
+        "Runs may queue depending on GPU count and topology.",
+        _CAPACITY_HINT,
+    ):
+        raw = raw_lines[lines.index(note)]
+        # Dim; never italic, which was the caption style.
+        assert raw.startswith("\x1b[2m"), repr(raw)
+        assert not _ITALIC.search(raw), repr(raw)
+
+
+def test_capacity_hint_links_request_compute_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The link text itself is an underlined OSC 8 hyperlink to the configured
+    frontend's Request Compute page; no raw URL or support email is printed."""
+    entries = [{**_on_demand_entry("B200_180GB", 5.0, available_now=False), "atCapacity": True}]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+    _force_color_console(monkeypatch)
+
+    result = CliRunner().invoke(app, ["train", "models"])
+
+    assert result.exit_code == 0, result.output
+    assert _osc8_targets(result.output) == [_QUOTES_URL]
+    assert "\x1b[2;4mRequest dedicated capacity" in result.output
+    visible = strip_ansi(_OSC8.sub("", result.output))
+    assert _QUOTES_URL not in visible
+    assert "support@" not in result.output
 
 
 @pytest.mark.parametrize("is_beta", [False, True], ids=["stable", "beta"])
@@ -775,6 +828,234 @@ def test_on_demand_table_escapes_promo_markup(monkeypatch: pytest.MonkeyPatch) -
 
     assert result.exit_code == 0, result.output
     plain = strip_ansi(result.output)
-    # Rich may still wrap the caption to the table width, so compare on
-    # whitespace-normalized text.
     assert " ".join(plain.split()).count(" ".join(label.split())) == 1
+
+
+# --- at-capacity GPU types (priced, no inventory) --------------------------
+
+# The URL follows the configured frontend (PRIME_FRONTEND_URL, set above),
+# so staging and dev point at their own Request Compute page.
+_QUOTES_URL = "https://frontend.test/dashboard/quotes"
+_CAPACITY_HINT = "Need a GPU type that's at capacity? Request dedicated capacity"
+_OSC8 = re.compile(r"\x1b\]8;[^;]*;([^\x1b]*)\x1b\\")
+_ITALIC = re.compile(r"\x1b\[(?:[0-9;]*;)?3(?:;[0-9;]*)?m")
+
+
+def _osc8_targets(output: str) -> list[str]:
+    return [target for target in _OSC8.findall(output) if target]
+
+
+def _force_color_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rl.py builds its console at import, before CliRunner's env applies."""
+    from prime_cli.utils import get_console
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        "prime_cli.commands.rl.console",
+        get_console(force_terminal=True, color_system="standard", width=120),
+    )
+
+
+def _capacity_line(plain: str, gpu_type: str) -> str:
+    return next(ln for ln in plain.splitlines() if gpu_type in ln)
+
+
+@pytest.mark.parametrize("key", ["atCapacity", "at_capacity"])
+def test_at_capacity_parses_both_casings(key: str) -> None:
+    from prime_cli.api.training import OnDemandGpuTypeAvailability
+
+    entry = OnDemandGpuTypeAvailability.model_validate({**_on_demand_entry(), key: True})
+    assert entry.at_capacity is True
+
+
+@pytest.mark.parametrize("payload", [{}, {"atCapacity": None}], ids=["absent", "null"])
+def test_missing_at_capacity_means_available(payload: dict[str, Any]) -> None:
+    from prime_cli.api.training import OnDemandGpuTypeAvailability
+
+    entry = OnDemandGpuTypeAvailability.model_validate({**_on_demand_entry(), **payload})
+    assert entry.at_capacity is False
+
+
+def test_at_capacity_entries_render_last_with_one_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [
+        {**_on_demand_entry("B200_180GB", 5.0, available_now=False), "atCapacity": True},
+        _on_demand_entry("H100_80GB", 2.0, available_now=True),
+        {**_on_demand_entry("GB200_186GB", 6.0, available_now=False), "atCapacity": True},
+        _on_demand_entry("H200_141GB", 3.0, available_now=False),
+    ]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    order = [
+        gpu
+        for ln in plain.splitlines()
+        for gpu in ("B200_180GB", "H100_80GB", "GB200_186GB", "H200_141GB")
+        if gpu in ln
+    ]
+    # Sellable types first in backend order, then at-capacity in backend order.
+    assert order == ["H100_80GB", "H200_141GB", "B200_180GB", "GB200_186GB"]
+    assert "At capacity" in _capacity_line(plain, "B200_180GB")
+    assert "At capacity" in _capacity_line(plain, "GB200_186GB")
+    assert "Available" in _capacity_line(plain, "H100_80GB")
+    assert "Busy" in _capacity_line(plain, "H200_141GB")
+    # Priced types keep their rate even with no inventory.
+    assert "$5.00" in _capacity_line(plain, "B200_180GB")
+    assert " ".join(plain.split()).count(_CAPACITY_HINT) == 1
+    assert "support@" not in plain
+
+
+def test_no_capacity_hint_without_at_capacity_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _discovery_mock({"models": [], "onDemand": [_on_demand_entry()]}),
+    )
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "At capacity" not in plain
+    assert "Request dedicated capacity" not in plain
+
+
+def test_models_json_carries_at_capacity_sorted_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [
+        {**_on_demand_entry("B200_180GB", 5.0), "atCapacity": True},
+        _on_demand_entry("H100_80GB", 2.0),
+    ]
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "onDemand": entries})
+    )
+
+    result = CliRunner().invoke(app, ["train", "models", "--output", "json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert [(o["gpu_type"], o["at_capacity"]) for o in data["on_demand"]] == [
+        ("H100_80GB", False),
+        ("B200_180GB", True),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("flags", "label", "absent"),
+    [
+        ({"availableNow": False, "atCapacity": True}, "At capacity", ("Available", "Busy")),
+        ({"availableNow": False, "atCapacity": False}, "Busy", ("Available", "At capacity")),
+        ({"availableNow": True, "atCapacity": False}, "Available", ("Busy", "At capacity")),
+    ],
+    ids=["at-capacity", "busy", "available"],
+)
+def test_platform_capacity_states_render_one_label(
+    monkeypatch: pytest.MonkeyPatch, flags: dict[str, bool], label: str, absent: tuple[str, ...]
+) -> None:
+    """The platform contract: atCapacity always pairs with availableNow
+    false, and only atCapacity reads as "At capacity"; a busy pool keeps
+    the queue label."""
+    entry = {"gpuType": "B300_262GB", "pricePerGpuHour": 9.0, "isBeta": False, **flags}
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get",
+        _discovery_mock({"models": [], "onDemand": [entry]}),
+    )
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    row = _capacity_line(plain, "B300_262GB")
+    assert label in row
+    assert not any(other in row for other in absent)
+    normalized = " ".join(plain.split())
+    assert "Runs may queue depending on GPU count and topology." in normalized
+    assert (_CAPACITY_HINT in normalized) is (label == "At capacity")
+
+
+_PINNABLE_CLUSTERS = [
+    {"clusterId": "od-1", "clusterName": "shared", "gpuType": "B200_180GB", "onDemand": True},
+    {"clusterId": "cluster-a", "clusterName": "athens", "gpuType": "H200_141GB", "onDemand": False},
+]
+
+
+def test_models_lists_pinnable_clusters_reserved_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {**_fft_models_payload(), "clusters": _PINNABLE_CLUSTERS}
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _discovery_mock(payload))
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "Clusters" in plain
+    rows = [ln for ln in plain.splitlines() if "cluster-a" in ln or "od-1" in ln]
+    assert len(rows) == 2
+    assert all(s in rows[0] for s in ("cluster-a", "athens", "H200_141GB", "Reserved"))
+    assert all(s in rows[1] for s in ("od-1", "shared", "B200_180GB", "On-demand"))
+    assert "--cluster-id <id>" in plain
+
+
+def test_models_clusters_render_without_cached_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"models": [], "clusters": _PINNABLE_CLUSTERS[:1]}
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _discovery_mock(payload))
+
+    result = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    plain = strip_ansi(result.output)
+    assert "No models available for Hosted Training." in plain
+    assert "od-1" in plain
+
+
+@pytest.mark.parametrize("payload", [{"models": []}, {"models": [], "clusters": None}])
+def test_models_without_clusters_field_keeps_old_output(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]
+) -> None:
+    """Older backends omit `clusters`: no section in the table, no key in JSON."""
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _discovery_mock(payload))
+
+    table = CliRunner().invoke(app, ["train", "models"], env={"COLUMNS": "200"})
+    as_json = CliRunner().invoke(app, ["train", "models", "-o", "json"])
+
+    assert table.exit_code == 0, table.output
+    assert "Clusters" not in strip_ansi(table.output)
+    assert as_json.exit_code == 0, as_json.output
+    assert json.loads(as_json.output) == {"available_fft_models": []}
+
+
+def test_models_json_carries_clusters(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {"models": [], "clusters": _PINNABLE_CLUSTERS}
+    monkeypatch.setattr("prime_cli.core.APIClient.get", _discovery_mock(payload))
+
+    result = CliRunner().invoke(app, ["train", "models", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["clusters"] == [
+        {
+            "cluster_id": "od-1",
+            "cluster_name": "shared",
+            "gpu_type": "B200_180GB",
+            "on_demand": True,
+        },
+        {
+            "cluster_id": "cluster-a",
+            "cluster_name": "athens",
+            "gpu_type": "H200_141GB",
+            "on_demand": False,
+        },
+    ]
+
+
+def test_models_json_keeps_an_empty_cluster_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit empty list (nothing pin-able) is data, unlike an omitted field."""
+    monkeypatch.setattr(
+        "prime_cli.core.APIClient.get", _discovery_mock({"models": [], "clusters": []})
+    )
+
+    result = CliRunner().invoke(app, ["train", "models", "-o", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["clusters"] == []

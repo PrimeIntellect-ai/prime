@@ -60,6 +60,7 @@ from .exceptions import (
     BatchStatusUnsupportedError,
     CommandTimeoutError,
     DownloadTimeoutError,
+    SandboxDiskFullError,
     SandboxFileNotFoundError,
     SandboxFileTooLargeError,
     SandboxImagePullError,
@@ -1875,6 +1876,9 @@ def _owner_checkpoint_params(
     sandbox_id: Optional[str],
     states: Optional[List[str]],
     created_before: Optional[datetime],
+    user_id: Optional[str] = None,
+    labels: Optional[List[str]] = None,
+    all_users: bool = False,
 ) -> Dict[str, Any]:
     """Query params shared by the account-wide checkpoint list and delete."""
     params: Dict[str, Any] = {}
@@ -1882,6 +1886,12 @@ def _owner_checkpoint_params(
         params["team_id"] = team_id
     if sandbox_id:
         params["sandbox_id"] = sandbox_id
+    if user_id:
+        params["user_id"] = user_id
+    if labels:
+        params["labels"] = labels
+    if all_users:
+        params["all_users"] = "true"
     if states:
         params["state"] = states
     if created_before:
@@ -1978,8 +1988,13 @@ def _build_terminated_message(command: str, ctx: dict) -> str:
     status = ctx.get("status")
 
     if error_type == "OOM_KILLED":
-        parts.append("The sandbox was terminated due to out-of-memory (OOM).")
-        parts.append("Consider requesting more memory or optimizing memory usage.")
+        parts.append("The sandbox ran out of memory.")
+        parts.append("Consider requesting more memory or reducing memory usage.")
+    elif error_type == "SANDBOX_UNRESPONSIVE":
+        parts.append("The sandbox stopped responding and was terminated.")
+    elif error_type == "NODE_FAILURE":
+        parts.append("The sandbox's host failed; this was not caused by the sandbox.")
+        parts.append("Retry with a new sandbox.")
     elif error_type == "TIMEOUT":
         parts.append("The sandbox exceeded its maximum runtime and was terminated.")
     elif error_type == "IMAGE_PULL_FAILED":
@@ -2648,13 +2663,18 @@ class SandboxClient:
         sandbox_id: Optional[str] = None,
         states: Optional[List[str]] = None,
         created_before: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
     ) -> List[SandboxCheckpoint]:
         """List every rootfs checkpoint of your account (or team_id), oldest first.
 
-        Includes checkpoints of deleted sandboxes.
+        Includes checkpoints of deleted sandboxes. user_id keeps one creator's
+        checkpoints; labels keeps those whose sandbox had ALL these labels.
         """
         team_id = team_id if team_id is not None else self.client.config.team_id
-        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        params = _owner_checkpoint_params(
+            team_id, sandbox_id, states, created_before, user_id, labels
+        )
         results: List[SandboxCheckpoint] = []
         while True:
             response = self.client.request("GET", "/sandbox/checkpoints", params=params)
@@ -2669,14 +2689,22 @@ class SandboxClient:
         sandbox_id: Optional[str] = None,
         states: Optional[List[str]] = None,
         created_before: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        all_users: bool = False,
     ) -> DeleteSandboxCheckpointsResponse:
         """Delete every matching durable or failed checkpoint, with per-checkpoint errors.
 
         Each deletion behaves like delete_checkpoint; the active tip of a running
-        sandbox is kept and reported as CONFLICT.
+        sandbox is kept and reported as CONFLICT. In a team, only your own
+        checkpoints are deleted unless you are a team admin and pass another
+        user_id or all_users=True. labels keeps checkpoints whose sandbox had ALL
+        these labels.
         """
         team_id = team_id if team_id is not None else self.client.config.team_id
-        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        params = _owner_checkpoint_params(
+            team_id, sandbox_id, states, created_before, user_id, labels, all_users
+        )
         total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
         while True:
             response = self.client.request("DELETE", "/sandbox/checkpoints", params=params)
@@ -3912,6 +3940,11 @@ class SandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
@@ -3980,6 +4013,11 @@ class SandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, self._get_sandbox_error_context(sandbox_id), cause=e
@@ -4501,10 +4539,14 @@ class AsyncSandboxClient:
         sandbox_id: Optional[str] = None,
         states: Optional[List[str]] = None,
         created_before: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
     ) -> List[SandboxCheckpoint]:
         """List every rootfs checkpoint of your account (or team_id), oldest first."""
         team_id = team_id if team_id is not None else self.client.config.team_id
-        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        params = _owner_checkpoint_params(
+            team_id, sandbox_id, states, created_before, user_id, labels
+        )
         results: List[SandboxCheckpoint] = []
         while True:
             response = await self.client.request("GET", "/sandbox/checkpoints", params=params)
@@ -4519,10 +4561,15 @@ class AsyncSandboxClient:
         sandbox_id: Optional[str] = None,
         states: Optional[List[str]] = None,
         created_before: Optional[datetime] = None,
+        user_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        all_users: bool = False,
     ) -> DeleteSandboxCheckpointsResponse:
         """Delete every matching durable or failed checkpoint, with per-checkpoint errors."""
         team_id = team_id if team_id is not None else self.client.config.team_id
-        params = _owner_checkpoint_params(team_id, sandbox_id, states, created_before)
+        params = _owner_checkpoint_params(
+            team_id, sandbox_id, states, created_before, user_id, labels, all_users
+        )
         total = DeleteSandboxCheckpointsResponse(deleted=[], errors=[])
         while True:
             response = await self.client.request("DELETE", "/sandbox/checkpoints", params=params)
@@ -5056,13 +5103,6 @@ class AsyncSandboxClient:
             if timeout is None
             else min(timeout * 1000, _LIVE_PROCESS_NO_TIMEOUT_MS)
         )
-
-        await self._auth_cache.get_or_refresh(sandbox_id)
-
-        auth = await self._auth_cache.get_or_refresh(sandbox_id)
-        gateway_url = auth["gateway_url"].rstrip("/")
-        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
-        headers = {"Authorization": f"Bearer {auth['token']}"}
         # session_uuid is the Start idempotency key: re-issuing the same request
         # attaches to (or replays) the session instead of spawning a second
         # process.
@@ -5076,6 +5116,45 @@ class AsyncSandboxClient:
             after_sequence=0,
             user=user,
         )
+        return await self._live_process(sandbox_id, session_uuid, timeout_ms, start=request)
+
+    async def attach_process(
+        self, sandbox_id: str, session_uuid: str, timeout: Optional[int] = None
+    ) -> AsyncSandboxProcess:
+        """Attach to a live process that ``open_process`` started, by the handle's
+        ``session_uuid``: from another client, after the one that started it went away,
+        or in a sandbox created from a memory checkpoint of the one it started in.
+
+        The process keeps running while no client is attached. A sandboxd with output
+        replay sends the output it retains from the start of the process, and the
+        handle raises ProcessOutputLostError when part of it is gone. An older sandboxd
+        sends only the output from the attach on. A process that exited within
+        sandboxd's retention window reports its exit code. Pass the ``timeout`` the
+        process was opened with, since sandboxd applies the stream's deadline to the
+        process.
+        """
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be a positive number of seconds")
+        timeout_ms = (
+            _LIVE_PROCESS_NO_TIMEOUT_MS
+            if timeout is None
+            else min(timeout * 1000, _LIVE_PROCESS_NO_TIMEOUT_MS)
+        )
+        return await self._live_process(sandbox_id, session_uuid, timeout_ms)
+
+    async def _live_process(
+        self,
+        sandbox_id: str,
+        session_uuid: str,
+        timeout_ms: int,
+        start: Optional[Message] = None,
+    ) -> AsyncSandboxProcess:
+        """Stream the live process ``session_uuid``: start it with ``start``, or
+        attach to it with Connect when ``start`` is None."""
+        auth = await self._auth_cache.get_or_refresh(sandbox_id)
+        gateway_url = auth["gateway_url"].rstrip("/")
+        base_url = f"{gateway_url}/{auth['user_ns']}/{auth['job_id']}"
+        headers = {"Authorization": f"Bearer {auth['token']}"}
         # Lease one slot for the process lifetime, including reconnects. The
         # command pool limits long-lived streams per connection and leaves room
         # for control RPCs, without opening a connection for every command.
@@ -5095,8 +5174,18 @@ class AsyncSandboxClient:
                 http_client=http_client,
             )
             stream = rpc_client.execute_server_stream(
-                request=request,
-                method=COMMAND_SESSION_START_RPC_METHOD,
+                request=(
+                    build_command_session_connect_request(
+                        session_uuid=session_uuid, after_sequence=0
+                    )
+                    if start is None
+                    else start
+                ),
+                method=(
+                    COMMAND_SESSION_CONNECT_RPC_METHOD
+                    if start is None
+                    else COMMAND_SESSION_START_RPC_METHOD
+                ),
                 headers=headers,
                 timeout_ms=timeout_ms,
             )
@@ -5135,14 +5224,14 @@ class AsyncSandboxClient:
             # spawned, so retry Start (create-or-attach); afterwards Connect
             # re-attaches from the last output cursor, including after exit.
             # `started` is fixed for this invocation, so pick once.
-            if started:
+            if started or start is None:
                 method = COMMAND_SESSION_CONNECT_RPC_METHOD
                 reattach_request = build_command_session_connect_request(
                     session_uuid=session_uuid, after_sequence=after_sequence
                 )
             else:
                 method = COMMAND_SESSION_START_RPC_METHOD
-                reattach_request = request
+                reattach_request = start
             reauthed = False
             while True:
                 auth = await self._auth_cache.get_or_refresh(sandbox_id)
@@ -5182,6 +5271,8 @@ class AsyncSandboxClient:
                 transport=transport,
                 reconnect=reconnect,
                 release_transport=leases.close,
+                session_uuid=session_uuid,
+                attached=start is None,
             )
         except BaseException:
             leases.close()
@@ -6040,6 +6131,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException as e:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout) from e
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e
@@ -6109,6 +6205,11 @@ class AsyncSandboxClient:
             except httpx.TimeoutException:
                 raise UploadTimeoutError(sandbox_id, file_path, effective_timeout)
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 507:
+                    raise SandboxDiskFullError(
+                        f"Upload failed: sandbox disk is full (no space left). "
+                        f"Details: {e.response.text}"
+                    ) from e
                 if _is_gateway_sandbox_terminated(e.response):
                     _raise_sandbox_gone(
                         sandbox_id, await self._get_sandbox_error_context(sandbox_id), cause=e

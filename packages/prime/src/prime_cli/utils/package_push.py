@@ -17,12 +17,40 @@ import typer
 from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel_filename
 
 from ..client import APIClient, APIError
+from .hub import HubAPIError
 from .package_archive import write_source_archive
 from .plain import get_console
 
 # The platform's `TEAM_ID_PATTERN` (a cuid); anything else configured is a slug.
 _TEAM_ID = re.compile(r"^c[a-z0-9]{24}$")
 _USERNAME = re.compile(r"^[a-z0-9-]{3,30}$")
+
+
+# What to tell someone whose push the Hub refused, by error code.
+PUSH_ERROR_TIPS = {
+    "version_exists": "Each version is published once. Bump the version in pyproject.toml.",
+    "release_superseded": "Another push of this version finished first. Push again.",
+    "name_taken": "Another owner already publishes a verifiers v1 package by this name.",
+    "name_tombstoned": "A deleted package had this name, so it can't be used again.",
+    "name_reserved": "This name is reserved. Choose another in pyproject.toml.",
+    "package_exists": "You already have a package by this name.",
+    "invalid_components": "Legacy (v0) packages can't declare components.",
+    "forbidden": "Check --owner/--team: you need write access to push there.",
+}
+
+
+def print_push_error(console: Any, error: HubAPIError, *, bump_hint: str = "") -> None:
+    """Say why the Hub refused a push, and what to do about it.
+
+    `bump_hint` follows the tip for a version that's already published, naming
+    the command's own way to bump it.
+    """
+    console.print(f"[red]Push failed: {error.message} ({error.code})[/red]")
+    tip = PUSH_ERROR_TIPS.get(error.code)
+    if tip and error.code == "version_exists" and bump_hint:
+        tip = f"{tip} {bump_hint}"
+    if tip:
+        console.print(f"[yellow]{tip}[/yellow]")
 
 
 class PushError(Exception):

@@ -48,6 +48,7 @@ from ..utils.package_push import (
     build_wheel,
     check_name_matches_distribution,
     hub_names,
+    print_push_error,
     requires_dist_of,
     resolve_owner,
     wheel_distribution,
@@ -643,28 +644,6 @@ def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path
 
 _FRAMEWORKS = {VERIFIERS_V0: "v0", VERIFIERS_V1: "v1"}
 
-# What to tell someone whose push the Hub refused, by error code.
-_PUSH_ERROR_TIPS = {
-    "version_exists": (
-        "Each version is published once. Bump the version in pyproject.toml, "
-        "or pass --auto-bump, --rc or --post."
-    ),
-    "release_superseded": "Another push of this version finished first. Push again.",
-    "name_taken": "Another owner already publishes a verifiers v1 package by this name.",
-    "name_tombstoned": "A deleted package had this name, so it can't be used again.",
-    "name_reserved": "This name is reserved. Choose another in pyproject.toml.",
-    "package_exists": "You already have a package by this name.",
-    "invalid_components": "Legacy (v0) packages can't declare components.",
-    "forbidden": "Check --owner/--team: you need write access to push there.",
-}
-
-
-def _print_push_error(error: HubAPIError) -> None:
-    console.print(f"[red]Push failed: {error.message} ({error.code})[/red]")
-    tip = _PUSH_ERROR_TIPS.get(error.code)
-    if tip:
-        console.print(f"[yellow]{tip}[/yellow]")
-
 
 def _declared_components(env_path: Path, distribution: str) -> List[Dict[str, str]]:
     """Detect the v1 components the package exports, and say what was found."""
@@ -958,7 +937,7 @@ def push(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
     except HubAPIError as e:
-        _print_push_error(e)
+        print_push_error(console, e, bump_hint="Or pass --auto-bump, --rc or --post.")
         raise typer.Exit(1)
     except APIError as e:
         console.print(f"[red]API Error: {e}[/red]")

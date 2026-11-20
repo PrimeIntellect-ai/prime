@@ -84,3 +84,23 @@ def test_a_folder_without_a_project_is_refused(hub: FakeHub, tmp_path):
     assert result.exit_code == 1
     assert "pyproject.toml" in strip_ansi(result.output)
     assert hub.calls == []
+
+
+def test_json_stays_clean_when_a_username_is_chosen_first(hub: FakeHub, pipeline):
+    hub.slug = None
+
+    result = runner.invoke(
+        app,
+        ["pipelines", "push", "--path", str(pipeline), "--output", "json"],
+        input="bob\n",
+        env={"COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0, result.output
+    # CliRunner echoes the typed answer onto stdout, as a terminal shows typing; the
+    # prompt and the messages around it go to stderr.
+    echoed, document = result.stdout.split("\n", 1)
+    assert echoed.strip() == "bob"
+    assert json.loads(document)["reference"] == "bob/math-loop@1.0.0"
+    assert "Enter your desired username" in result.stderr
+    assert "Username set to bob" in result.stderr

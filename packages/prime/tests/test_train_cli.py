@@ -1815,3 +1815,138 @@ def test_capacity_wording_without_at_capacity_is_not_replaced(monkeypatch, tmp_p
     plain = " ".join(result.output.split())
     assert f"Error: {legacy}" in plain
     assert "Note: B200_180GB is also at capacity right now." in plain
+
+
+# --- cluster pinning (platform#8297) ----------------------------------------
+
+
+def _pin_dispatch(tmp_path: Path, *args: str, toml_extra: str = ""):
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(toml_extra + _FFT_BODY)
+    return runner.invoke(
+        app,
+        ["train", str(cfg), "-y", *args],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "COLUMNS": "200"},
+    )
+
+
+def test_train_cluster_id_flag_and_toml_key_reach_the_payload(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+
+    assert _pin_dispatch(tmp_path, "--cluster-id", "c-flag", "-o", "json").exit_code == 0
+    toml_pin = 'cluster_id = "c-toml"\n'
+    assert _pin_dispatch(tmp_path, "-o", "json", toml_extra=toml_pin).exit_code == 0
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c-flag", "-o", "json", toml_extra=toml_pin)
+    assert result.exit_code == 0, result.output
+    assert _pin_dispatch(tmp_path, "-o", "json").exit_code == 0
+
+    assert [p.get("clusterId") for p in captured] == ["c-flag", "c-toml", "c-flag", None]
+    assert all("cluster_id" not in p["config"] for p in captured)
+
+
+def test_train_cluster_id_is_sent_alongside_gpu_type(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1", "--gpu-type", "H100_80GB")
+
+    assert result.exit_code == 0, result.output
+    assert (captured[0]["clusterId"], captured[0]["gpuType"]) == ("c1", "H100_80GB")
+
+
+@pytest.mark.parametrize(
+    ("args", "toml_extra", "label"),
+    [
+        (["--cluster-id", ""], "", "--cluster-id"),
+        (["--cluster-id", "c" * 65], "", "--cluster-id"),
+        ([], 'cluster_id = ""\n', "cluster_id in"),
+        ([], "cluster_id = 7\n", "cluster_id in"),
+    ],
+    ids=["empty-flag", "long-flag", "empty-toml", "non-string-toml"],
+)
+def test_train_invalid_cluster_id_fails_before_dispatch(
+    monkeypatch, tmp_path: Path, args, toml_extra, label
+) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+
+    result = _pin_dispatch(tmp_path, *args, toml_extra=toml_extra)
+
+    assert result.exit_code == 1, result.output
+    assert label in result.output
+    assert captured == []
+
+
+def test_train_pinned_dispatch_prints_the_landed_cluster(monkeypatch, tmp_path: Path) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t", "clusterId": "c1"})
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1")
+
+    assert result.exit_code == 0, result.output
+    assert "Pinned to cluster c1" in result.output
+    assert "Cluster: c1" in result.output
+    assert "Warning" not in result.output
+
+
+def test_train_unpinned_dispatch_still_shows_the_cluster(monkeypatch, tmp_path: Path) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t", "clusterId": "auto-1"})
+
+    result = _pin_dispatch(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert "Cluster: auto-1" in result.output
+    assert "Pinned" not in result.output
+
+
+def test_train_dispatch_json_carries_cluster_id(monkeypatch, tmp_path: Path) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t", "clusterId": "c1"})
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1", "-o", "json")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"run": {"runId": "r1", "clusterId": "c1"}}
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("output", ["table", "json"])
+def test_train_pin_unconfirmed_by_an_older_backend_warns(
+    monkeypatch, tmp_path: Path, output
+) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t"})
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1", "-o", output)
+
+    assert result.exit_code == 0, result.output
+    warning = result.output if output == "table" else result.stderr
+    plain = " ".join(warning.split())
+    assert "did not confirm the pin to cluster c1" in plain
+    assert "prime train get r1" in plain
+    if output == "json":
+        assert json.loads(result.stdout) == {"run": {"runId": "r1"}}
+
+
+def test_train_pin_landing_elsewhere_warns(monkeypatch, tmp_path: Path) -> None:
+    _mock_run_post(monkeypatch, {"runId": "r1", "tokenValue": "t", "clusterId": "c2"})
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1")
+
+    assert result.exit_code == 0, result.output
+    assert "requested cluster c1 but the run landed on c2" in " ".join(result.output.split())
+
+
+def test_train_rejected_pin_shows_the_backend_detail(monkeypatch, tmp_path: Path) -> None:
+    detail = "gpuType B200_180GB does not match cluster c1 (H100_80GB)."
+    _fail_create_run(monkeypatch, APIError(f"HTTP 400: {detail}"))
+    lookups: list[Any] = []
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.get_available_fft",
+        lambda self, team_id=None: lookups.append(team_id),
+    )
+
+    result = _pin_dispatch(tmp_path, "--cluster-id", "c1", "--gpu-type", "B200_180GB")
+
+    assert result.exit_code == 1, result.output
+    lines = result.output.splitlines()
+    assert f"Error: {detail}" in lines
+    assert "Pin-able clusters: `prime train models`" in lines
+    assert "HTTP 400" not in result.output
+    # The GPU-type capacity lookup would misattribute a rejected pin.
+    assert lookups == []

@@ -457,6 +457,60 @@ def test_outputs_never_write_through_a_planted_symlink(
     assert (tmp_path / "out" / "report" / "report.md").read_text() == "# R"
 
 
+def test_outputs_never_write_through_a_symlinked_node_folder(
+    api: Dict[str, Any], monkeypatch, tmp_path
+) -> None:
+    from contextlib import contextmanager
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def iter_bytes(self):
+            yield b"# R"
+
+    @contextmanager
+    def stream(self: Any, method: str, url: str, **kwargs: Any):
+        yield Response()
+
+    monkeypatch.setattr("httpx.Client.stream", stream)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "report").symlink_to(elsewhere, target_is_directory=True)
+    result = runner.invoke(
+        app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path / "out")], env=TEST_ENV
+    )
+    assert result.exit_code == 1 and "refusing" in result.output
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("part", "refused"),
+    [
+        ("report?v=1#x.md", True),
+        ("a*b", True),
+        ('say"hi"', True),
+        ("a<b>c", True),
+        ("pipe|d", True),
+        ("tab\tname", True),
+        ("CON", True),
+        ("nul.txt", True),
+        ("Com1.log", True),
+        ("lpt9", True),
+        ("aux. ", True),
+        ("report.md", False),
+        ("console.md", False),
+        ("com10", False),
+        ("x#y.md", False),
+    ],
+)
+def test_names_windows_cannot_save(part: str, refused: bool) -> None:
+    from prime_cli.commands.pipelines import _not_a_windows_name
+
+    assert _not_a_windows_name(part) is refused
+
+
 def test_outputs_encode_names_in_the_download_url(
     api: Dict[str, Any], monkeypatch, tmp_path
 ) -> None:

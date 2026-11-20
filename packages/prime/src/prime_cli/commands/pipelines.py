@@ -624,6 +624,17 @@ def reply(
     )
 
 
+# Characters and device names Windows can't use in a file name.
+_WINDOWS_RESERVED_CHARACTERS = re.compile(r'[<>"|?*\x00-\x1f]')
+_WINDOWS_DEVICES = re.compile(r"^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$", re.IGNORECASE)
+
+
+def _not_a_windows_name(part: str) -> bool:
+    return bool(
+        _WINDOWS_RESERVED_CHARACTERS.search(part) or _WINDOWS_DEVICES.match(part.rstrip(". "))
+    )
+
+
 @app.command("outputs")
 def outputs(
     run_id: str = typer.Argument(..., help="The run's id."),
@@ -635,11 +646,17 @@ def outputs(
     if not listed:
         console.print("This run has no outputs yet.")
         return
+    base = directory.resolve()
     for out in listed:
         parts = (str(out["node"]), str(out["name"]))
         # Nothing but dots and spaces is `.` or `..` to Windows, which drops trailing ones.
         if any(
-            not part.rstrip(". ") or "/" in part or "\\" in part or ":" in part for part in parts
+            not part.rstrip(". ")
+            or "/" in part
+            or "\\" in part
+            or ":" in part
+            or (os.name == "nt" and _not_a_windows_name(part))
+            for part in parts
         ):
             _fail(APIError(f"refusing an output named {out['node']}/{out['name']}"))
         target = directory / parts[0] / parts[1]
@@ -650,6 +667,10 @@ def outputs(
         )
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
+            # A node's folder that is a symlink (an existing `.ssh` linked elsewhere, say)
+            # would take the file out of the directory.
+            if not target.parent.resolve().is_relative_to(base):
+                _fail(APIError(f"refusing {target.parent}: it leads out of {directory}"))
             timeout = httpx.Timeout(300.0, connect=10.0)
             with client.client.stream("GET", url, timeout=timeout) as response:
                 response.raise_for_status()

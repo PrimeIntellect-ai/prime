@@ -201,6 +201,8 @@ prime sandbox checkpoint get <checkpoint-id>
 prime sandbox checkpoint restore <checkpoint-id> --name restored-sandbox
 # Checkpoint + restore in one step, inheriting the source's resources
 prime sandbox fork <sandbox-id> [--name forked-sandbox]
+# Also fork the source's memory: pause it, fork, then resume it asynchronously
+prime sandbox fork <sandbox-id> [--with-memory]
 
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
@@ -225,6 +227,18 @@ prime sandbox volumes create data --from ~/datasets/my-data
 # Clean up
 prime sandbox delete <sandbox-id>
 ```
+
+`prime sandbox fork` checkpoints the source's filesystem and restores it into a
+new sandbox that inherits the source's shape, team, region, timeout, and labels;
+the source keeps running. `--with-memory` also forks the source's memory and
+running processes: the source is paused for the snapshot, resumed afterwards
+asynchronously (`prime sandbox get` shows when it runs again), and the fork takes
+the paused sandbox's shape, environment, and secrets, so `--with-memory` rejects
+`--cpu-cores` and `--memory-gb`. A memory fork is an exact copy of the paused
+guest: userspace random generators and keys, tokens, or IDs already in memory are
+the same in every fork, so rekey or regenerate them in the workload. GPU
+sandboxes and sandboxes with volumes cannot be paused, so they cannot be
+memory-forked. `--wait-timeout` bounds the checkpoint or snapshot wait.
 
 Volume writes are private to a sandbox until a publish reaches DURABLE
 and its merge finishes. A

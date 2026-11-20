@@ -111,7 +111,7 @@ def test_eval_run_hosted_invokes_hosted_runner(monkeypatch):
         ),
     )
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["environment_id"] = config.environment_id
         captured["environment_ids"] = environment_ids
         captured["inference_model"] = config.inference_model
@@ -157,7 +157,7 @@ def test_eval_run_hosted_passes_runtime_args_from_cli(monkeypatch):
         ),
     )
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["max_concurrent"] = config.max_concurrent
         captured["max_retries"] = config.max_retries
         captured["state_columns"] = config.state_columns
@@ -220,7 +220,7 @@ def test_eval_run_hosted_passes_api_base_url_and_key_var(monkeypatch):
         ),
     )
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["api_base_url"] = config.api_base_url
         captured["api_key_var"] = config.api_key_var
         return {"evaluation_id": "eval-123"}
@@ -263,7 +263,7 @@ def test_eval_run_hosted_passes_allow_tunnel_access(monkeypatch):
         ),
     )
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["allow_tunnel_access"] = config.allow_tunnel_access
         return {"evaluation_id": "eval-123"}
 
@@ -299,7 +299,7 @@ def test_eval_run_hosted_passes_extra_env_kwargs(monkeypatch):
         ),
     )
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["extra_env_kwargs"] = config.extra_env_kwargs
         return {"evaluation_id": "eval-123"}
 
@@ -601,7 +601,7 @@ def test_eval_run_hosted_follow_streams_logs(monkeypatch):
         ),
     )
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["num_examples"] = config.num_examples
         captured["rollouts_per_example"] = config.rollouts_per_example
         captured["environment_ids"] = environment_ids
@@ -677,7 +677,7 @@ eval_name = "math500 smoke test"
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["environment_id"] = config.environment_id
         captured["environment_ids"] = environment_ids
         captured["inference_model"] = config.inference_model
@@ -760,7 +760,7 @@ env_args = { split = "test" }
     def fake_resolve(environment, env_dir_path=None, env_path=None):
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["environment_ids"] = environment_ids
         captured["inference_model"] = config.inference_model
         captured["num_examples"] = config.num_examples
@@ -869,7 +869,7 @@ env_id = "gsm8k"
     def fake_resolve(environment, env_dir_path=None, env_path=None):
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["max_concurrent"] = config.max_concurrent
         captured["max_retries"] = config.max_retries
         captured["state_columns"] = config.state_columns
@@ -936,7 +936,7 @@ env_id = "math500"
         resolved_calls.append((environment, env_dir_path, env_path))
         return (f"primeintellect/{environment}", f"env-{environment}")
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured["environment_id"] = config.environment_id
         captured["environment_ids"] = environment_ids
         captured["inference_model"] = config.inference_model
@@ -990,7 +990,7 @@ num_examples = 10
     def fake_resolve(environment, env_dir_path=None, env_path=None):
         return (f"primeintellect/{environment}", f"env-{environment}")
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         captured_calls.append(
             {
                 "environment_id": config.environment_id,
@@ -1154,7 +1154,7 @@ env_id = "gsm8k"
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
@@ -1339,7 +1339,7 @@ def test_eval_run_hosted_rejects_extra_positional_arguments(extra_args):
 def test_eval_run_hosted_accepts_negative_num_examples_value(monkeypatch):
     captured = {}
 
-    def fake_create_hosted_evaluations(config, environment_ids=None):
+    def fake_create_hosted_evaluations(config, environment_ids=None, config_snapshot=None):
         captured["num_examples"] = config.num_examples
         return {"evaluation_id": "eval-123"}
 
@@ -1401,7 +1401,7 @@ def test_eval_run_hosted_passes_env_dir_path_to_resolver(monkeypatch):
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)
@@ -1440,7 +1440,7 @@ def test_eval_run_hosted_passes_env_path_to_resolver(monkeypatch):
         captured["env_path"] = env_path
         return ("primeintellect/gsm8k", "env-123")
 
-    def fake_run_hosted_evaluation(config, environment_ids=None):
+    def fake_run_hosted_evaluation(config, environment_ids=None, config_snapshot=None):
         return {"evaluation_id": "eval-123"}
 
     monkeypatch.setattr("prime_cli.commands.evals._resolve_hosted_environment", fake_resolve)

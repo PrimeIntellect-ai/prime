@@ -8,6 +8,7 @@ import pytest_asyncio
 from prime_sandboxes import (
     APIClient,
     APIError,
+    APITimeoutError,
     AsyncSandboxClient,
     CreateSandboxRequest,
     Sandbox,
@@ -900,10 +901,14 @@ def mock_disk_fork(client, monkeypatch, calls, payloads, wait_error=None):
     monkeypatch.setattr(client.client, "request", async_request if is_async else request)
 
 
-def mock_fork_http(client, monkeypatch, calls, payloads, create_error=None, resume_error=None):
+def mock_fork_http(
+    client, monkeypatch, calls, payloads, create_error=None, resume_error=None, pause_error=None
+):
     def handle(method, path, **kwargs):
         calls.append((method, path))
         if path.endswith("/pause"):
+            if pause_error is not None:
+                raise pause_error
             return paused_response()
         if path.endswith("/resume"):
             if resume_error is not None:
@@ -1160,6 +1165,50 @@ async def test_fork_with_memory_reports_a_failed_cleanup_resume_on_the_pause_err
         ("POST", "/sandbox/sandbox-1/resume"),
     ]
     assert payloads == []
+
+
+def _assert_lost_pause_error(error: Exception, calls, payloads) -> None:
+    message = str(error)
+    assert "may have been accepted" in message
+    assert "sandbox sandbox-1" in message
+    assert "prime sandbox resume sandbox-1" in message
+    assert calls == [("POST", "/sandbox/sandbox-1/pause")]
+    assert payloads == []
+
+
+def test_fork_with_memory_keeps_a_lost_pause_response_and_names_the_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+    payloads = []
+    failure = APITimeoutError("Request timed out: pause")
+    mock_fork_http(client, monkeypatch, calls, payloads, pause_error=failure)
+    try:
+        with pytest.raises(APITimeoutError) as raised:
+            client.fork("sandbox-1", with_memory=True)
+    finally:
+        client.client.client.close()
+
+    assert raised.value is failure
+    _assert_lost_pause_error(raised.value, calls, payloads)
+
+
+@pytest.mark.asyncio
+async def test_fork_with_memory_keeps_a_lost_pause_response_and_names_the_source_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with AsyncSandboxClient(api_key="test-key") as client:
+        calls = []
+        payloads = []
+        failure = APITimeoutError("Request timed out: pause")
+        mock_fork_http(client, monkeypatch, calls, payloads, pause_error=failure)
+
+        with pytest.raises(APITimeoutError) as raised:
+            await client.fork("sandbox-1", with_memory=True)
+
+    assert raised.value is failure
+    _assert_lost_pause_error(raised.value, calls, payloads)
 
 
 @pytest.mark.asyncio

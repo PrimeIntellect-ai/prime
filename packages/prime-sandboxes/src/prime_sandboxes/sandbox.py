@@ -2710,9 +2710,11 @@ class SandboxClient:
         fails, the source is resumed on a best-effort basis; an error from that
         resume is appended to the original one with the source's id. If the
         create succeeds but the source does not resume, the raised error names
-        the new sandbox so it can be deleted. A memory fork copies userspace
-        random state and any keys or tokens already in the guest's memory, so
-        rekey or regenerate them in the workload.
+        the new sandbox so it can be deleted. If the pause request itself fails
+        or its response is lost, the source may still become PAUSED: resume it
+        with ``resume`` (``prime sandbox resume <id>``). A memory fork copies
+        userspace random state and any keys or tokens already in the guest's
+        memory, so rekey or regenerate them in the workload.
         """
         _validate_fork_arguments(with_memory, cpu_cores, memory_gb, timeout_seconds)
         if not with_memory:
@@ -2735,7 +2737,15 @@ class SandboxClient:
                     labels=source.labels if labels is None else labels,
                 )
             )
-        source = self.pause(sandbox_id)
+        try:
+            source = self.pause(sandbox_id)
+        except Exception as error:
+            raise _error_with_hint(
+                error,
+                f"the pause request for sandbox {sandbox_id} may have been accepted and "
+                f"may finish later; if the sandbox becomes PAUSED, resume it with "
+                f"'prime sandbox resume {sandbox_id}' (or resume())",
+            )
         request = CreateSandboxRequest(
             name=name or f"{source.name}-fork",
             checkpoint_id=source.checkpoint_id,
@@ -4720,9 +4730,11 @@ class AsyncSandboxClient:
         fails, the source is resumed on a best-effort basis; an error from that
         resume is appended to the original one with the source's id. If the
         create succeeds but the source does not resume, the raised error names
-        the new sandbox so it can be deleted. A memory fork copies userspace
-        random state and any keys or tokens already in the guest's memory, so
-        rekey or regenerate them in the workload.
+        the new sandbox so it can be deleted. If the pause request itself fails
+        or its response is lost, the source may still become PAUSED: resume it
+        with ``resume`` (``prime sandbox resume <id>``). A memory fork copies
+        userspace random state and any keys or tokens already in the guest's
+        memory, so rekey or regenerate them in the workload.
         """
         _validate_fork_arguments(with_memory, cpu_cores, memory_gb, timeout_seconds)
         if not with_memory:
@@ -4747,7 +4759,15 @@ class AsyncSandboxClient:
                     labels=source.labels if labels is None else labels,
                 )
             )
-        source = await self.pause(sandbox_id)
+        try:
+            source = await self.pause(sandbox_id)
+        except Exception as error:
+            raise _error_with_hint(
+                error,
+                f"the pause request for sandbox {sandbox_id} may have been accepted and "
+                f"may finish later; if the sandbox becomes PAUSED, resume it with "
+                f"'prime sandbox resume {sandbox_id}' (or resume())",
+            )
         request = CreateSandboxRequest(
             name=name or f"{source.name}-fork",
             checkpoint_id=source.checkpoint_id,

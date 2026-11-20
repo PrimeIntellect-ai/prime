@@ -345,6 +345,8 @@ checkpoint or pause wait, and the call returns as soon as the create is accepted
 A memory fork's pause and resume are asynchronous: the source stays PAUSED until
 the platform reports it RUNNING, and if the fork fails after the pause, the error
 names the source (or the created fork) so either can be recovered or deleted.
+If the pause request itself fails or its response is lost, the source may still
+become PAUSED; resume it with `resume()` (`prime sandbox resume <id>`).
 A memory fork is an exact copy of the paused guest: the kernel RNG is reseeded,
 but userspace random generators (OpenSSL, language runtimes) and keys, tokens,
 or IDs already in memory are the same in every fork, so rekey or regenerate them

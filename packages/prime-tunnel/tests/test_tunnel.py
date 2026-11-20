@@ -1298,3 +1298,77 @@ async def test_a_rejected_reconnect_of_a_real_process_marks_the_tunnel_gone(monk
         assert tunnel.is_running
     finally:
         await tunnel.stop()
+
+
+# -- log_level coarser than info --
+
+
+@pytest.mark.parametrize(
+    ("log_level", "frpc_level"),
+    [("trace", "trace"), ("debug", "debug"), ("info", "info"), ("warn", "info"), ("error", "info")],
+)
+def test_frpc_never_runs_coarser_than_info(monkeypatch, tmp_path, log_level, frpc_level):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tunnel = _make_started_tunnel()
+    tunnel.log_level = log_level
+    content = tunnel._write_frpc_config().read_text()
+    assert f'log.level = "{frpc_level}"' in content
+
+
+def test_output_reader_classifies_and_keeps_lines_it_does_not_forward(caplog):
+    import io
+    import logging
+
+    from prime_tunnel.frpc import FrpcOutput
+
+    connected = _frpc_line("I", "[t-test123] start proxy success")
+    closing = _frpc_line("W", "control writer is closing")
+    process = MagicMock()
+    process.stdout = io.StringIO(connected + "\n" + closing + "\n")
+    process.stderr = io.StringIO("")
+
+    with caplog.at_level(logging.DEBUG, logger="prime_tunnel.frpc"):
+        output = FrpcOutput(process, "t-test123", min_level=logging.WARNING)
+        output.join()
+
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.WARNING, "frpc t-test123: control writer is closing"),
+    ]
+    assert output.first_event is FrpcEvent.CONNECTED
+    assert output.lines() == [connected, closing]
+
+
+@pytest.mark.asyncio
+async def test_start_connects_at_warn_and_forwards_only_warnings(monkeypatch, tmp_path, caplog):
+    import logging
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    connected = _frpc_line("I", "[t-test123] start proxy success")
+    closing = _frpc_line("W", "control writer is closing")
+    # Like frpc: the connected line is printed only at info level or finer.
+    frpc = _fake_frpc_binary(
+        tmp_path,
+        'if grep -qE \'^log.level = "(trace|debug|info)"\' "$2"; then\n'
+        f"  echo '{connected}'\n"
+        "fi\n"
+        f"echo '{closing}'\nexec sleep 30\n",
+    )
+    tunnel = Tunnel(local_port=8080, connection_timeout=5.0, log_level="warn")
+    _client_for(tunnel)
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="prime_tunnel.frpc"),
+        patch("prime_tunnel.tunnel.get_frpc_path", return_value=frpc),
+    ):
+        url = await tunnel.start()
+        try:
+            assert url == "https://t-test123.tunnel.example.com"
+            for _ in range(50):
+                if len(tunnel.recent_output) == 2:
+                    break
+                await asyncio.sleep(0.1)
+        finally:
+            await tunnel.stop()
+
+    records = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "prime_tunnel.frpc"]
+    assert records == [(logging.WARNING, "frpc t-test123: control writer is closing")]

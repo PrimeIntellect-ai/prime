@@ -28,8 +28,29 @@ _FRPC_LEVELS = {
     "T": logging.DEBUG,
 }
 
+# frpc reports a connected proxy only at info level, so frpc never runs coarser.
+_FRPC_RUN_LEVELS = ("trace", "debug", "info")
 
-def _log_frpc_line(raw_line: str, tunnel_id: str | None) -> None:
+# Levels coarser than info, for which frpc prints lines the caller did not ask for.
+_FORWARD_LEVELS = {
+    "warn": logging.WARNING,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+
+
+def frpc_run_level(log_level: str) -> str:
+    """The level frpc runs at for a caller's log_level: never coarser than info."""
+    level = log_level.lower()
+    return level if level in _FRPC_RUN_LEVELS else "info"
+
+
+def forward_level(log_level: str) -> int:
+    """The lowest level of frpc's lines forwarded for a caller's log_level."""
+    return _FORWARD_LEVELS.get(log_level.lower(), logging.NOTSET)
+
+
+def _log_frpc_line(raw_line: str, tunnel_id: str | None, min_level: int = logging.NOTSET) -> None:
     """Forward one frpc output line to the prime_tunnel.frpc logger at its own level."""
     line = _ANSI_RE.sub("", raw_line)
     m = _LOG_RE.match(line)
@@ -37,6 +58,8 @@ def _log_frpc_line(raw_line: str, tunnel_id: str | None) -> None:
         level, msg = _FRPC_LEVELS.get(m.group(1), logging.INFO), m.group(2)
     else:
         level, msg = logging.INFO, line
+    if level < min_level:
+        return
     frpc_logger.log(level, "frpc %s: %s", tunnel_id or "-", msg)
 
 
@@ -107,9 +130,10 @@ def failure_message(output_lines: list[str], return_code: int | None = None) -> 
 class FrpcOutput:
     """Reads one frpc process's stdout and stderr, from launch until they close.
 
-    Every line is forwarded to the ``prime_tunnel.frpc`` logger, so reconnects
-    and dropped control connections show up in the caller's logs, and the
-    last ``max_lines`` are kept for diagnostics. Reading also keeps the pipe
+    Every line at or above ``min_level`` is forwarded to the
+    ``prime_tunnel.frpc`` logger, so reconnects and dropped control connections
+    show up in the caller's logs. Every line, forwarded or not, is classified,
+    and the last ``max_lines`` are kept for diagnostics. Reading also keeps the pipe
     buffers from filling up and blocking frpc.
 
     Lines that mean something for the tunnel are reported as FrpcEvents:
@@ -123,8 +147,10 @@ class FrpcOutput:
         tunnel_id: str | None,
         on_event: Optional[Callable[[FrpcEvent], None]] = None,
         max_lines: int = 50,
+        min_level: int = logging.NOTSET,
     ):
         self._tunnel_id = tunnel_id
+        self._min_level = min_level
         self._on_event = on_event
         self._lock = threading.Lock()
         self._lines: deque[str] = deque(maxlen=max_lines)
@@ -161,7 +187,7 @@ class FrpcOutput:
                     continue
                 with self._lock:
                     self._lines.append(line)
-                _log_frpc_line(line, self._tunnel_id)
+                _log_frpc_line(line, self._tunnel_id, self._min_level)
                 event = classify_line(line)
                 if event is None:
                     continue

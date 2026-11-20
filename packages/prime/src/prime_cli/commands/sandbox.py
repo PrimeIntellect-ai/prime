@@ -737,7 +737,9 @@ app.add_typer(checkpoint_app, name="checkpoint")
 app.add_typer(sandbox_volumes_app, name="volumes")
 
 
-def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
+def _print_checkpoint(
+    checkpoint: SandboxCheckpoint, output: str, *, with_memory: bool = False
+) -> None:
     if output == "json":
         output_data_as_json(checkpoint.model_dump(mode="json"), console)
         return
@@ -745,6 +747,21 @@ def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
     console.print(f"State: {escape(checkpoint.state)}")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
+    elif with_memory:
+        console.print(
+            "Memory checkpoint captured. The source is resuming asynchronously; "
+            f"check with 'prime sandbox get {escape(checkpoint.sandbox_id)}'."
+        )
+        console.print(
+            f"Restore with 'prime sandbox checkpoint restore {escape(checkpoint.id)} --memory'."
+        )
+        if checkpoint.state != "DURABLE":
+            console.print(
+                "A non-DURABLE snapshot is usable on the pausing node while the source exists. "
+                "Wait for DURABLE "
+                f"('prime sandbox checkpoint get {escape(checkpoint.id)}') before deleting the "
+                "source; the public checkpoint model does not report whether memory is included."
+            )
     elif checkpoint.state != "DURABLE":
         console.print(
             "Restorable once DURABLE. Check with "
@@ -769,17 +786,56 @@ def _parse_duration(value: str) -> int:
 def checkpoint_create(
     sandbox_id: str,
     ttl: Optional[str] = typer.Option(
-        None, "--ttl", help="Delete the checkpoint after this long, e.g. 12h or 7d"
+        None,
+        "--ttl",
+        help=(
+            "Delete the disk checkpoint after this long, e.g. 12h or 7d; "
+            "rejected with --with-memory"
+        ),
+    ),
+    with_memory: bool = typer.Option(
+        False,
+        "--with-memory",
+        help=(
+            "Capture memory and running processes too: pause the source, wait until the "
+            "pause checkpoint is restorable, then resume the source asynchronously"
+        ),
+    ),
+    wait_timeout: float = typer.Option(
+        300,
+        "--wait-timeout",
+        help="Seconds to wait for the memory capture to become restorable",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Request a filesystem checkpoint of a running sandbox."""
+    """Request a filesystem checkpoint of a running sandbox.
+
+    With --with-memory the checkpoint also captures the sandbox's memory and running
+    processes; the source is paused for the capture, then resumed asynchronously."""
     validate_output_format(output, console)
     ttl_seconds = _parse_duration(ttl) if ttl else None
+    if with_memory and ttl_seconds is not None:
+        console.print(
+            "[red]Error:[/red] --with-memory cannot be combined with --ttl: "
+            "a pause checkpoint has no expiry"
+        )
+        raise typer.Exit(1)
+    client = SandboxClient(APIClient())
     try:
-        result = SandboxClient(APIClient()).checkpoint(sandbox_id, ttl_seconds=ttl_seconds)
-        _print_checkpoint(result, output)
-    except APIError as exc:
+        if with_memory:
+            if output == "json":
+                result = client.checkpoint(
+                    sandbox_id, with_memory=True, timeout_seconds=wait_timeout
+                )
+            else:
+                with console.status("[bold blue]Capturing memory checkpoint...", spinner="dots"):
+                    result = client.checkpoint(
+                        sandbox_id, with_memory=True, timeout_seconds=wait_timeout
+                    )
+        else:
+            result = client.checkpoint(sandbox_id, ttl_seconds=ttl_seconds)
+        _print_checkpoint(result, output, with_memory=with_memory)
+    except (APIError, ValueError) as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
 

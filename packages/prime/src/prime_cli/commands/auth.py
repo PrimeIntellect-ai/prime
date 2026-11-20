@@ -81,6 +81,57 @@ def _fail(message: str, code: int) -> NoReturn:
     raise typer.Exit(code)
 
 
+def _check_key_binding(base_url: str, api_key: str, cluster: str) -> None:
+    """The kubeconfig pins the platform URL; the key is whichever is current.
+    Send it only if it is the key, for this platform, that the login used."""
+    expected = os.environ.get(token_cache.KEY_FINGERPRINT_ENV)
+    if not expected:
+        _fail(
+            f"This kubeconfig predates key binding. Run `prime factory k8s login {cluster}`.",
+            EXIT_AUTH_EXPIRED,
+        )
+    if token_cache.key_fingerprint(base_url=base_url, api_key=api_key) != expected:
+        _fail(
+            f"The current API key or platform differs from the one this kubeconfig was "
+            f"written with ({base_url}). Run `prime factory k8s login {cluster}` "
+            "with the key you want to use.",
+            EXIT_AUTH_EXPIRED,
+        )
+
+
+_MAX_REDIRECTS = 5
+
+
+class _CrossOriginRedirect(Exception):
+    def __init__(self, target: str):
+        super().__init__(target)
+        self.target = target
+
+
+def _origin(url: httpx.URL) -> tuple:
+    return (url.scheme, url.host, url.port)
+
+
+def _post_same_origin(url: str, *, api_key: str, params) -> httpx.Response:
+    """POST with the bearer, following redirects only within the same origin."""
+    origin = _origin(httpx.URL(url))
+    for _ in range(_MAX_REDIRECTS + 1):
+        response = httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            params=params,
+            timeout=_TIMEOUT_SECONDS,
+            follow_redirects=False,
+        )
+        if not response.is_redirect:
+            return response
+        target = response.request.url.join(response.headers["Location"])
+        if _origin(target) != origin:
+            raise _CrossOriginRedirect(str(target))
+        url, params = str(target), None
+    return response
+
+
 @app.command("k8s-token")
 def k8s_token(
     cluster: str = typer.Option(..., "--cluster", help="Cluster name"),
@@ -105,6 +156,7 @@ def k8s_token(
     api_key = config.api_key
     if not api_key:
         _fail("Not logged in. Run `prime login`.", EXIT_AUTH_EXPIRED)
+    _check_key_binding(config.base_url, api_key, cluster)
 
     # Parsed here rather than through Click's envvar support, which (as of
     # Click 8.2) turns a flag on for any non-empty value, "0" included.
@@ -137,14 +189,12 @@ def k8s_token(
     params = {"pool": pool} if pool else None
 
     try:
-        response = httpx.post(
-            url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            params=params,
-            timeout=_TIMEOUT_SECONDS,
-            # As the shared APIClient does, so a platform URL that redirects
-            # (e.g. to its canonical host) works for the plugin as for login.
-            follow_redirects=True,
+        response = _post_same_origin(url, api_key=api_key, params=params)
+    except _CrossOriginRedirect as e:
+        _fail(
+            f"The Prime platform at {config.base_url} redirected to {e.target}; "
+            "the credential is not sent to another host.",
+            EXIT_UNREACHABLE,
         )
     except httpx.TimeoutException:
         _fail(

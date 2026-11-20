@@ -61,6 +61,16 @@ class _FakeConfig:
     base_url = "https://api.example.com"
 
 
+@pytest.fixture(autouse=True)
+def login_fingerprint(monkeypatch):
+    """Plugin runs carry the fingerprint the login wrote for _FakeConfig's key."""
+    fingerprint = kube_token_cache.key_fingerprint(
+        base_url=_FakeConfig.base_url, api_key=_FakeConfig.api_key
+    )
+    monkeypatch.setenv(kube_token_cache.KEY_FINGERPRINT_ENV, fingerprint)
+    return fingerprint
+
+
 @pytest.fixture
 def patch_config(monkeypatch):
     monkeypatch.setattr("prime_cli.commands.auth.Config", lambda: _FakeConfig())
@@ -71,7 +81,7 @@ def respond(monkeypatch, *, status_code, json_body=None, headers=None):
 
     def _post(url, **kwargs):
         requested_urls.append(url)
-        assert kwargs.get("follow_redirects") is True
+        assert kwargs.get("follow_redirects") is False
         return httpx.Response(
             status_code=status_code,
             json=json_body if json_body is not None else {},
@@ -279,6 +289,7 @@ class TestKubeconfigRendering:
 
 class _FakeAPIClient:
     base_url = "https://api.example.com"
+    api_key = "test-key"
     config = SimpleNamespace(current_environment="production")
     payload: dict = {}
     error: Exception | None = None
@@ -338,6 +349,19 @@ class TestFactoryK8sLogin:
         config = yaml.safe_load((tmp_path / "kube" / "c1.yaml").read_text())
         for user in config["users"]:
             assert user["user"]["exec"]["args"][:2] == ["--context", "staging"]
+
+    def test_login_binds_the_kubeconfig_to_its_key(self, login, tmp_path):
+        result = login("c1")
+
+        assert result.exit_code == 0, result.output
+        text = (tmp_path / "kube" / "c1.yaml").read_text()
+        expected = kube_token_cache.key_fingerprint(
+            base_url=_FakeAPIClient.base_url, api_key=_FakeAPIClient.api_key
+        )
+        assert _FakeAPIClient.api_key not in text
+        for user in yaml.safe_load(text)["users"]:
+            env = {item["name"]: item["value"] for item in user["user"]["exec"]["env"]}
+            assert env[kube_token_cache.KEY_FINGERPRINT_ENV] == expected
 
     def test_writes_a_private_kubeconfig_from_kubeconfig_info(self, login, tmp_path):
         result = login("c1")
@@ -1161,6 +1185,8 @@ class TestTokenCache:
             base_url = "https://api.example.com"
 
         monkeypatch.setattr("prime_cli.commands.auth.Config", lambda: _Config)
+        # These tests switch keys and platforms; key binding has its own tests.
+        monkeypatch.setattr("prime_cli.commands.auth._check_key_binding", lambda *_: None)
         return _Config
 
     @staticmethod
@@ -1472,3 +1498,84 @@ def test_logout_clears_tokens_even_when_not_logged_in(monkeypatch, tmp_path, tok
 
 def test_clear_all_without_a_cache_is_a_no_op(token_cache_dir):
     assert kube_token_cache.clear_all() is False
+
+
+class TestKeyBinding:
+    """The plugin sends the current key only if it is the login's key, for the
+    pinned platform, and never follows a redirect to another host."""
+
+    def test_the_login_key_is_sent(self, patch_config, monkeypatch):
+        urls = respond(monkeypatch, status_code=200, json_body={"status": {}})
+
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+
+        assert result.exit_code == 0, result.output
+        assert urls == ["https://api.example.com/api/v1/clusters/c1/kube-token"]
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            SimpleNamespace(api_key="another-key", base_url="https://api.example.com"),
+            SimpleNamespace(api_key="test-key", base_url="https://dev-tunnel.example.net"),
+        ],
+        ids=["other-key", "other-platform"],
+    )
+    def test_another_key_or_platform_is_refused_before_any_request(self, monkeypatch, config):
+        monkeypatch.setattr("prime_cli.commands.auth.Config", lambda: config)
+        urls = respond(monkeypatch, status_code=200, json_body={"status": {}})
+
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+
+        assert result.exit_code == 4
+        assert "prime factory k8s login c1" in result.output
+        assert urls == []
+
+    def test_a_kubeconfig_without_a_fingerprint_is_refused(self, patch_config, monkeypatch):
+        monkeypatch.delenv(kube_token_cache.KEY_FINGERPRINT_ENV)
+        urls = respond(monkeypatch, status_code=200, json_body={"status": {}})
+
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+
+        assert result.exit_code == 4
+        assert "prime factory k8s login c1" in result.output
+        assert urls == []
+
+    def test_the_fingerprint_does_not_reveal_the_key(self, login_fingerprint):
+        assert _FakeConfig.api_key not in login_fingerprint
+        assert len(login_fingerprint) == 32
+
+    @staticmethod
+    def _redirecting(monkeypatch, location):
+        calls = []
+
+        def _post(url, **kwargs):
+            calls.append((url, kwargs["headers"].get("Authorization")))
+            assert kwargs.get("follow_redirects") is False
+            if len(calls) == 1:
+                return httpx.Response(
+                    307, headers={"Location": location}, request=httpx.Request("POST", url)
+                )
+            return httpx.Response(200, json={"status": {}}, request=httpx.Request("POST", url))
+
+        monkeypatch.setattr("prime_cli.commands.auth.httpx.post", _post)
+        return calls
+
+    def test_a_same_origin_redirect_is_followed(self, patch_config, monkeypatch):
+        calls = self._redirecting(monkeypatch, "/v2/clusters/c1/kube-token")
+
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+
+        assert result.exit_code == 0, result.output
+        assert [url for url, _ in calls] == [
+            "https://api.example.com/api/v1/clusters/c1/kube-token",
+            "https://api.example.com/v2/clusters/c1/kube-token",
+        ]
+
+    def test_a_redirect_to_another_host_is_refused(self, patch_config, monkeypatch):
+        calls = self._redirecting(monkeypatch, "https://elsewhere.example.net/kube-token")
+
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+
+        assert result.exit_code == 1
+        assert "elsewhere.example.net" in result.output
+        assert len(calls) == 1

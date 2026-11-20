@@ -60,6 +60,19 @@ def entry_path(*, base_url: str, cluster: str, pool: Optional[str], api_key: str
     return _cluster_dir(cluster) / f"{digest[:32]}.json"
 
 
+_FINGERPRINT_SALT = b"prime-cli/kube-key-fingerprint/v1"
+# Set in a kubeconfig's exec env by `prime factory k8s login`.
+KEY_FINGERPRINT_ENV = "PRIME_K8S_KEY_FINGERPRINT"
+
+
+def key_fingerprint(*, base_url: str, api_key: str) -> str:
+    """A non-secret identity of the API key and platform a kubeconfig was
+    written with. The credential plugin sends its key only when it matches."""
+    identity = json.dumps([base_url, api_key]).encode()
+    digest = hashlib.pbkdf2_hmac("sha256", identity, _FINGERPRINT_SALT, _KEY_DERIVATION_ROUNDS)
+    return digest.hex()[:32]
+
+
 def load(path: Path) -> Optional[Dict[str, Any]]:
     """The entry at `path`, or None when it is missing or unreadable."""
     try:

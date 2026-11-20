@@ -88,6 +88,7 @@ def _build_kubeconfig(
     base_url: str,
     current_pool: Optional[str] = None,
     environment: Optional[str] = None,
+    key_fingerprint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Render a kubeconfig with one cluster entry and one context per reachable
     pool grant. The current context is `current_pool`'s, or else the first
@@ -129,6 +130,11 @@ def _build_kubeconfig(
         {"name": "PRIME_API_BASE_URL", "value": base_url},
         {"name": "PRIME_DISABLE_VERSION_CHECK", "value": "1"},
     ]
+    # The plugin reads whichever API key is current when kubectl runs it. The
+    # login's key fingerprint keeps a key selected later, for another
+    # platform, from being sent to this pinned URL.
+    if key_fingerprint:
+        exec_env.append({"name": token_cache.KEY_FINGERPRINT_ENV, "value": key_fingerprint})
 
     clusters = []
     contexts = []
@@ -375,6 +381,9 @@ def login(
         base_url=client.base_url,
         current_pool=pool,
         environment=client.config.current_environment,
+        key_fingerprint=token_cache.key_fingerprint(
+            base_url=client.base_url, api_key=client.api_key
+        ),
     )
 
     # The file is regenerated from scratch, so contexts for grants that are

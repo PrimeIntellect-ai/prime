@@ -57,6 +57,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
+from prime_cli.utils import kube_token_cache
 
 ADMIN_KUBECONFIG = os.environ.get("PRIME_K8S_E2E_ADMIN_KUBECONFIG")
 
@@ -718,11 +719,24 @@ def test_plugin_exit_codes_through_the_real_binary(e2e):
     finally:
         e2e.platform.unavailable = None
 
-    # Another platform is another cache key, so nothing cached is reused.
+    # Another platform is another cache key, so nothing cached is reused. The
+    # kubeconfig binds its key to its platform, so a URL overridden by hand
+    # needs a fingerprint for it.
+    closed = f"http://127.0.0.1:{_closed_port()}"
     unreachable = e2e.exec_plugin(
-        f"{CLUSTER}-train", PRIME_API_BASE_URL=f"http://127.0.0.1:{_closed_port()}"
+        f"{CLUSTER}-train",
+        PRIME_API_BASE_URL=closed,
+        **{
+            kube_token_cache.KEY_FINGERPRINT_ENV: kube_token_cache.key_fingerprint(
+                base_url=closed, api_key=API_KEY
+            )
+        },
     )
     assert (unreachable.returncode, unreachable.stdout) == (1, "")
+
+    # The URL alone, with the login's fingerprint, is refused before any request.
+    rebound = e2e.exec_plugin(f"{CLUSTER}-train", PRIME_API_BASE_URL=closed)
+    assert (rebound.returncode, rebound.stdout) == (4, "")
 
     # Transient failures leave the cached token alone, and it still works.
     before = e2e.platform.mints["train"]

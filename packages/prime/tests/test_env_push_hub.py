@@ -181,6 +181,9 @@ def test_missing_username_is_chosen_before_pushing(hub, package):
 
     assert result.exit_code == 0, strip_ansi(result.output)
     assert ("PATCH", "/api/v1/user/slug", {"slug": "bob"}, {}) in hub.calls
+    # Asked on stderr, so stdout stays the command's own output.
+    assert "Enter your desired username" in result.stderr
+    assert "missing a username" not in result.stdout
     assert "bob/math-env" in hub.packages
 
 

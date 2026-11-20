@@ -93,8 +93,12 @@ def _teams(api: APIClient) -> List[Dict[str, Any]]:
 
 
 def _prompt_for_username(api: APIClient) -> str:
-    """Ask for a username until one is free, and set it."""
-    console = get_console()
+    """Ask for a username until one is free, and set it.
+
+    The questions go to stderr, so a command's stdout stays its own output, such as
+    the JSON of `--output json`.
+    """
+    console = get_console(stderr=True)
     print_ = console.print
     print_(
         "[yellow]Your user profile is missing a username.[/yellow] You must choose one to publish."
@@ -102,7 +106,7 @@ def _prompt_for_username(api: APIClient) -> str:
     print_("[dim]Note: This username can only be chosen once and will be public.[/dim]")
     while True:
         try:
-            chosen = typer.prompt("Enter your desired username").strip().lower()
+            chosen = typer.prompt("Enter your desired username", err=True).strip().lower()
         except typer.Abort:
             raise PushError("Cancelled") from None
         if not _USERNAME.match(chosen):

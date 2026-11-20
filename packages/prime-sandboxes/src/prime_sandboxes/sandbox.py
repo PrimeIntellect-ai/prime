@@ -163,17 +163,6 @@ def _validate_timeout(timeout_seconds: float) -> None:
         raise ValueError("timeout_seconds must be finite and greater than zero")
 
 
-def _validate_memory_checkpoint_arguments(
-    ttl_seconds: Optional[int], timeout_seconds: float
-) -> None:
-    """Reject arguments a memory checkpoint cannot honour before any request."""
-    if ttl_seconds is not None:
-        raise ValueError(
-            "ttl_seconds cannot be used with with_memory=True: a pause checkpoint has no expiry"
-        )
-    _validate_timeout(timeout_seconds)
-
-
 def _validate_fork_arguments(
     with_memory: bool,
     cpu_cores: Optional[float],
@@ -2888,51 +2877,50 @@ class SandboxClient:
             "does the source stays PAUSED until resumed"
         )
 
-    def checkpoint(
-        self,
-        sandbox_id: str,
-        ttl_seconds: Optional[int] = None,
-        *,
-        with_memory: bool = False,
-        timeout_seconds: float = 300,
-    ) -> SandboxCheckpoint:
+    def checkpoint(self, sandbox_id: str, ttl_seconds: Optional[int] = None) -> SandboxCheckpoint:
         """Request a filesystem checkpoint; use wait_for_checkpoint before restoring.
 
         With ttl_seconds the platform deletes the checkpoint that long after the request.
-
-        With with_memory=True the checkpoint also captures the sandbox's memory and
-        running processes: the source is paused, the wait runs until that pause
-        checkpoint is FROZEN or DURABLE and the source is PAUSED, then the source
-        is resumed (accepted asynchronously). The returned checkpoint is the one
-        observed then, so it is not necessarily DURABLE; ``wait_for_checkpoint``
-        waits for disk durability, not proof that the memory snapshot was stored.
-        ``timeout_seconds`` bounds that pause wait, and ``ttl_seconds`` is
-        rejected because a pause checkpoint has no expiry. No sandbox is created:
-        restore the checkpoint with ``create`` and ``restore_memory=True``,
-        which creates a new sandbox and needs the source sandbox record to exist.
-        GPU sandboxes and sandboxes with volumes cannot be paused. A memory
-        checkpoint copies userspace random state and any keys or tokens already
-        in the guest's memory, so rekey or regenerate them in the workload.
         """
-        if with_memory:
-            _validate_memory_checkpoint_arguments(ttl_seconds, timeout_seconds)
-            _, checkpoint = self._pause_and_wait(sandbox_id, timeout_seconds)
-            try:
-                self.resume(sandbox_id)
-            except Exception as error:
-                raise _error_with_hint(
-                    error,
-                    f"checkpoint {checkpoint.id} was captured and stays restorable, but "
-                    f"sandbox {sandbox_id} did not resume; retry with "
-                    f"'prime sandbox resume {sandbox_id}' (or resume())",
-                )
-            return checkpoint
         path = f"/sandbox/{sandbox_id}/checkpoints"
         if ttl_seconds is not None:
             response = self.client.request("POST", path, json={"ttl_seconds": ttl_seconds})
         else:
             response = self.client.request("POST", path)
         return SandboxCheckpoint.model_validate(response)
+
+    def snapshot(self, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
+        """Capture a memory snapshot of a running sandbox, then resume it.
+
+        The source is paused, the wait runs until its pause checkpoint is FROZEN
+        or DURABLE and the source is PAUSED, then the source is resumed (accepted
+        asynchronously; it reaches RUNNING when the platform reports it). The
+        returned checkpoint is the one observed then, so it is not necessarily
+        DURABLE: a non-durable snapshot is restorable on the pausing node while
+        the source exists, and ``wait_for_checkpoint`` waits for the platform to
+        finish its upload. ``timeout_seconds`` bounds the pause-ready wait.
+
+        No sandbox is created. Restore the checkpoint with ``create`` and
+        ``restore_memory=True``, which creates a new sandbox and needs the source
+        sandbox record to exist. A pause checkpoint has no TTL. GPU sandboxes and
+        sandboxes with volumes cannot be paused. A memory snapshot copies
+        userspace random state and any keys or tokens already in the guest's
+        memory, so rekey or regenerate them in the workload. If the source does
+        not resume after the capture, the raised error names the checkpoint and
+        the source.
+        """
+        _validate_timeout(timeout_seconds)
+        _, checkpoint = self._pause_and_wait(sandbox_id, timeout_seconds)
+        try:
+            self.resume(sandbox_id)
+        except Exception as error:
+            raise _error_with_hint(
+                error,
+                f"snapshot checkpoint {checkpoint.id} was captured and stays restorable, "
+                f"but sandbox {sandbox_id} did not resume; retry with "
+                f"'prime sandbox resume {sandbox_id}' (or resume())",
+            )
+        return checkpoint
 
     def list_all_checkpoints(
         self,
@@ -4974,50 +4962,51 @@ class AsyncSandboxClient:
         )
 
     async def checkpoint(
-        self,
-        sandbox_id: str,
-        ttl_seconds: Optional[int] = None,
-        *,
-        with_memory: bool = False,
-        timeout_seconds: float = 300,
+        self, sandbox_id: str, ttl_seconds: Optional[int] = None
     ) -> SandboxCheckpoint:
         """Request a filesystem checkpoint; use wait_for_checkpoint before restoring.
 
         With ttl_seconds the platform deletes the checkpoint that long after the request.
-
-        With with_memory=True the checkpoint also captures the sandbox's memory and
-        running processes: the source is paused, the wait runs until that pause
-        checkpoint is FROZEN or DURABLE and the source is PAUSED, then the source
-        is resumed (accepted asynchronously). The returned checkpoint is the one
-        observed then, so it is not necessarily DURABLE; ``wait_for_checkpoint``
-        waits for disk durability, not proof that the memory snapshot was stored.
-        ``timeout_seconds`` bounds that pause wait, and ``ttl_seconds`` is
-        rejected because a pause checkpoint has no expiry. No sandbox is created:
-        restore the checkpoint with ``create`` and ``restore_memory=True``,
-        which creates a new sandbox and needs the source sandbox record to exist.
-        GPU sandboxes and sandboxes with volumes cannot be paused. A memory
-        checkpoint copies userspace random state and any keys or tokens already
-        in the guest's memory, so rekey or regenerate them in the workload.
         """
-        if with_memory:
-            _validate_memory_checkpoint_arguments(ttl_seconds, timeout_seconds)
-            _, checkpoint = await self._pause_and_wait(sandbox_id, timeout_seconds)
-            try:
-                await self.resume(sandbox_id)
-            except Exception as error:
-                raise _error_with_hint(
-                    error,
-                    f"checkpoint {checkpoint.id} was captured and stays restorable, but "
-                    f"sandbox {sandbox_id} did not resume; retry with "
-                    f"'prime sandbox resume {sandbox_id}' (or resume())",
-                )
-            return checkpoint
         path = f"/sandbox/{sandbox_id}/checkpoints"
         if ttl_seconds is not None:
             response = await self.client.request("POST", path, json={"ttl_seconds": ttl_seconds})
         else:
             response = await self.client.request("POST", path)
         return SandboxCheckpoint.model_validate(response)
+
+    async def snapshot(self, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
+        """Capture a memory snapshot of a running sandbox, then resume it.
+
+        The source is paused, the wait runs until its pause checkpoint is FROZEN
+        or DURABLE and the source is PAUSED, then the source is resumed (accepted
+        asynchronously; it reaches RUNNING when the platform reports it). The
+        returned checkpoint is the one observed then, so it is not necessarily
+        DURABLE: a non-durable snapshot is restorable on the pausing node while
+        the source exists, and ``wait_for_checkpoint`` waits for the platform to
+        finish its upload. ``timeout_seconds`` bounds the pause-ready wait.
+
+        No sandbox is created. Restore the checkpoint with ``create`` and
+        ``restore_memory=True``, which creates a new sandbox and needs the source
+        sandbox record to exist. A pause checkpoint has no TTL. GPU sandboxes and
+        sandboxes with volumes cannot be paused. A memory snapshot copies
+        userspace random state and any keys or tokens already in the guest's
+        memory, so rekey or regenerate them in the workload. If the source does
+        not resume after the capture, the raised error names the checkpoint and
+        the source.
+        """
+        _validate_timeout(timeout_seconds)
+        _, checkpoint = await self._pause_and_wait(sandbox_id, timeout_seconds)
+        try:
+            await self.resume(sandbox_id)
+        except Exception as error:
+            raise _error_with_hint(
+                error,
+                f"snapshot checkpoint {checkpoint.id} was captured and stays restorable, "
+                f"but sandbox {sandbox_id} did not resume; retry with "
+                f"'prime sandbox resume {sandbox_id}' (or resume())",
+            )
+        return checkpoint
 
     async def list_all_checkpoints(
         self,

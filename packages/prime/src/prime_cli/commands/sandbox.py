@@ -738,7 +738,7 @@ app.add_typer(sandbox_volumes_app, name="volumes")
 
 
 def _print_checkpoint(
-    checkpoint: SandboxCheckpoint, output: str, *, with_memory: bool = False
+    checkpoint: SandboxCheckpoint, output: str, *, memory_snapshot: bool = False
 ) -> None:
     if output == "json":
         output_data_as_json(checkpoint.model_dump(mode="json"), console)
@@ -747,9 +747,9 @@ def _print_checkpoint(
     console.print(f"State: {escape(checkpoint.state)}")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
-    elif with_memory:
+    elif memory_snapshot:
         console.print(
-            "Memory checkpoint captured. The source is resuming asynchronously; "
+            "Memory snapshot captured. The source is resuming asynchronously; "
             f"check with 'prime sandbox get {escape(checkpoint.sandbox_id)}'."
         )
         console.print(
@@ -786,56 +786,17 @@ def _parse_duration(value: str) -> int:
 def checkpoint_create(
     sandbox_id: str,
     ttl: Optional[str] = typer.Option(
-        None,
-        "--ttl",
-        help=(
-            "Delete the disk checkpoint after this long, e.g. 12h or 7d; "
-            "rejected with --with-memory"
-        ),
-    ),
-    with_memory: bool = typer.Option(
-        False,
-        "--with-memory",
-        help=(
-            "Capture memory and running processes too: pause the source, wait until the "
-            "pause checkpoint is restorable, then resume the source asynchronously"
-        ),
-    ),
-    wait_timeout: float = typer.Option(
-        300,
-        "--wait-timeout",
-        help="Seconds to wait for the memory capture to become restorable",
+        None, "--ttl", help="Delete the checkpoint after this long, e.g. 12h or 7d"
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Request a filesystem checkpoint of a running sandbox.
-
-    With --with-memory the checkpoint also captures the sandbox's memory and running
-    processes; the source is paused for the capture, then resumed asynchronously."""
+    """Request a filesystem checkpoint of a running sandbox."""
     validate_output_format(output, console)
     ttl_seconds = _parse_duration(ttl) if ttl else None
-    if with_memory and ttl_seconds is not None:
-        console.print(
-            "[red]Error:[/red] --with-memory cannot be combined with --ttl: "
-            "a pause checkpoint has no expiry"
-        )
-        raise typer.Exit(1)
-    client = SandboxClient(APIClient())
     try:
-        if with_memory:
-            if output == "json":
-                result = client.checkpoint(
-                    sandbox_id, with_memory=True, timeout_seconds=wait_timeout
-                )
-            else:
-                with console.status("[bold blue]Capturing memory checkpoint...", spinner="dots"):
-                    result = client.checkpoint(
-                        sandbox_id, with_memory=True, timeout_seconds=wait_timeout
-                    )
-        else:
-            result = client.checkpoint(sandbox_id, ttl_seconds=ttl_seconds)
-        _print_checkpoint(result, output, with_memory=with_memory)
-    except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
+        result = SandboxClient(APIClient()).checkpoint(sandbox_id, ttl_seconds=ttl_seconds)
+        _print_checkpoint(result, output)
+    except APIError as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
 
@@ -1230,6 +1191,32 @@ def fork(
                 sandbox = client.create(request)
         console.print(f"[green]Successfully forked into sandbox {escape(sandbox.id)}[/green]")
         console.print(f"Use 'prime sandbox get {escape(sandbox.id)}' to check its status")
+    except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
+@app.command("snapshot")
+def snapshot(
+    sandbox_id: str,
+    wait_timeout: float = typer.Option(
+        300, "--wait-timeout", help="Seconds to wait for the memory snapshot to be captured"
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Capture a memory snapshot of a running sandbox, then resume it.
+
+    The source is paused for the capture and resumed asynchronously. The returned
+    checkpoint restores with 'prime sandbox checkpoint restore <id> --memory'."""
+    validate_output_format(output, console)
+    client = SandboxClient(APIClient())
+    try:
+        if output == "json":
+            checkpoint = client.snapshot(sandbox_id, timeout_seconds=wait_timeout)
+        else:
+            with console.status("[bold blue]Capturing memory snapshot...", spinner="dots"):
+                checkpoint = client.snapshot(sandbox_id, timeout_seconds=wait_timeout)
+        _print_checkpoint(checkpoint, output, memory_snapshot=True)
     except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc

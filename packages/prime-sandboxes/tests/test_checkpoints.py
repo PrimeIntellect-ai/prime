@@ -1333,6 +1333,12 @@ async def checkpoint_call(client, sandbox_id="sandbox-1", **kwargs):
     return client.checkpoint(sandbox_id, **kwargs)
 
 
+async def snapshot_call(client, sandbox_id="sandbox-1", **kwargs):
+    if isinstance(client, AsyncSandboxClient):
+        return await client.snapshot(sandbox_id, **kwargs)
+    return client.snapshot(sandbox_id, **kwargs)
+
+
 @pytest.mark.asyncio
 async def test_checkpoint_defaults_to_a_disk_checkpoint(checkpoint_client, monkeypatch):
     calls = []
@@ -1364,15 +1370,13 @@ async def test_checkpoint_defaults_to_a_disk_checkpoint(checkpoint_client, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["FROZEN", "DURABLE"])
-async def test_checkpoint_with_memory_pauses_waits_and_resumes_the_source(
-    checkpoint_client, monkeypatch, state
-):
+async def test_snapshot_pauses_waits_and_resumes_the_source(checkpoint_client, monkeypatch, state):
     calls = []
     payloads = []
     mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
     mock_fork_polls(checkpoint_client, monkeypatch, calls, [state], ["PAUSED"])
 
-    result = await checkpoint_call(checkpoint_client, with_memory=True)
+    result = await snapshot_call(checkpoint_client)
 
     assert result.id == "pause-1"
     assert result.state == state
@@ -1386,29 +1390,22 @@ async def test_checkpoint_with_memory_pauses_waits_and_resumes_the_source(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "kwargs, match",
-    [
-        ({"ttl_seconds": 60}, "ttl_seconds"),
-        ({"timeout_seconds": 0}, "timeout_seconds"),
-        ({"timeout_seconds": float("inf")}, "timeout_seconds"),
-    ],
-)
-async def test_checkpoint_with_memory_rejects_unhonoured_arguments_before_any_request(
-    checkpoint_client, monkeypatch, kwargs, match
+@pytest.mark.parametrize("timeout_seconds", [0, float("inf")])
+async def test_snapshot_rejects_an_invalid_timeout_before_any_request(
+    checkpoint_client, monkeypatch, timeout_seconds
 ):
     calls = []
     payloads = []
     mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
 
-    with pytest.raises(ValueError, match=match):
-        await checkpoint_call(checkpoint_client, with_memory=True, **kwargs)
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        await snapshot_call(checkpoint_client, timeout_seconds=timeout_seconds)
 
     assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_with_memory_names_the_captured_checkpoint_when_resume_fails(
+async def test_snapshot_names_the_captured_checkpoint_when_resume_fails(
     checkpoint_client, monkeypatch
 ):
     calls = []
@@ -1418,8 +1415,8 @@ async def test_checkpoint_with_memory_names_the_captured_checkpoint_when_resume_
     )
     mock_fork_polls(checkpoint_client, monkeypatch, calls, ["FROZEN"], ["PAUSED"])
 
-    with pytest.raises(APIError, match="checkpoint pause-1 was captured") as raised:
-        await checkpoint_call(checkpoint_client, with_memory=True)
+    with pytest.raises(APIError, match="snapshot checkpoint pause-1 was captured") as raised:
+        await snapshot_call(checkpoint_client)
 
     message = str(raised.value)
     assert "sandbox sandbox-1 did not resume" in message
@@ -1434,7 +1431,7 @@ async def test_checkpoint_with_memory_names_the_captured_checkpoint_when_resume_
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_with_memory_timeout_names_the_checkpoint(
+async def test_snapshot_timeout_names_the_checkpoint(
     checkpoint_client, checkpoint_clock, monkeypatch
 ):
     calls = []
@@ -1443,7 +1440,7 @@ async def test_checkpoint_with_memory_timeout_names_the_checkpoint(
     mock_fork_polls(checkpoint_client, monkeypatch, calls, ["PENDING", "PENDING"], [])
 
     with pytest.raises(TimeoutError, match="may still complete") as raised:
-        await checkpoint_call(checkpoint_client, with_memory=True, timeout_seconds=2)
+        await snapshot_call(checkpoint_client, timeout_seconds=2)
 
     assert "checkpoint pause-1" in str(raised.value)
     assert calls == [

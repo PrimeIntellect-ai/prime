@@ -85,11 +85,8 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert listed == [("sandbox-1", None), ("sandbox-1", "checkpoint-1")]
 
 
-def test_checkpoint_with_memory_forwards_flags_and_prints_json(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _configure_cli(monkeypatch)
-    checkpoint = SandboxCheckpoint(
+def _frozen_snapshot() -> SandboxCheckpoint:
+    return SandboxCheckpoint(
         id="pause-1",
         sandbox_id="sandbox-1",
         state="FROZEN",
@@ -98,98 +95,48 @@ def test_checkpoint_with_memory_forwards_flags_and_prints_json(
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
-    calls: list[tuple[str, Any, bool, float]] = []
 
-    def create(
-        self: Any,
-        sandbox_id: str,
-        ttl_seconds: Any = None,
-        *,
-        with_memory: bool = False,
-        timeout_seconds: float = 300,
-    ) -> SandboxCheckpoint:
-        calls.append((sandbox_id, ttl_seconds, with_memory, timeout_seconds))
+
+def test_snapshot_forwards_timeout_and_prints_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpoint = _frozen_snapshot()
+    calls: list[tuple[str, float]] = []
+
+    def snapshot(self: Any, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
+        calls.append((sandbox_id, timeout_seconds))
         return checkpoint
 
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.checkpoint", create)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
 
     result = runner.invoke(
-        app,
-        [
-            "sandbox",
-            "checkpoint",
-            "create",
-            "sandbox-1",
-            "--with-memory",
-            "--wait-timeout",
-            "45",
-            "--output",
-            "json",
-        ],
+        app, ["sandbox", "snapshot", "sandbox-1", "--wait-timeout", "45", "--output", "json"]
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == [("sandbox-1", None, True, 45)]
+    assert calls == [("sandbox-1", 45)]
     assert json.loads(result.output) == checkpoint.model_dump(mode="json")
 
 
-def test_checkpoint_with_memory_prints_the_resume_and_restore_note(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_snapshot_prints_the_resume_and_restore_note(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
-    checkpoint = SandboxCheckpoint(
-        id="pause-1",
-        sandbox_id="sandbox-1",
-        state="FROZEN",
-        depth=1,
-        docker_image="python:3.11-slim",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
+    checkpoint = _frozen_snapshot()
     calls: list[float] = []
 
-    def create(
-        self: Any,
-        sandbox_id: str,
-        ttl_seconds: Any = None,
-        *,
-        with_memory: bool = False,
-        timeout_seconds: float = 300,
-    ) -> SandboxCheckpoint:
+    def snapshot(self: Any, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
         calls.append(timeout_seconds)
         return checkpoint
 
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.checkpoint", create)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
 
-    result = runner.invoke(app, ["sandbox", "checkpoint", "create", "sandbox-1", "--with-memory"])
+    result = runner.invoke(app, ["sandbox", "snapshot", "sandbox-1"])
 
     assert result.exit_code == 0, result.output
     assert calls == [300]
     text = _flat(result.output)
-    assert "Memory checkpoint captured" in text
+    assert "Memory snapshot captured" in text
     assert "source is resuming asynchronously" in text
     assert "prime sandbox checkpoint restore pause-1 --memory" in text
     assert "non-DURABLE snapshot" in text
-
-
-def test_checkpoint_with_memory_rejects_ttl_before_constructing_a_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _configure_cli(monkeypatch)
-
-    def client(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("an invalid flag combination must not construct a client")
-
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient", client)
-
-    result = runner.invoke(
-        app, ["sandbox", "checkpoint", "create", "sandbox-1", "--with-memory", "--ttl", "1h"]
-    )
-
-    assert result.exit_code == 1, result.output
-    message = _flat(result.output)
-    assert "--with-memory cannot be combined with --ttl" in message
-    assert "a pause checkpoint has no expiry" in message
 
 
 @pytest.mark.parametrize(
@@ -211,17 +158,17 @@ def test_checkpoint_with_memory_rejects_ttl_before_constructing_a_client(
         ),
     ],
 )
-def test_checkpoint_with_memory_prints_pause_failures(
+def test_snapshot_prints_capture_failures(
     monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
 ) -> None:
     _configure_cli(monkeypatch)
 
-    def create(self: Any, *args: Any, **kwargs: Any) -> SandboxCheckpoint:
+    def snapshot(self: Any, *args: Any, **kwargs: Any) -> SandboxCheckpoint:
         raise error
 
-    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.checkpoint", create)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
 
-    result = runner.invoke(app, ["sandbox", "checkpoint", "create", "sandbox-1", "--with-memory"])
+    result = runner.invoke(app, ["sandbox", "snapshot", "sandbox-1"])
 
     assert result.exit_code == 1, result.output
     assert "Error:" in result.output

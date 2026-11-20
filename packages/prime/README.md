@@ -195,8 +195,8 @@ prime sandbox run <sandbox-id> --user ubuntu -- id
 
 # Request a filesystem checkpoint; check again until it is DURABLE
 prime sandbox checkpoint create <sandbox-id>
-# Also capture memory and processes: pause, wait, then resume the source asynchronously
-prime sandbox checkpoint create <sandbox-id> --with-memory [--wait-timeout 300]
+# Capture memory and processes without creating a sandbox; resumes the source
+prime sandbox snapshot <sandbox-id> [--wait-timeout 300]
 prime sandbox checkpoint list <sandbox-id> [--checkpoint-id <checkpoint-id>]
 # Any checkpoint by id, rootfs or volume
 prime sandbox checkpoint get <checkpoint-id>
@@ -230,17 +230,18 @@ prime sandbox volumes create data --from ~/datasets/my-data
 prime sandbox delete <sandbox-id>
 ```
 
-`prime sandbox checkpoint create --with-memory` pauses the source, waits until
-the memory checkpoint is restorable, then resumes the same source asynchronously;
-`--wait-timeout` bounds only that pause-ready wait. It prints the captured
-checkpoint, which is not necessarily `DURABLE`; `prime sandbox checkpoint get`
-shows the upload. A non-durable snapshot is usable on the pausing node while the
-source exists. `--ttl` is rejected with `--with-memory` because a pause
-checkpoint has no expiry. Restore with `prime sandbox checkpoint restore
-<checkpoint-id> --memory`, which creates a new sandbox. GPU sandboxes and
-sandboxes with volumes cannot be paused, and a memory restore needs the source
-sandbox record to exist. A memory checkpoint copies userspace random state and
-keys or tokens already in memory, so rekey or regenerate them in the workload.
+`prime sandbox snapshot` pauses the source, waits until the memory checkpoint is
+restorable, then resumes the same source asynchronously; `--wait-timeout` bounds
+only that pause-ready wait. It prints the captured checkpoint, which is not
+necessarily `DURABLE`; `prime sandbox checkpoint get` shows the upload. A
+non-durable snapshot is usable on the pausing node while the source exists.
+Restore with `prime sandbox checkpoint restore <checkpoint-id> --memory`, which
+creates a new sandbox. GPU sandboxes and sandboxes with volumes cannot be paused,
+and a memory restore needs the source sandbox record to exist. A memory snapshot
+copies userspace random state and keys or tokens already in memory, so rekey or
+regenerate them in the workload. If the pause request fails or its response is
+lost, `prime sandbox get <sandbox-id>` shows whether the source became PAUSED;
+`prime sandbox resume <sandbox-id>` continues it.
 
 `prime sandbox fork` checkpoints the source's filesystem and restores it into a
 new sandbox that inherits the source's shape, team, region, timeout, and labels;

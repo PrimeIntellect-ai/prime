@@ -11,7 +11,6 @@ authors = [
 ]
 dependencies = [
     "httpx>=0.25.0",
-    "idna>=3.15",
     "pydantic>=2.0.0",
     "tenacity>=8.0.0",
 ]

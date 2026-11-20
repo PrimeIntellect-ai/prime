@@ -498,8 +498,6 @@ dependencies = [
     { name = "cryptography" },
     { name = "gitignore-parser" },
     { name = "httpx" },
-    { name = "idna" },
-    { name = "opentelemetry-api" },
     { name = "prime-evals" },
     { name = "prime-sandboxes" },
     { name = "prime-traces" },
@@ -528,8 +526,6 @@ requires-dist = [
     { name = "cryptography", specifier = ">=41.0.0" },
     { name = "gitignore-parser", specifier = ">=0.1.13" },
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "idna", specifier = ">=3.15" },
-    { name = "opentelemetry-api", specifier = ">=1.45.2" },
     { name = "prime-evals", editable = "packages/prime-evals" },
     { name = "prime-sandboxes", editable = "packages/prime-sandboxes" },
     { name = "prime-traces", editable = "packages/prime-traces" },
@@ -553,7 +549,6 @@ name = "prime-evals"
 source = { editable = "packages/prime-evals" }
 dependencies = [
     { name = "httpx" },
-    { name = "idna" },
     { name = "pydantic" },
     { name = "tenacity" },
 ]
@@ -567,7 +562,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "idna", specifier = ">=3.15" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13.1" },
@@ -580,7 +574,6 @@ name = "prime-runs"
 source = { editable = "packages/prime-runs" }
 dependencies = [
     { name = "httpx" },
-    { name = "idna" },
     { name = "orjson" },
     { name = "prime-traces" },
 ]
@@ -598,8 +591,7 @@ train = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "idna", specifier = ">=3.15" },
-    { name = "orjson", specifier = ">=3.10.0" },
+    { name = "orjson", specifier = ">=3.11.6" },
     { name = "prime-traces", editable = "packages/prime-traces" },
     { name = "pyarrow", marker = "extra == 'train'", specifier = ">=15.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
@@ -616,8 +608,6 @@ dependencies = [
     { name = "certifi" },
     { name = "connectrpc" },
     { name = "httpx" },
-    { name = "idna" },
-    { name = "opentelemetry-api" },
     { name = "protobuf" },
     { name = "pydantic" },
     { name = "pyqwest" },
@@ -638,8 +628,6 @@ requires-dist = [
     { name = "certifi" },
     { name = "connectrpc", specifier = ">=0.11.1,<0.12" },
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "idna", specifier = ">=3.15" },
-    { name = "opentelemetry-api", specifier = ">=1.45.2" },
     { name = "protobuf", specifier = ">=6.31.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyqwest", specifier = ">=0.6.0" },
@@ -656,7 +644,6 @@ name = "prime-traces"
 source = { editable = "packages/prime-traces" }
 dependencies = [
     { name = "httpx" },
-    { name = "idna" },
     { name = "orjson" },
     { name = "pydantic" },
 ]
@@ -671,8 +658,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "idna", specifier = ">=3.15" },
-    { name = "orjson", specifier = ">=3.10.0" },
+    { name = "orjson", specifier = ">=3.11.6" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
@@ -685,7 +671,6 @@ name = "prime-tunnel"
 source = { editable = "packages/prime-tunnel" }
 dependencies = [
     { name = "httpx" },
-    { name = "idna" },
     { name = "pydantic" },
     { name = "tenacity" },
 ]
@@ -701,7 +686,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
-    { name = "idna", specifier = ">=3.15" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },

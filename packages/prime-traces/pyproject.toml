@@ -11,8 +11,7 @@ authors = [
 ]
 dependencies = [
     "httpx>=0.25.0",
-    "idna>=3.15",
-    "orjson>=3.10.0",
+    "orjson>=3.11.6",
     "pydantic>=2.0.0",
 ]
 keywords = ["traces", "observability", "evals", "rollouts"]

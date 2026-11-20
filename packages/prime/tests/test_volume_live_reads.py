@@ -82,7 +82,9 @@ def live(monkeypatch, tmp_path):
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
     routes = []
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None, live=False):
+    def route(
+        name, mode, path, entries=None, team_id=None, lease_id=None, live=False, size_bytes=None
+    ):
         routes.append((mode, path, live))
         return VolumeTransferRoute(via="session", session=_live_session())
 
@@ -259,7 +261,9 @@ def test_get_goes_through_the_live_view(monkeypatch, tmp_path):
     monkeypatch.setattr(volumes.Config, "ssh_key_path", property(lambda self: str(key)))
     routes, commands = [], []
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None, live=False):
+    def route(
+        name, mode, path, entries=None, team_id=None, lease_id=None, live=False, size_bytes=None
+    ):
         routes.append((mode, path, live))
         return VolumeTransferRoute(via="session", session=_live_session())
 
@@ -286,7 +290,9 @@ def test_put_never_asks_for_a_live_route(monkeypatch, tmp_path):
     (tmp_path / "f.txt").write_text("x")
     asked = []
 
-    def route(name, mode, path, entries=None, team_id=None, lease_id=None, live=False):
+    def route(
+        name, mode, path, entries=None, team_id=None, lease_id=None, live=False, size_bytes=None
+    ):
         asked.append(live)
         raise volumes.APIError("stop here")
 

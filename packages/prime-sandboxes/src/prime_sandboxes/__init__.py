@@ -68,6 +68,7 @@ from .models import (
     PausedSandbox,
     PersonalImageOwner,
     PlatformImageOwner,
+    PlatformSecret,
     ReadFileResponse,
     RegistryAuth,
     Sandbox,
@@ -90,6 +91,7 @@ from .models import (
 )
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
+from .secrets import AsyncSecrets, Secrets
 
 __version__ = "0.5.13"
 
@@ -105,6 +107,8 @@ __all__ = [
     "SandboxClient",
     "AsyncSandboxClient",
     "AsyncSandboxProcess",
+    "Secrets",
+    "AsyncSecrets",
     "ImageClient",
     "AsyncImageClient",
     # Models
@@ -155,6 +159,7 @@ __all__ = [
     "PersonalImageOwner",
     "TeamImageOwner",
     "PlatformImageOwner",
+    "PlatformSecret",
     "ImageUpdateSource",
     "ImageUpdatePatch",
     "ImageUpdateItem",

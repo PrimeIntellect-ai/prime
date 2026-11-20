@@ -212,6 +212,16 @@ def k8s_token(
         token_cache.evict(cache_path)
 
     if response.status_code == 401:
+        detail = _detail(response)
+        # The platform's scope check answers 401 too, for a key that is valid
+        # but can't mint: `prime login` would not help with that.
+        if "permission missing" in detail:
+            _fail(
+                f"This API key lacks Clusters: write, which kubectl needs to get a "
+                f"cluster token ({detail}). Create a key with Clusters read + write, "
+                f"then run `prime factory k8s login {cluster}`.",
+                EXIT_AUTH_EXPIRED,
+            )
         _fail("Platform auth expired. Run `prime login`.", EXIT_AUTH_EXPIRED)
 
     if response.status_code == 403:

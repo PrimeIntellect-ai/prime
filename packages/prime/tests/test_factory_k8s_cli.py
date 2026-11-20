@@ -1063,6 +1063,22 @@ class TestCredentialPluginFailures:
         respond(monkeypatch, status_code=401)
         result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
         assert result.exit_code == EXIT_AUTH_EXPIRED
+        assert "Run `prime login`" in result.stderr
+
+    def test_a_key_without_clusters_write_says_so(self, patch_config, monkeypatch):
+        # A valid key the platform's scope check refuses: logging in again
+        # wouldn't help, a key with the right permission would.
+        respond(
+            monkeypatch,
+            status_code=401,
+            json_body={"detail": "Token permission missing: scope 'clusters', permission 'write'"},
+        )
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
+        assert result.exit_code == EXIT_AUTH_EXPIRED
+        assert "lacks Clusters: write" in result.stderr
+        assert "permission 'write'" in result.stderr
+        assert "prime factory k8s login c1" in result.stderr
+        assert "prime login`" not in result.stderr
 
     def test_rate_limited_reports_retry_after(self, patch_config, monkeypatch):
         respond(monkeypatch, status_code=429, headers={"Retry-After": "42"})

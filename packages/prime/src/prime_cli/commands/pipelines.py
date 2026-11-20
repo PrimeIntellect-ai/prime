@@ -25,6 +25,20 @@ from ..utils import (
     output_data_as_json,
     validate_output_format,
 )
+from ..utils.environment_runtime import VERIFIERS_V0, classify_runtime_from_metadata
+from ..utils.hub import HubAPIError, HubClient, ReleaseRequest, publish_release
+from ..utils.hub_components import detect_components
+from ..utils.package_push import (
+    PushError,
+    build_wheel,
+    check_name_matches_distribution,
+    hub_names,
+    print_push_error,
+    requires_dist_of,
+    resolve_owner,
+    wheel_distribution,
+    write_source,
+)
 from ..utils.prompt import confirm_or_skip
 
 app = PlainTyper(
@@ -144,6 +158,121 @@ def _start(body: dict[str, Any], agreed: bool, as_json: bool) -> dict[str, Any]:
         out.print("Cancelled.")
         raise typer.Exit(0)
     return _start(body, True, as_json)
+
+
+PUSH_JSON_HELP = json_output_help(
+    ". = {reference, owner, name, version, package_id, release_id, created_package, components[]}",
+    ".components[] = {kind, name?, source}",
+)
+
+
+@app.command("push", epilog=PUSH_JSON_HELP)
+def push(
+    path: Path = typer.Option(
+        Path("."), "--path", "-p", help="The pipeline package's folder (default: here)."
+    ),
+    owner: Optional[str] = typer.Option(
+        None,
+        "--owner",
+        "-o",
+        help="Owner slug (user or team) to push to, for collaborators with write access.",
+    ),
+    team: Optional[str] = typer.Option(
+        None, "--team", "-t", help="Team slug to push under (default: your selected team)."
+    ),
+    visibility: Optional[str] = typer.Option(
+        None,
+        "--visibility",
+        "-v",
+        help="Visibility of a new package: PUBLIC or PRIVATE (default: private, or the team's "
+        "default).",
+    ),
+    output: str = typer.Option("table", "--output", help="Output format: table or json"),
+) -> None:
+    """Publish the pipeline package in a folder to the Environments Hub as a new release.
+
+    It uploads the package's wheel and a source archive of the folder (honoring .gitignore),
+    declares it a pipeline, and prints owner/name@version, the reference a run pins. Each
+    version is published once; bump it in pyproject.toml to push again.
+    """
+    validate_output_format(output, console)
+    as_json = output == "json"
+    if visibility is not None and visibility.strip().lower() not in ("public", "private"):
+        _fail(ValueError("--visibility must be PUBLIC or PRIVATE"))
+    package_dir = path.resolve()
+    try:
+        with (package_dir / "pyproject.toml").open("rb") as file:
+            project = tomllib.load(file).get("project", {})
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        _fail(ValueError(f"Can't read {package_dir / 'pyproject.toml'}: {error}"))
+    name, version = project.get("name"), project.get("version")
+    if not name or not version:
+        _fail(ValueError("pyproject.toml needs [project] name and version"))
+
+    def step(message: str) -> None:
+        if not as_json:
+            console.print(f"[dim]{escape(message)}[/dim]")
+
+    try:
+        step(f"Building {name} {version}...")
+        wheel = build_wheel(package_dir)
+        distribution = wheel_distribution(wheel)
+        check_name_matches_distribution(str(name), distribution)
+        requires_dist = requires_dist_of(wheel)
+        # The verifiers components it exports too, if any; the platform checks the pipeline.
+        components: List[dict[str, Any]] = []
+        if classify_runtime_from_metadata(requires_dist) != VERIFIERS_V0:
+            components = detect_components(package_dir, distribution).components
+        components.append({"kind": "pipeline"})
+        api = APIClient()
+        owner_slug = resolve_owner(api, owner=owner, team=team, configured_team=api.config.team_id)
+        with tempfile.TemporaryDirectory(prefix="prime-pipelines-push-") as out_dir:
+            source = write_source(package_dir, Path(out_dir), distribution, str(version))
+            published = publish_release(
+                HubClient(api),
+                owner=owner_slug,
+                names=hub_names(str(name)),
+                request=ReleaseRequest(
+                    version=str(version),
+                    source=source,
+                    wheel=wheel,
+                    metadata={
+                        "description": project.get("description", ""),
+                        "requires_dist": requires_dist,
+                    },
+                    components=components,
+                ),
+                visibility=visibility.strip().lower() if visibility else None,
+                on_step=step,
+            )
+    except PushError as error:
+        _fail(error)
+    except HubAPIError as error:
+        print_push_error(console, error)
+        raise typer.Exit(1)
+    except (APIError, OSError) as error:
+        _fail(error)
+
+    owner_name = (published.package.get("owner") or {}).get("slug") or published.owner
+    release = published.release
+    reference = f"{owner_name}/{published.name}@{release.get('version') or version}"
+    if as_json:
+        output_data_as_json(
+            {
+                "reference": reference,
+                "owner": owner_name,
+                "name": published.name,
+                "version": release.get("version") or version,
+                "package_id": published.package.get("id"),
+                "release_id": release.get("id"),
+                "created_package": published.created_package,
+                "components": release.get("components", []),
+            },
+            console,
+        )
+        return
+    console.print(f"[green]✓ Pushed {escape(reference)}[/green]")
+    console.print(f"Run it with: {shlex.join(['prime', 'pipelines', 'run', reference])}")
 
 
 @app.command("run", epilog=RUN_JSON_HELP)

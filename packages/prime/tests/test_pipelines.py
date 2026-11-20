@@ -349,10 +349,11 @@ def test_stop_without_a_terminal_stops_nothing_unless_told_yes(api: Dict[str, An
     assert result.exit_code == 0 and api["post"] == ("/pipelines/runs/run1/stop", None)
 
 
-def test_the_group_is_eight_commands(api: Dict[str, Any]) -> None:
+def test_the_group_is_nine_commands(api: Dict[str, Any]) -> None:
     from prime_cli.commands.pipelines import app as pipelines
 
     assert [command.name for command in pipelines.registered_commands] == [
+        "push",
         "run",
         "list",
         "runs",

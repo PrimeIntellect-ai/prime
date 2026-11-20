@@ -319,30 +319,6 @@ daemons; an interruption fails explicitly when the server cannot replay output.
 Regenerate the Python protocol bindings from the platform checkout with
 `bash packages/prime-sandboxes/tools/generate-command-session.sh /path/to/platform`.
 
-### Fork with Memory
-
-`fork()` pauses a sandbox, creates a new sandbox from that pause, and requests
-the source's resume, so the new sandbox continues the paused process tree,
-memory, and disk:
-
-```python
-forked = sandbox_client.fork(sandbox.id, name="forked")
-sandbox_client.wait_for_creation(forked.id)
-```
-
-`AsyncSandboxClient.fork()` is the same, awaited. The fork takes the paused
-sandbox's shape, environment, and secrets, so `fork()` has no CPU, memory, or GPU
-arguments; `timeout_seconds` bounds the wait for the pause, and the call returns
-as soon as the create is accepted. The source's resume is also asynchronous: it
-stays PAUSED until the platform reports it RUNNING, and if the fork fails after
-the pause, the error names the source (or the created fork) so either can be
-recovered or deleted. A memory fork is an exact copy of the paused guest: the
-kernel RNG is reseeded, but userspace random generators (OpenSSL, language
-runtimes) and keys, tokens, or IDs already in memory are the same in every fork,
-so rekey or regenerate them in the workload. GPU sandboxes and sandboxes with
-volumes cannot be paused, so they cannot be forked this way; for a disk-only copy
-use `checkpoint()` + `wait_for_checkpoint()` + `create(...)`.
-
 ### Reattach a Live Process
 
 A live process keeps running when its handle goes away: the client that started it

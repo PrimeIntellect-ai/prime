@@ -4,6 +4,7 @@ from typing import Optional
 import typer
 
 from . import __version__
+from .commands.auth import app as auth_app
 from .commands.availability import app as availability_app
 from .commands.config import app as config_app
 from .commands.disks import app as disks_app
@@ -73,6 +74,8 @@ app.add_typer(logout_app, name="logout", rich_help_panel="Account")
 app.add_typer(whoami_app, name="whoami", rich_help_panel="Account")
 app.add_typer(switch_app, name="switch", rich_help_panel="Account")
 app.add_typer(config_app, name="config", rich_help_panel="Account")
+# Credential-plugin entry point: invoked by kubectl, not usually by hand.
+app.add_typer(auth_app, name="auth", rich_help_panel="Account")
 app.add_typer(teams_app, name="teams", rich_help_panel="Account")
 app.add_typer(secret_app, name="secret", rich_help_panel="Account")
 app.command("wallet", rich_help_panel="Account", epilog=WALLET_JSON_HELP)(wallet_command)

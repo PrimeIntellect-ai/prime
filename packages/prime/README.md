@@ -210,7 +210,7 @@ prime sandbox fork <sandbox-id> [--with-memory]
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
 prime sandbox download <sandbox-id> /remote/file.txt ./local/
 
-# Attach persistent volumes (repeatable; :ro mounts read-only)
+# Attach persistent volumes (repeatable; :ro mounts read-only, :rw is the default)
 prime sandbox create --volume data:/data --volume cache:/mnt:ro python:3.11
 
 # Manage volumes (create takes --size-gb; default capacity is 100 GiB)

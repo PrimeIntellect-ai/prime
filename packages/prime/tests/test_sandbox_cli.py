@@ -7,7 +7,7 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from prime_sandboxes import APIError, HeaderRule, SandboxCheckpoint, StartCommand
+from prime_sandboxes import APIError, HeaderRule, SandboxCheckpoint, StartCommand, VolumeMount
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -278,7 +278,46 @@ def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch
     assert captured["request"].name == "fork"
     assert captured["request"].docker_image is None
     assert captured["request"].disk_size_gb is None
+    assert captured["request"].volumes is None
     assert "restored-1" in result.output
+
+
+def test_restore_command_mounts_only_the_volumes_it_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        captured["request"] = request
+        return SimpleNamespace(id="restored-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "checkpoint",
+            "restore",
+            "cp-1",
+            "--volume",
+            "data:/data",
+            "--volume",
+            "ref:/ref:ro",
+            "-y",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].volumes == [
+        VolumeMount(name="data", mount_path="/data", read_only=False),
+        VolumeMount(name="ref", mount_path="/ref", read_only=True),
+    ]
+
+    captured.clear()
+    result = runner.invoke(
+        app, ["sandbox", "checkpoint", "restore", "cp-1", "--volume", "data", "-y"]
+    )
+    assert result.exit_code == 1, result.output
+    assert captured == {}
 
 
 def test_restore_command_memory_forks_with_the_paused_shape(
@@ -338,6 +377,7 @@ def test_fork_checkpoints_waits_and_restores(monkeypatch: pytest.MonkeyPatch) ->
     assert request.cpu_cores == 4
     assert request.memory_gb == source.memory_gb
     assert request.team_id == "team-1" and request.labels == ["a"]
+    assert request.volumes is None
     assert "forked-1" in result.output
 
 
@@ -414,6 +454,38 @@ def test_fork_with_memory_rejects_shape_overrides_before_any_request(
     assert result.exit_code == 1, result.output
     assert "--with-memory cannot be combined with --cpu-cores or --memory-gb" in result.output
     assert "keeps the source's shape" in result.output
+
+
+def test_fork_mounts_only_the_volumes_it_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpointed: list[str] = []
+    created: list[Any] = []
+    source = _fake_sandbox(
+        id="sbx-1", team_id=None, region="us", gpu_count=0, gpu_type=None, labels=[]
+    )
+    pending = SimpleNamespace(id="checkpoint-1")
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.checkpoint",
+        lambda self, sid: checkpointed.append(sid) or pending,
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.wait_for_checkpoint",
+        lambda self, checkpoint_id, timeout_seconds: pending,
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.create",
+        lambda self, request: created.append(request) or SimpleNamespace(id="forked-1"),
+    )
+
+    # A malformed spec fails before the source is checkpointed.
+    bad = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--volume", "data", "--yes"])
+    assert bad.exit_code == 1, bad.output
+    assert checkpointed == []
+
+    result = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--volume", "data:/data:ro", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert created[0].volumes == [VolumeMount(name="data", mount_path="/data", read_only=True)]
 
 
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:

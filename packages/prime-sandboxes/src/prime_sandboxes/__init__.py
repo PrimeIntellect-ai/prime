@@ -26,6 +26,8 @@ from .exceptions import (
     SandboxOOMError,
     SandboxTimeoutError,
     UploadTimeoutError,
+    VolumeSyncFailedError,
+    VolumeSyncSupersededError,
 )
 from .images import AsyncImageClient, ImageClient
 from .models import (
@@ -87,6 +89,7 @@ from .models import (
     Volume,
     VolumeListResponse,
     VolumeMount,
+    VolumeSync,
 )
 from .process import AsyncSandboxProcess
 from .sandbox import AsyncSandboxClient, SandboxClient
@@ -166,6 +169,7 @@ __all__ = [
     "Volume",
     "VolumeListResponse",
     "VolumeMount",
+    "VolumeSync",
     # Exceptions
     "APIError",
     "BatchStatusUnsupportedError",
@@ -184,4 +188,6 @@ __all__ = [
     "UploadTimeoutError",
     "DownloadTimeoutError",
     "ProcessOutputLostError",
+    "VolumeSyncFailedError",
+    "VolumeSyncSupersededError",
 ]

@@ -256,6 +256,7 @@ async def wait_for_checkpoint(client, timeout_seconds=300):
 
 @pytest.fixture
 def checkpoint_clock(monkeypatch):
+    from prime_sandboxes import _polling
     from prime_sandboxes import sandbox as module
 
     sleeps = []
@@ -271,7 +272,8 @@ def checkpoint_clock(monkeypatch):
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(module.time, "sleep", sleep)
     monkeypatch.setattr(module.asyncio, "sleep", async_sleep)
-    monkeypatch.setattr(module.random, "uniform", lambda low, high: 0.0)
+    # The shared poll-delay helpers moved into _polling.
+    monkeypatch.setattr(_polling.random, "uniform", lambda low, high: 0.0)
     return sleeps
 
 
@@ -508,7 +510,7 @@ async def test_wait_for_checkpoint_fast_window_expires_to_backoff(
     checkpoint = await wait_for_checkpoint(checkpoint_client)
 
     assert checkpoint.state == "DURABLE"
-    assert checkpoint_clock == [1.0] * 10 + [1.0, 1.5, 2.25]
+    assert checkpoint_clock == [1.0] * 10 + [1.0, 1.5, 2.0]
 
 
 @pytest.mark.asyncio
@@ -562,8 +564,8 @@ async def test_wait_for_checkpoint_backoff_caps_at_max_delay(
     checkpoint = await wait_for_checkpoint(checkpoint_client)
 
     assert checkpoint.state == "DURABLE"
-    # Ten fast sleeps, one backoff ramp, then the capped 10s delay.
-    assert checkpoint_clock == ([1.0] * 11 + [1.5, 2.25, 3.375, 5.0625, 7.59375] + [10.0] * 13)
+    # Ten fast sleeps, one backoff ramp, then the capped 2s delay.
+    assert checkpoint_clock == [1.0] * 11 + [1.5] + [2.0] * 17
 
 
 async def concurrent_checkpoint_waits(client, checkpoint_ids):

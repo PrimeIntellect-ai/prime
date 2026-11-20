@@ -1075,10 +1075,21 @@ def checkpoint_restore(
             "sandbox continues from the paused state with its shape, environment and secrets"
         ),
     ),
+    volume: Optional[List[str]] = typer.Option(
+        None,
+        "--volume",
+        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Create a new sandbox from a checkpoint's disk, or with --memory fork a paused sandbox."""
+    """Create a new sandbox from a checkpoint's disk, or with --memory fork a paused sandbox.
+
+    A checkpoint holds only the root disk, so the new sandbox mounts no volume unless you pass
+    --volume. A volume is mounted at its latest published content, not the state at checkpoint
+    time. --volume cannot be combined with --memory.
+    """
     sandbox_name = name or f"restore-{checkpoint_id[:8]}"
+    volume_mounts = parse_volume_mount_specs(volume or [])
     try:
         shape = {
             field: value
@@ -1091,6 +1102,7 @@ def checkpoint_restore(
             restore_memory=True if memory else None,
             team_id=team_id,
             timeout_minutes=timeout_minutes,
+            volumes=volume_mounts or None,
             **shape,
         )
         if not confirm_or_skip(
@@ -1129,19 +1141,34 @@ def fork(
             "snapshot, fork, then resume it asynchronously"
         ),
     ),
+    volume: Optional[List[str]] = typer.Option(
+        None,
+        "--volume",
+        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
     """Fork a running sandbox into a new sandbox with the same filesystem.
 
     With --with-memory the fork also continues the source's processes, memory, and
-    disk; the source is paused for the snapshot and resumed afterwards."""
-    # Reject the incompatible shape overrides before any API request.
+    disk; the source is paused for the snapshot and resumed afterwards.
+
+    A checkpoint holds only the root disk, so the fork mounts no volume unless you pass
+    --volume. A volume is mounted at its latest published content, not the state at
+    checkpoint time: sync the source first to include its unpublished writes.
+    --volume cannot be combined with --with-memory.
+    """
+    # Reject the incompatible options before any API request.
     if with_memory and (cpu_cores is not None or memory_gb is not None):
         console.print(
             "[red]Error:[/red] --with-memory cannot be combined with --cpu-cores or "
             "--memory-gb: a memory fork keeps the source's shape"
         )
         raise typer.Exit(1)
+    if with_memory and volume:
+        console.print("[red]Error:[/red] --with-memory cannot be combined with --volume")
+        raise typer.Exit(1)
+    volume_mounts = parse_volume_mount_specs(volume or [])
     client = SandboxClient(APIClient())
     try:
         source = client.get(sandbox_id)
@@ -1186,6 +1213,7 @@ def fork(
                     timeout_minutes if timeout_minutes is not None else source.timeout_minutes
                 ),
                 labels=source.labels,
+                volumes=volume_mounts or None,
             )
             with console.status("[bold blue]Forking sandbox...", spinner="dots"):
                 sandbox = client.create(request)
@@ -1333,7 +1361,7 @@ def create(
     volume: Optional[List[str]] = typer.Option(
         None,
         "--volume",
-        help="Attach a volume as NAME:/mount/path[:ro]. Can be specified multiple times.",
+        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
     ),
     gang: int = typer.Option(
         1,

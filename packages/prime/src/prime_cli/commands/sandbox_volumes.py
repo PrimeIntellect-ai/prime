@@ -6,7 +6,7 @@ import shutil
 import string
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, NoReturn, Optional
 
 import typer
 from prime_sandboxes import (
@@ -21,6 +21,8 @@ from prime_sandboxes import (
     UnauthorizedError,
     Volume,
     VolumeMount,
+    VolumeSyncFailedError,
+    VolumeSyncSupersededError,
 )
 from rich.markup import escape
 
@@ -71,7 +73,7 @@ def _invalid_volume_mount(spec: str, problem: str) -> None:
 
 
 def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
-    """Parse repeatable ``NAME:/mount/path[:ro]`` values into volume mounts.
+    """Parse repeatable ``NAME:/mount/path[:ro|:rw]`` values into volume mounts.
 
     Only the syntax is split here; name, mount-path, and count rules are
     enforced once by the API.
@@ -80,13 +82,13 @@ def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
     for spec in specs:
         name, sep, remainder = spec.partition(":")
         if not sep or not name or not remainder:
-            _invalid_volume_mount(spec, "expected NAME:/mount/path[:ro]")
-        mount_path, read_only = remainder, False
-        if mount_path.endswith(":ro"):
-            mount_path, read_only = mount_path[:-3], True
+            _invalid_volume_mount(spec, "expected NAME:/mount/path[:ro|:rw]")
+        mount_path, has_mode, mode = remainder.partition(":")
         if not mount_path:
-            _invalid_volume_mount(spec, "empty mount path after ':ro'")
-        mounts.append(VolumeMount(name=name, mount_path=mount_path, read_only=read_only))
+            _invalid_volume_mount(spec, "empty mount path")
+        if has_mode and mode not in ("ro", "rw"):
+            _invalid_volume_mount(spec, f"unknown mode '{mode}', expected ro or rw")
+        mounts.append(VolumeMount(name=name, mount_path=mount_path, read_only=mode == "ro"))
     return mounts
 
 
@@ -139,6 +141,13 @@ def _importer_image() -> str:
     return _IMPORTER_IMAGE_DEV
 
 
+def _rsync_progress_flag() -> str:
+    """One overall progress line needs rsync >= 3.1; macOS's bundled openrsync
+    only has per-file --progress."""
+    probe = subprocess.run(["rsync", "--help"], capture_output=True, text=True)
+    return "--info=progress2" if "--info" in probe.stdout + probe.stderr else "--progress"
+
+
 def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
     remote_shell = shlex.join(
         [
@@ -149,16 +158,22 @@ def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
             transport.key_path,
             "-o",
             f"ProxyCommand={transport.proxy_command}",
+            # The sandbox API returns no host key to pin for a session, and the
+            # ProxyCommand reaches the gateway over TLS, which authorizes this
+            # session's key. LogLevel hides the "Permanently added" notice.
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
             "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
         ]
     )
     return [
         "rsync",
         "-az",
         "--partial",
+        _rsync_progress_flag(),
         "-e",
         remote_shell,
         f"{path}/",
@@ -274,9 +289,7 @@ def _import_volume(
         )
         sandbox_client.wait_for_creation(sandbox.id)
         with ssh_transport(sandbox_client, sandbox.id) as transport:
-            # rsync progress is success-path noise; its errors go to stderr,
-            # which stays attached to the terminal.
-            result = subprocess.run(_rsync_command(transport, path), stdout=subprocess.DEVNULL)
+            result = subprocess.run(_rsync_command(transport, path))
         if result.returncode != 0:
             console.print(
                 "[red]Error:[/red] rsync failed. Nothing was published by this "
@@ -347,7 +360,12 @@ def create(
         None, help="Team ID (uses config team_id if not specified)"
     ),
     from_path: Optional[str] = typer.Option(
-        None, "--from", help="Import this local directory into the new volume"
+        None,
+        "--from",
+        help=(
+            "Import this local directory into the new volume. Files keep their local "
+            "uid and gid; chown them in a sandbox if a non-root user needs to write."
+        ),
     ),
     size_gb: Optional[int] = typer.Option(
         None, "--size-gb", help="Volume capacity in GiB (default: 100)"
@@ -622,3 +640,85 @@ def _print_publish_result(checkpoint, name: str) -> None:
             "contents do not include this data until it is. Check with "
             f"'prime sandbox checkpoint get {escape(checkpoint.id)}'."
         )
+
+
+def _exit_sync_failed(failure: Optional[str]) -> NoReturn:
+    console.print(f"[red]Error:[/red] volume sync failed: {escape(failure or 'unknown')}")
+    if failure == "BUSY":
+        console.print("A process in the sandbox holds the volume; close it and retry.")
+    if failure == "ROLLBACK_FAILED":
+        console.print(
+            "The volume could not be re-attached. Run this command with --discard to "
+            "drop the sandbox's unpublished writes and re-attach it at the committed head."
+        )
+    raise typer.Exit(1)
+
+
+@app.command()
+def sync(
+    name: str = typer.Argument(..., help="Volume name to sync"),
+    sandbox_id: str = typer.Option(
+        ..., "--sandbox", help="ID of the sandbox whose volume attachment is synced"
+    ),
+    discard: bool = typer.Option(
+        False,
+        "--discard",
+        help="Drop this sandbox's unpublished volume writes instead of publishing them",
+    ),
+    no_wait: bool = typer.Option(False, "--no-wait", help="Do not wait for the sync to finish"),
+) -> None:
+    """Sync a sandbox's attached volume to the volume's committed head."""
+    try:
+        result = _sandbox_client().volumes.sync(sandbox_id, name, discard=discard, wait=not no_wait)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        # 404 not attached, 409 not RUNNING or merges disabled, 400 not VM.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except TimeoutError as e:
+        # The SDK wait budget expired; the sync may still finish.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        console.print("The sync may still complete. Re-run this command to wait for it.")
+        raise typer.Exit(1)
+    except VolumeSyncFailedError as e:
+        _exit_sync_failed(e.failure)
+    except VolumeSyncSupersededError as e:
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        console.print("Run this command again to sync to the current head.")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+
+    # The wait mode returns only DONE (a FAILED sync raised above), but
+    # --no-wait can receive a terminal state in the POST response itself.
+    if result.state == "FAILED":
+        _exit_sync_failed(result.failure)
+    if result.state == "DONE":
+        outcome = "Discarded unpublished changes to volume" if discard else "Synced volume"
+        console.print(
+            f"[green]✓[/green] {outcome} {escape(name)} in sandbox "
+            f"{escape(sandbox_id)} to its committed head"
+        )
+        if result.head_id:
+            console.print(f"Head checkpoint: [cyan]{escape(result.head_id)}[/cyan]")
+        else:
+            console.print("Head checkpoint: [yellow]unknown[/yellow]")
+        return
+
+    # --no-wait with a non-terminal state: the sync runs on; a repeated
+    # request returns the same in-flight sync, so re-running this command
+    # waits for it.
+    console.print(f"Sync ID: [cyan]{escape(result.sync_id or '-')}[/cyan]")
+    console.print(f"State: {escape(result.state or '-')}")
+    console.print(
+        "[yellow]The sync has not finished; the volume's committed head "
+        "applies to this sandbox once it does. Re-run this command to "
+        "wait for it.[/yellow]"
+    )

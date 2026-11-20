@@ -622,6 +622,27 @@ class Volume(BaseModel):
     account_storage_limit_gb: Optional[int] = None
 
 
+class VolumeSync(BaseModel):
+    """One sandbox attachment's current volume sync.
+
+    state is null before the first sync, then one of UNMOUNTING,
+    PUBLISHING, REMOUNTING, ROLLING_BACK, DONE, or FAILED; ROLLING_BACK means
+    the sync failed after the unmount and is re-attaching the volume at its
+    previous head (failure is already set). head_id is the attachment's
+    current head (the synced head once state is DONE); updated_at is the
+    last transition time. failure says why the sync failed or is rolling back
+    (BUSY, PUBLISH_FAILED, MERGE_FAILED, DEADLINE, NODE_ERROR or
+    ROLLBACK_FAILED) and is null otherwise. It stays set when the sandbox
+    leaves RUNNING mid-rollback.
+    """
+
+    sync_id: Optional[str] = None
+    state: Optional[str] = None
+    head_id: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    failure: Optional[str] = None
+
+
 class VolumeListResponse(BaseModel):
     """Volume list response model"""
 

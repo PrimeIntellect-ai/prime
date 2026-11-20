@@ -101,7 +101,7 @@ def test_client_transfer_wire_contract():
         url="s3://b/x",
         credentials=credentials,
         region="us-east-1",
-        endpoint_url="https://minio.local",
+        endpoint_url="https://s3.us-east-1.amazonaws.com",
         team_id="team1",
     )
     assert created.id == "t1"
@@ -120,7 +120,7 @@ def test_client_transfer_wire_contract():
                 "url": "s3://b/x",
                 "credentials": credentials,
                 "region": "us-east-1",
-                "endpointUrl": "https://minio.local",
+                "endpointUrl": "https://s3.us-east-1.amazonaws.com",
                 "teamId": "team1",
             },
         ),
@@ -137,13 +137,15 @@ def test_client_omits_unset_options():
         "volumeName": "data",
         "direction": "import",
         "path": "",
-        "url": "s3://b",
+        "url": "s3://bucket",
         "status": "pending",
     }
     api = SimpleNamespace(post=lambda path, json=None: posted.append(json) or wire)
     client = HostedTrainingClient(api)
-    client.create_volume_transfer("data", direction="import", path="", url="s3://b", credentials={})
-    assert posted[0] == {"direction": "import", "path": "", "url": "s3://b", "credentials": {}}
+    client.create_volume_transfer(
+        "data", direction="import", path="", url="s3://bucket", credentials={}
+    )
+    assert posted[0] == {"direction": "import", "path": "", "url": "s3://bucket", "credentials": {}}
 
 
 def test_export_payload_and_hints(monkeypatch):
@@ -191,17 +193,18 @@ def test_export_forwards_region_and_session_token(monkeypatch):
         "export",
         "data",
         "p",
-        "s3://b",
+        "s3://bucket",
         "--region",
         "eu-west-1",
         "--endpoint-url",
-        "https://s3.example",
+        "https://s3.eu-west-1.amazonaws.com",
     )
     assert result.exit_code == 0, _text(result)
     payload = created[0][1]
     assert payload["region"] == "eu-west-1"
-    assert payload["endpoint_url"] == "https://s3.example"
+    assert payload["endpoint_url"] == "https://s3.eu-west-1.amazonaws.com"
     assert payload["credentials"]["sessionToken"] == "session-token"
+    assert "session-token" not in _text(result)
 
 
 def test_import_destination_is_last(monkeypatch):
@@ -229,7 +232,7 @@ def test_missing_aws_env_exits_before_any_call(monkeypatch, missing):
     monkeypatch.setattr(volumes, "_client", boom)
     _aws_env(monkeypatch)
     monkeypatch.delenv(missing, raising=False)
-    result = _run("export", "data", "p", "s3://b")
+    result = _run("export", "data", "p", "s3://bucket")
     assert result.exit_code == 1
     assert f"{missing} is not set" in _text(result)
     assert "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN" in _text(result)
@@ -361,36 +364,176 @@ def test_transfers_cancel(monkeypatch):
     result = _run("transfers", "cancel", "data", "t9")
     assert result.exit_code == 0, _text(result)
     assert cancelled == [("data", "t9", {"team_id": "team1"})]
-    assert "Cancelling transfer t9." in _text(result)
+    assert "Cancellation requested for transfer t9." in _text(result)
+    assert "prime volumes transfers list data --id t9 --follow" in _text(result)
 
 
-def test_progress_helpers():
-    assert volumes._short_number("412.345 GiB") == "412.3 GiB"
-    assert volumes._short_number("1.500 TiB") == "1.5 TiB"
-    assert volumes._short_number("182.400 MiB/s") == "182.4 MiB/s"
-    assert volumes._short_eta("1h48m0s") == "1h48m"
-    assert volumes._short_eta("0h48m0s") == "0h48m"
-    assert volumes._short_eta("30s") == "30s"
-    assert volumes._duration("2026-10-01T07:00:00Z", "2026-10-01T09:21:00Z") == "2h21m"
-    assert volumes._duration(None, "2026-10-01T09:21:00Z") is None
-    running = _transfer(
-        progress={
-            "transferred": "412.345 GiB",
-            "total": "1.500 TiB",
-            "percentage": 27,
-            "rate": "182.400 MiB/s",
-            "eta": "1h48m0s",
-        }
+@pytest.mark.parametrize("path", ["", "/", ".", "///"])
+def test_import_requires_destination_directory(monkeypatch, path):
+    monkeypatch.setattr(volumes, "_client", lambda: pytest.fail("invalid path made an API call"))
+
+    result = _run("import", "data", "s3://bucket/prefix", path)
+
+    assert result.exit_code == 2, _text(result)
+    assert "non-root destination directory" in _text(result)
+    assert "prime volumes import data s3://bucket/prefix datasets/import" in _text(result)
+
+
+@pytest.mark.parametrize(
+    "direction,path",
+    [
+        ("import", "runs"),
+        ("import", "/runs/checkpoints/"),
+        ("import", ".prime"),
+        ("import", "datasets/.prime/state"),
+        ("export", ".prime/config"),
+        ("export", "datasets/.prime/state"),
+        ("export", "runs/.sessions/session-id"),
+        ("import", "datasets/../runs"),
+        ("import", "datasets/./raw"),
+        ("export", "datasets//raw"),
+        ("export", "../data"),
+        ("import", "datasets\\raw"),
+        ("import", "datasets/\x00raw"),
+    ],
+)
+def test_protected_and_invalid_paths_fail_before_credentials(monkeypatch, direction, path):
+    monkeypatch.setattr(volumes, "_aws_credentials", lambda: pytest.fail("loaded credentials"))
+    args = ("s3://bucket/prefix", path) if direction == "import" else (path, "s3://bucket/prefix")
+
+    result = _run(direction, "data", *args)
+
+    assert result.exit_code == 2, _text(result)
+    assert "Error:" in _text(result)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://bucket/prefix",
+        "s3:///prefix",
+        "s3://bucket/prefix?secret=value",
+        "s3://bucket/prefix#fragment",
+        "s3://user:password@bucket/prefix",
+        "s3://bucket:443/prefix",
+        "s3://localhost/prefix/../data",
+        "s3://bucket/prefix/./data",
+        "s3://bucket/prefix//data",
+        "s3://bucket\\evil/prefix",
+        "s3://UPPERCASE/prefix",
+        "s3://127.0.0.1/prefix",
+        "s3://bucket..name/prefix",
+        "s3://ab/prefix",
+        "s3://bucket/prefix\x00data",
+    ],
+)
+def test_invalid_s3_urls_fail_before_credentials(monkeypatch, url):
+    monkeypatch.setattr(volumes, "_aws_credentials", lambda: pytest.fail("loaded credentials"))
+
+    result = _run("export", "data", "datasets", url)
+
+    assert result.exit_code == 2, _text(result)
+    assert "s3://bucket/prefix" in _text(result)
+    assert "password" not in _text(result)
+    assert "secret=value" not in _text(result)
+
+
+@pytest.mark.parametrize(
+    "direction,path,expected",
+    [
+        ("import", "/datasets/raw/", "datasets/raw"),
+        ("import", "datasets/raw data", "datasets/raw data"),
+        ("export", "/", ""),
+        ("export", "/runs/run-123/checkpoints/", "runs/run-123/checkpoints"),
+    ],
+)
+def test_transfer_allows_data_directories_and_export_root(monkeypatch, direction, path, expected):
+    created = []
+    _client(
+        monkeypatch,
+        create_volume_transfer=lambda *args, **kwargs: created.append((args, kwargs))
+        or _transfer(direction=direction),
     )
-    assert volumes._progress_cell(running) == "412.3 GiB / 1.5 TiB (27%), 182.4 MiB/s, ETA 1h48m"
-    done = _transfer(
-        status="succeeded",
-        progress={"total": "1.500 TiB"},
-        startedAt="2026-10-01T07:00:00Z",
-        completedAt="2026-10-01T09:21:00Z",
+    _aws_env(monkeypatch)
+    url = "s3://bucket/prefix with spaces"
+    args = (url, path) if direction == "import" else (path, url)
+
+    result = _run(direction, "data", *args)
+
+    assert result.exit_code == 0, _text(result)
+    assert created == [
+        (
+            ("data",),
+            {
+                "direction": direction,
+                "path": expected,
+                "url": url,
+                "credentials": {
+                    "accessKeyId": "AKIAEXAMPLE",
+                    "secretAccessKey": "shh-secret",
+                    "sessionToken": None,
+                },
+                "region": None,
+                "endpoint_url": None,
+                "team_id": "team1",
+            },
+        )
+    ]
+
+
+def test_follow_failed_transfer_exits_unsuccessfully(monkeypatch):
+    _client(
+        monkeypatch,
+        get_volume_transfer=lambda *args, **kwargs: _transfer(
+            status="failed", errorMessage="AWS credentials expired; start a new transfer."
+        ),
     )
-    assert volumes._progress_cell(done) == "1.5 TiB in 2h21m"
-    assert volumes._progress_cell(_transfer(status="pending")) == "-"
-    assert volumes._progress_cell(_transfer(status="failed", errorMessage="rclone exited 1")) == (
-        "rclone exited 1"
-    )
+
+    result = _run("transfers", "list", "data", "--id", "t1", "--follow")
+
+    assert result.exit_code == 1, _text(result)
+    assert "AWS credentials expired; start a new transfer." in _text(result)
+
+
+def test_follow_exits_after_repeated_api_errors(monkeypatch):
+    from prime_cli.core import APIError
+
+    calls = []
+
+    def unavailable(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise APIError("Service unavailable")
+
+    monkeypatch.setattr(volumes.time, "sleep", lambda seconds: None)
+    _client(monkeypatch, get_volume_transfer=unavailable)
+
+    result = _run("transfers", "list", "data", "--id", "t1", "--follow")
+
+    assert result.exit_code == 1, _text(result)
+    assert len(calls) == volumes._MAX_POLL_ERRORS
+    assert "Service unavailable" in _text(result)
+
+
+@pytest.mark.parametrize(
+    "command,phrases",
+    [
+        ("import", ["non-root", "no active writer", "encrypted", "overwritten"]),
+        ("export", ["durable", "sync active writers", "overwrite matching keys"]),
+    ],
+)
+def test_s3_transfer_help_describes_copy_contract(command, phrases):
+    result = _run(command, "--help")
+
+    assert result.exit_code == 0, _text(result)
+    text = " ".join(_text(result).split())
+    for phrase in [
+        *phrases,
+        "AWS S3 HTTPS endpoint",
+        "unsupported",
+        "environment",
+        "156.25 GiB (167,772,160,000 bytes)",
+        "dataset may be larger",
+        "23-hour deadline",
+    ]:
+        assert phrase in text
+    assert "rclone" not in text

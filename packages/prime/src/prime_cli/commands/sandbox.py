@@ -737,7 +737,9 @@ app.add_typer(checkpoint_app, name="checkpoint")
 app.add_typer(sandbox_volumes_app, name="volumes")
 
 
-def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
+def _print_checkpoint(
+    checkpoint: SandboxCheckpoint, output: str, *, memory_snapshot: bool = False
+) -> None:
     if output == "json":
         output_data_as_json(checkpoint.model_dump(mode="json"), console)
         return
@@ -745,6 +747,21 @@ def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
     console.print(f"State: {escape(checkpoint.state)}")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
+    elif memory_snapshot:
+        console.print(
+            "Memory snapshot captured. The source is resuming asynchronously; "
+            f"check with 'prime sandbox get {escape(checkpoint.sandbox_id)}'."
+        )
+        console.print(
+            f"Restore with 'prime sandbox checkpoint restore {escape(checkpoint.id)} --memory'."
+        )
+        if checkpoint.state != "DURABLE":
+            console.print(
+                "A non-DURABLE snapshot is usable on the pausing node while the source exists. "
+                "Wait for DURABLE "
+                f"('prime sandbox checkpoint get {escape(checkpoint.id)}') before deleting the "
+                "source; the public checkpoint model does not report whether memory is included."
+            )
     elif checkpoint.state != "DURABLE":
         console.print(
             "Restorable once DURABLE. Check with "
@@ -1174,6 +1191,34 @@ def fork(
                 sandbox = client.create(request)
         console.print(f"[green]Successfully forked into sandbox {escape(sandbox.id)}[/green]")
         console.print(f"Use 'prime sandbox get {escape(sandbox.id)}' to check its status")
+    except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
+@app.command("snapshot")
+def snapshot(
+    sandbox_id: str,
+    wait_timeout: float = typer.Option(
+        300,
+        "--wait-timeout",
+        help="Seconds to wait for the pause-ready wait (source PAUSED)",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Capture a memory snapshot of a running sandbox, then resume it.
+
+    The source is paused for the capture and resumed asynchronously. The returned
+    checkpoint restores with 'prime sandbox checkpoint restore <id> --memory'."""
+    validate_output_format(output, console)
+    client = SandboxClient(APIClient())
+    try:
+        if output == "json":
+            checkpoint = client.snapshot(sandbox_id, timeout_seconds=wait_timeout)
+        else:
+            with console.status("[bold blue]Capturing memory snapshot...", spinner="dots"):
+                checkpoint = client.snapshot(sandbox_id, timeout_seconds=wait_timeout)
+        _print_checkpoint(checkpoint, output, memory_snapshot=True)
     except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc

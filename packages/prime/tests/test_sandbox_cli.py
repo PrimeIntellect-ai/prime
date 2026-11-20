@@ -85,6 +85,96 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert listed == [("sandbox-1", None), ("sandbox-1", "checkpoint-1")]
 
 
+def _frozen_snapshot() -> SandboxCheckpoint:
+    return SandboxCheckpoint(
+        id="pause-1",
+        sandbox_id="sandbox-1",
+        state="FROZEN",
+        depth=1,
+        docker_image="python:3.11-slim",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+def test_snapshot_forwards_timeout_and_prints_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpoint = _frozen_snapshot()
+    calls: list[tuple[str, float]] = []
+
+    def snapshot(self: Any, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
+        calls.append((sandbox_id, timeout_seconds))
+        return checkpoint
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
+
+    result = runner.invoke(
+        app, ["sandbox", "snapshot", "sandbox-1", "--wait-timeout", "45", "--output", "json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("sandbox-1", 45)]
+    assert json.loads(result.output) == checkpoint.model_dump(mode="json")
+
+
+def test_snapshot_prints_the_resume_and_restore_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpoint = _frozen_snapshot()
+    calls: list[float] = []
+
+    def snapshot(self: Any, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
+        calls.append(timeout_seconds)
+        return checkpoint
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
+
+    result = runner.invoke(app, ["sandbox", "snapshot", "sandbox-1"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [300]
+    text = _flat(result.output)
+    assert "Memory snapshot captured" in text
+    assert "source is resuming asynchronously" in text
+    assert "prime sandbox checkpoint restore pause-1 --memory" in text
+    assert "non-DURABLE snapshot" in text
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (
+            TimeoutError(
+                "Sandbox sandbox-1 did not finish pausing within 2s; "
+                "the pause may still complete (checkpoint pause-1)"
+            ),
+            "checkpoint pause-1",
+        ),
+        (
+            RuntimeError(
+                "Pause checkpoint pause-1 cannot be restored (state=FAILED): "
+                "sandboxes with volumes cannot be paused"
+            ),
+            "sandboxes with volumes cannot be paused",
+        ),
+    ],
+)
+def test_snapshot_prints_capture_failures(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def snapshot(self: Any, *args: Any, **kwargs: Any) -> SandboxCheckpoint:
+        raise error
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
+
+    result = runner.invoke(app, ["sandbox", "snapshot", "sandbox-1"])
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" in result.output
+    assert expected in _flat(result.output)
+
+
 def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
     states = {

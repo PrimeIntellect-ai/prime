@@ -353,6 +353,49 @@ or IDs already in memory are the same in every fork, so rekey or regenerate them
 in the workload. GPU sandboxes and sandboxes with volumes cannot be paused, so
 they cannot be memory-forked; use the default disk fork for those.
 
+### Memory Snapshots
+
+`snapshot()` captures the source's memory and running processes without creating
+another sandbox. `checkpoint()` stays filesystem-only:
+
+```python
+snapshot = sandbox_client.snapshot(sandbox.id)
+# The source is resuming asynchronously; the snapshot may still be uploading.
+restored = sandbox_client.create(CreateSandboxRequest(
+    name="restored-sandbox",
+    checkpoint_id=snapshot.id,
+    restore_memory=True,
+))
+```
+
+`AsyncSandboxClient.snapshot()` is the same, awaited. The call pauses the source,
+waits until the pause checkpoint is `FROZEN` or `DURABLE` and the source is
+`PAUSED`, then requests a resume of the same source and returns the checkpoint it
+observed. The resume is accepted asynchronously: the source reports `RUNNING`
+later, and `timeout_seconds` (default 300) bounds only the pause-ready wait. The
+returned checkpoint is not necessarily `DURABLE`; `wait_for_checkpoint` waits for
+disk durability, not proof that the memory snapshot was stored. A non-durable
+snapshot is usable only on the pausing node and is discarded if the source is
+deleted before its upload completes, so do not delete the source before the
+checkpoint is `DURABLE`; after `DURABLE` it survives source deletion. Paused
+time counts against the source's timeout, and a pause checkpoint that does not
+become `DURABLE` within the
+platform's pause window (currently 6 hours) becomes `FAILED`. A `DURABLE` pause
+whose memory misses that same window stays `DURABLE` and loses its memory claim.
+If the source does not resume after the capture, the raised error names the
+checkpoint id and the source id. If the pause request fails or its response is
+lost, the source may still become PAUSED; check `get()` and continue it with
+`resume()` (`prime sandbox resume <id>`). The result is a `SandboxCheckpoint`,
+so `checkpoint restore --memory` and other memory restores take its id.
+
+No sandbox is created. Restoring always creates a new sandbox; the platform does
+not restore into the same running sandbox. A memory restore needs the source
+sandbox record to exist: the platform keeps it about 7 days after termination,
+then archives it, and disk-only restore is the remaining option. A pause
+checkpoint has no TTL. GPU sandboxes and sandboxes with volumes cannot be paused.
+A memory snapshot copies userspace random state and keys or tokens already in the
+guest's memory; rekey or regenerate them in a workload restored from it.
+
 ### Reattach a Live Process
 
 A live process keeps running when its handle goes away: the client that started it
@@ -369,7 +412,7 @@ process = await client.attach_process(sandbox.id, session)
 await process.write_stdin(b"next\n")
 ```
 
-A sandbox created from a memory checkpoint continues the processes of the sandbox
+A sandbox created from a memory snapshot continues the processes of the sandbox
 that was paused. Attach to one with the new sandbox's id and the same `session_uuid`.
 
 With output replay, the attached handle gets the output that sandboxd retains from

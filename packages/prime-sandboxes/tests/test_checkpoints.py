@@ -936,7 +936,11 @@ def mock_fork_polls(client, monkeypatch, calls, checkpoint_states, statuses, err
     def checkpoint_get(checkpoint_id):
         calls.append(("checkpoint", checkpoint_id))
         return SandboxCheckpoint.model_validate(
-            {**checkpoint_response(next(checkpoint_states)), "error": error}
+            {
+                **checkpoint_response(next(checkpoint_states)),
+                "id": checkpoint_id,
+                "error": error,
+            }
         )
 
     def status_get(sandbox_id):
@@ -1319,6 +1323,130 @@ async def test_fork_with_memory_propagates_cancellation_after_a_failed_cleanup_r
 
     assert calls == [
         ("POST", "/sandbox/sandbox-1/pause"),
+        ("POST", "/sandbox/sandbox-1/resume"),
+    ]
+
+
+async def checkpoint_call(client, sandbox_id="sandbox-1", **kwargs):
+    if isinstance(client, AsyncSandboxClient):
+        return await client.checkpoint(sandbox_id, **kwargs)
+    return client.checkpoint(sandbox_id, **kwargs)
+
+
+async def snapshot_call(client, sandbox_id="sandbox-1", **kwargs):
+    if isinstance(client, AsyncSandboxClient):
+        return await client.snapshot(sandbox_id, **kwargs)
+    return client.snapshot(sandbox_id, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_defaults_to_a_disk_checkpoint(checkpoint_client, monkeypatch):
+    calls = []
+    responses = iter([checkpoint_response("PENDING"), checkpoint_response("PENDING")])
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("json")))
+        return next(responses)
+
+    async def async_request(method, path, **kwargs):
+        return request(method, path, **kwargs)
+
+    monkeypatch.setattr(
+        checkpoint_client.client,
+        "request",
+        async_request if isinstance(checkpoint_client, AsyncSandboxClient) else request,
+    )
+
+    first = await checkpoint_call(checkpoint_client)
+    second = await checkpoint_call(checkpoint_client, ttl_seconds=3600)
+
+    assert first.state == "PENDING"
+    assert second.state == "PENDING"
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/checkpoints", None),
+        ("POST", "/sandbox/sandbox-1/checkpoints", {"ttl_seconds": 3600}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["FROZEN", "DURABLE"])
+async def test_snapshot_pauses_waits_and_resumes_the_source(checkpoint_client, monkeypatch, state):
+    calls = []
+    payloads = []
+    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+    mock_fork_polls(checkpoint_client, monkeypatch, calls, [state], ["PAUSED"])
+
+    result = await snapshot_call(checkpoint_client)
+
+    assert result.id == "pause-1"
+    assert result.state == state
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/pause"),
+        ("checkpoint", "pause-1"),
+        ("status", "sandbox-1"),
+        ("POST", "/sandbox/sandbox-1/resume"),
+    ]
+    assert payloads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout_seconds", [0, float("inf")])
+async def test_snapshot_rejects_an_invalid_timeout_before_any_request(
+    checkpoint_client, monkeypatch, timeout_seconds
+):
+    calls = []
+    payloads = []
+    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        await snapshot_call(checkpoint_client, timeout_seconds=timeout_seconds)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_names_the_captured_checkpoint_when_resume_fails(
+    checkpoint_client, monkeypatch
+):
+    calls = []
+    payloads = []
+    mock_fork_http(
+        checkpoint_client, monkeypatch, calls, payloads, resume_error=APIError(RESUME_409)
+    )
+    mock_fork_polls(checkpoint_client, monkeypatch, calls, ["FROZEN"], ["PAUSED"])
+
+    with pytest.raises(APIError, match="snapshot checkpoint pause-1 was captured") as raised:
+        await snapshot_call(checkpoint_client)
+
+    message = str(raised.value)
+    assert "sandbox sandbox-1 did not resume" in message
+    assert "prime sandbox resume sandbox-1" in message
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/pause"),
+        ("checkpoint", "pause-1"),
+        ("status", "sandbox-1"),
+        ("POST", "/sandbox/sandbox-1/resume"),
+    ]
+    assert payloads == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_timeout_names_the_checkpoint(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = []
+    payloads = []
+    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+    mock_fork_polls(checkpoint_client, monkeypatch, calls, ["PENDING", "PENDING"], [])
+
+    with pytest.raises(TimeoutError, match="may still complete") as raised:
+        await snapshot_call(checkpoint_client, timeout_seconds=2)
+
+    assert "checkpoint pause-1" in str(raised.value)
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/pause"),
+        ("checkpoint", "pause-1"),
+        ("checkpoint", "pause-1"),
         ("POST", "/sandbox/sandbox-1/resume"),
     ]
 

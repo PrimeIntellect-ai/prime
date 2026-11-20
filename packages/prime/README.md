@@ -40,8 +40,6 @@ Prime is the official CLI and Python SDK for [Prime Intellect](https://primeinte
 
 ## Installation
 
-The Prime CLI requires a platform supported by `cryptography` 50.0.2 or newer. Intel Macs and 32-bit Windows are no longer supported.
-
 ### Using uv (recommended)
 
 First, install uv if you haven't already:

@@ -26,6 +26,7 @@ from prime_cli.commands.auth import (
     EXIT_FORBIDDEN,
     EXIT_RATE_LIMITED,
     EXIT_UNREACHABLE,
+    _redirect_allowed,
 )
 from prime_cli.commands.auth import app as auth_app
 from prime_cli.commands.factory_k8s import _build_kubeconfig
@@ -1593,5 +1594,52 @@ class TestKeyBinding:
         result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1"])
 
         assert result.exit_code == 1
-        assert "elsewhere.example.net" in result.output
+        refused = re.search(r"redirected to (\S+?);", " ".join(result.output.split()))
+        assert refused is not None, result.output
+        assert httpx.URL(refused.group(1)).host == "elsewhere.example.net"
         assert len(calls) == 1
+
+    def test_a_same_host_https_upgrade_is_followed(self, monkeypatch):
+        monkeypatch.setattr(
+            "prime_cli.commands.auth.Config",
+            lambda: SimpleNamespace(api_key="test-key", base_url="http://api.example.com"),
+        )
+        monkeypatch.setenv(
+            kube_token_cache.KEY_FINGERPRINT_ENV,
+            kube_token_cache.key_fingerprint(base_url="http://api.example.com", api_key="test-key"),
+        )
+        calls = self._redirecting(
+            monkeypatch, "https://api.example.com/api/v1/clusters/c1/kube-token"
+        )
+
+        result = runner.invoke(auth_app, ["k8s-token", "--cluster", "c1", "--no-cache"])
+
+        assert result.exit_code == 0, result.output
+        assert [url for url, _ in calls] == [
+            "http://api.example.com/api/v1/clusters/c1/kube-token",
+            "https://api.example.com/api/v1/clusters/c1/kube-token",
+        ]
+
+    @pytest.mark.parametrize(
+        ("current", "target", "allowed"),
+        [
+            ("https://api.example.com/a", "https://api.example.com/b", True),
+            ("http://api.example.com/a", "https://api.example.com/a", True),
+            ("https://api.example.com/a", "http://api.example.com/a", False),
+            ("https://api.example.com/a", "https://other.example.com/a", False),
+            ("https://api.example.com/a", "https://api.example.com:8443/a", False),
+            ("http://api.example.com:8080/a", "https://api.example.com/a", False),
+            ("http://api.example.com/a", "https://other.example.com/a", False),
+        ],
+        ids=[
+            "same-origin",
+            "https-upgrade",
+            "downgrade",
+            "other-host",
+            "port-change",
+            "upgrade-from-custom-port",
+            "upgrade-to-other-host",
+        ],
+    )
+    def test_redirect_allowed(self, current, target, allowed):
+        assert _redirect_allowed(httpx.URL(current), httpx.URL(target)) is allowed

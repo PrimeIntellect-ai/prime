@@ -108,13 +108,24 @@ class _CrossOriginRedirect(Exception):
         self.target = target
 
 
-def _origin(url: httpx.URL) -> tuple:
-    return (url.scheme, url.host, url.port)
+def _redirect_allowed(current: httpx.URL, target: httpx.URL) -> bool:
+    """Same host and port, or an http -> https upgrade of the same host on the
+    default ports. Never another host, a port change or a downgrade."""
+    if target.host != current.host:
+        return False
+    if target.scheme == current.scheme:
+        return target.port == current.port
+    return (
+        current.scheme == "http"
+        and target.scheme == "https"
+        and current.port is None
+        and target.port is None
+    )
 
 
 def _post_same_origin(url: str, *, api_key: str, params) -> httpx.Response:
-    """POST with the bearer, following redirects only within the same origin."""
-    origin = _origin(httpx.URL(url))
+    """POST with the bearer, following redirects only within the same origin
+    (an http -> https upgrade of the same host included)."""
     for _ in range(_MAX_REDIRECTS + 1):
         response = httpx.post(
             url,
@@ -126,7 +137,7 @@ def _post_same_origin(url: str, *, api_key: str, params) -> httpx.Response:
         if not response.is_redirect:
             return response
         target = response.request.url.join(response.headers["Location"])
-        if _origin(target) != origin:
+        if not _redirect_allowed(response.request.url, target):
             raise _CrossOriginRedirect(str(target))
         url, params = str(target), None
     return response

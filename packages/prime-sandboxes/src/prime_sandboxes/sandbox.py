@@ -1,6 +1,7 @@
 """Sandbox client implementations."""
 
 import asyncio
+import atexit
 import contextlib
 import functools
 import json
@@ -525,6 +526,7 @@ MAX_GATEWAY_ATTEMPTS = MAX_409_RETRIES + 1
 
 # Refresh cached gateway auth this many seconds before its reported expiry.
 AUTH_REFRESH_MARGIN_SECONDS = 60
+AUTH_CACHE_WRITE_INTERVAL_SECONDS = 1.0
 
 # Max bytes of stdout/stderr returned per background-job status check
 JOB_OUTPUT_TAIL_BYTES = 10 * 1024 * 1024
@@ -2136,6 +2138,36 @@ def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
     return {}, False
 
 
+class _AuthCacheFile:
+    """Throttled persistence for the auth cache.
+
+    The file holds every live token, so rewriting it on each new token is
+    quadratic in a bulk create (20k creates rewrote a ~20 MB file 20k times).
+    Writes run at most once per interval; the newest state is flushed at exit.
+    """
+
+    def __init__(self, path: Any) -> None:
+        self.path = path
+        self._last_write = float("-inf")
+        self._pending: Optional[Dict[str, Any]] = None
+        atexit.register(self.flush)
+
+    def save(self, cache: Dict[str, Any], force: bool = False) -> None:
+        self._pending = cache
+        if force or time.monotonic() - self._last_write >= AUTH_CACHE_WRITE_INTERVAL_SECONDS:
+            self.flush()
+
+    def flush(self) -> None:
+        cache, self._pending = self._pending, None
+        if cache is None:
+            return
+        self._last_write = time.monotonic()
+        try:
+            _write_auth_cache(self.path, json.dumps(cache))
+        except Exception:
+            pass
+
+
 def _check_cached_auth(cache: Dict[str, Any], sandbox_id: str) -> Optional[Dict[str, Any]]:
     """Return a copy of cached auth if still valid, else evict and return None."""
     if sandbox_id in cache:
@@ -2151,6 +2183,7 @@ class SandboxAuthCache:
 
     def __init__(self, cache_file_path: Any, client: Any) -> None:
         self._cache_file = cache_file_path
+        self._file = _AuthCacheFile(cache_file_path)
         self.client = client
         self._lock = threading.Lock()
         self._inflight: Dict[str, threading.Event] = {}
@@ -2158,12 +2191,9 @@ class SandboxAuthCache:
         if needs_save:
             self._save_cache()
 
-    def _save_cache(self) -> None:
-        """Write current in-memory cache to disk. Must be called under self._lock."""
-        try:
-            _write_auth_cache(self._cache_file, json.dumps(self._auth_cache))
-        except Exception:
-            pass
+    def _save_cache(self, force: bool = False) -> None:
+        """Persist the in-memory cache (throttled). Must be called under self._lock."""
+        self._file.save(self._auth_cache, force)
 
     def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
         """Get cached auth or fetch a new token.
@@ -2221,7 +2251,7 @@ class SandboxAuthCache:
     def clear(self) -> None:
         with self._lock:
             self._auth_cache = {}
-            self._save_cache()
+            self._save_cache(force=True)
 
 
 class AsyncSandboxAuthCache:
@@ -2229,6 +2259,7 @@ class AsyncSandboxAuthCache:
 
     def __init__(self, cache_file_path: Any, client: Any) -> None:
         self._cache_file = cache_file_path
+        self._file = _AuthCacheFile(cache_file_path)
         self.client = client
         self._lock = asyncio.Lock()
         self._inflight: Dict[str, asyncio.Event] = {}
@@ -2243,13 +2274,9 @@ class AsyncSandboxAuthCache:
         if needs_save:
             await self._save_cache()
 
-    async def _save_cache(self) -> None:
-        """Write current in-memory cache to disk. Must be called under self._lock."""
-        data = json.dumps(self._auth_cache)
-        try:
-            await asyncio.to_thread(_write_auth_cache, self._cache_file, data)
-        except Exception:
-            pass
+    async def _save_cache(self, force: bool = False) -> None:
+        """Persist the in-memory cache (throttled). Must be called under self._lock."""
+        self._file.save(self._auth_cache, force)
 
     async def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
         """Get cached auth or fetch a new token.
@@ -2311,7 +2338,7 @@ class AsyncSandboxAuthCache:
         async with self._lock:
             self._auth_cache = {}
             self._loaded = True
-            await self._save_cache()
+            await self._save_cache(force=True)
 
 
 def _is_waiting_for_image_build(sandbox: Sandbox | SandboxStatusSnapshot) -> bool:

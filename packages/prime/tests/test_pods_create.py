@@ -45,7 +45,7 @@ def mock_pod_availability(monkeypatch: pytest.MonkeyPatch) -> None:
             "stockStatus": "AVAILABLE",
             "security": None,
             "prices": {"onDemand": 1.23, "currency": "USD"},
-            "images": ["ubuntu"],
+            "images": ["ubuntu_22_cuda_12"],
             "isSpot": False,
         }
     )
@@ -126,7 +126,7 @@ class TestPodsCreate:
                 "--memory",
                 "16",
                 "--image",
-                "ubuntu",
+                "ubuntu_24",
                 "--yes",
             ],
             env=TEST_ENV,
@@ -163,7 +163,7 @@ class TestPodsCreate:
                 "--memory",
                 "16",
                 "--image",
-                "ubuntu",
+                "ubuntu_24",
                 "--team-id",
                 "team-123",
                 "--share-with-team",
@@ -247,7 +247,7 @@ class TestPodsCreate:
                 "--memory",
                 "16",
                 "--image",
-                "ubuntu",
+                "ubuntu_24",
                 "--team-id",
                 "team-123",
                 "--add-members",
@@ -261,3 +261,66 @@ class TestPodsCreate:
         assert captured["pod_config"]["team"] == {"teamId": "team-123"}
         assert captured["pod_config"]["teamMemberIds"] == ["user-2"]
         assert "sharedWithTeam" not in captured["pod_config"]
+
+    def test_create_rejects_unsupported_image(
+        self,
+        temp_home: None,
+        disable_update_check: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "prime_cli.commands.pods.AvailabilityClient.get",
+            lambda self: pytest.fail("availability should not be fetched for invalid image"),
+        )
+
+        result = runner.invoke(
+            app,
+            ["pods", "create", "--cloud-id", "cloud-ctx", "--image", "custom_template", "--yes"],
+            env=TEST_ENV,
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "--image must be one of" in result.output
+
+    def test_create_with_env_keeps_ubuntu_offers(
+        self,
+        temp_home: None,
+        disable_update_check: None,
+        mock_pod_availability: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        def mock_create(self: Any, pod_config: dict) -> Any:
+            captured["pod_config"] = pod_config
+            return type("PodResult", (), {"id": "pod-789"})()
+
+        monkeypatch.setattr("prime_cli.commands.pods.PodsClient.create", mock_create)
+
+        result = runner.invoke(
+            app,
+            [
+                "pods",
+                "create",
+                "--cloud-id",
+                "cloud-ctx",
+                "--name",
+                "env-pod",
+                "--disk-size",
+                "20",
+                "--vcpus",
+                "8",
+                "--memory",
+                "16",
+                "--env",
+                "FOO=bar",
+                "--yes",
+            ],
+            env=TEST_ENV,
+        )
+
+        assert result.exit_code == 0, result.output
+        pod = captured["pod_config"]["pod"]
+        assert pod["image"] == "ubuntu_22_cuda_12"
+        assert pod["envVars"] == [{"key": "FOO", "value": "bar"}]
+        assert "customTemplateId" not in pod

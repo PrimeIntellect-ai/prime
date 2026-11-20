@@ -35,6 +35,8 @@ from ..utils.display import POD_STATUS_COLORS
 app = PlainTyper(help="Manage compute pods", no_args_is_help=True)
 console = get_console()
 
+POD_IMAGES = ("ubuntu_22_cuda_12", "ubuntu_24", "ubuntu_26")
+
 LIST_PODS_JSON_HELP = json_output_help(
     ".pods[] = {id, name, gpu, status, created_at}",
     ".total_count = number",
@@ -407,10 +409,7 @@ def create(
     disk_size: Optional[int] = typer.Option(None, help="Disk size in GB"),
     vcpus: Optional[int] = typer.Option(None, help="Number of vCPUs"),
     memory: Optional[int] = typer.Option(None, help="Memory in GB"),
-    image: Optional[str] = typer.Option(
-        None, help="Image name or 'custom_template' when using custom template ID"
-    ),
-    custom_template_id: Optional[str] = typer.Option(None, help="Custom template ID"),
+    image: Optional[str] = typer.Option(None, help=f"Image name ({', '.join(POD_IMAGES)})"),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID to use for the pod (uses config team_id if not specified)"
     ),
@@ -461,19 +460,11 @@ def create(
         )
         raise typer.Exit(1)
 
-    try:
-        # Validate custom template usage
-        if custom_template_id and not image == "custom_template":
-            console.print(
-                "[red]Error: Must set image='custom_template' when using custom_template_id[/red]"  # noqa: E501
-            )
-            raise typer.Exit(1)
-        if image == "custom_template" and not custom_template_id:
-            console.print(
-                "[red]Error: Must provide custom_template_id when image='custom_template'[/red]"  # noqa: E501
-            )
-            raise typer.Exit(1)
+    if image and image not in POD_IMAGES:
+        console.print(f"[red]Error: --image must be one of: {', '.join(POD_IMAGES)}[/red]")
+        raise typer.Exit(1)
 
+    try:
         base_client = APIClient()
         availability_client = AvailabilityClient(base_client)
         pods_client = PodsClient(base_client)
@@ -483,25 +474,6 @@ def create(
         # Get availability info
         with console.status("[bold blue]Loading available GPU configurations...", spinner="dots"):
             availabilities = availability_client.get()
-
-        if env_vars:
-            filtered_availabilities = {}
-            for availability_type, gpus in availabilities.items():
-                filtered_gpus = []
-                for gpu in gpus:
-                    if gpu.provider == "runpod":
-                        continue
-                    if gpu.images:
-                        # Filter out ubuntu image
-                        filtered_images = [img for img in gpu.images if img != "ubuntu_22_cuda_12"]
-                        if len(filtered_images) > 0:
-                            gpu.images = filtered_images
-                            filtered_gpus.append(gpu)
-
-                if filtered_gpus:
-                    filtered_availabilities[availability_type] = filtered_gpus
-
-            availabilities = filtered_availabilities
 
         if id or cloud_id:
             # Find the matching GPU configuration by ID or cloud_id
@@ -718,7 +690,7 @@ def create(
                     )
                     raise typer.Exit(1)
 
-        available_images = selected_gpu.images
+        available_images = [img for img in selected_gpu.images or [] if img in POD_IMAGES]
 
         if not image and available_images:
             if len(available_images) == 1:
@@ -823,7 +795,6 @@ def create(
                 "security": None,
                 "jupyterPassword": None,
                 "autoRestart": False,
-                "customTemplateId": custom_template_id,
                 "envVars": env_vars,
             },
             "provider": {"type": selected_gpu.provider} if selected_gpu.provider else {},

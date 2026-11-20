@@ -630,8 +630,12 @@ _WINDOWS_DEVICES = re.compile(r"^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])
 
 
 def _not_a_windows_name(part: str) -> bool:
+    # Windows drops a name's trailing dots and spaces, so `report.` would be saved as
+    # `report`, over another output of that name.
     return bool(
-        _WINDOWS_RESERVED_CHARACTERS.search(part) or _WINDOWS_DEVICES.match(part.rstrip(". "))
+        part != part.rstrip(". ")
+        or _WINDOWS_RESERVED_CHARACTERS.search(part)
+        or _WINDOWS_DEVICES.match(part)
     )
 
 

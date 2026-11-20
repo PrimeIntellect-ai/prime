@@ -173,3 +173,22 @@ def test_source_archive_is_reproducible(tmp_path: Path) -> None:
     (package / "pkg" / "__init__.py").write_text("x = 2\n")
     third = write_source_archive(package, tmp_path / "third.tar.gz").read_bytes()
     assert third != first
+
+
+def test_symlinked_directories_are_left_out(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("credentials\n")
+    package = tmp_path / "pkg"
+    (package / "pkg").mkdir(parents=True)
+    (package / "pyproject.toml").write_text("[project]\nname='pkg'\nversion='0.1.0'\n")
+    (package / "pkg" / "__init__.py").write_text("x = 1\n")
+    (package / "data").symlink_to(outside, target_is_directory=True)
+    (package / "pkg" / "linked").symlink_to(outside, target_is_directory=True)
+
+    archived = {
+        str(path.relative_to(package)).replace("\\", "/")
+        for path in _collect_archive_files(package)
+    }
+
+    assert archived == {"pkg/__init__.py", "pyproject.toml"}

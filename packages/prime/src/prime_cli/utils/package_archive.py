@@ -52,6 +52,11 @@ def should_include_directory_in_archive(dir_path: Path) -> bool:
     if not dir_path.is_dir():
         return False
 
+    # Skip directory symlinks, as file symlinks are: one could point anywhere, and its
+    # files would be uploaded as the package's own.
+    if dir_path.is_symlink():
+        return False
+
     # Skip hidden directories (includes .prime/, .git/, etc.)
     if dir_path.name.startswith("."):
         return False

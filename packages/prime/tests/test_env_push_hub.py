@@ -5,11 +5,13 @@ import json
 import tarfile
 from pathlib import Path
 
+import httpx
 import pytest
 from fake_hub import write_wheel
 from prime_cli.commands import env as env_command
 from prime_cli.core.client import APIClient
 from prime_cli.main import app
+from prime_cli.utils import hub as hub_module
 from prime_cli.utils import package_push, strip_ansi
 from typer.testing import CliRunner
 
@@ -205,3 +207,17 @@ def test_resolve_owner_rejects_a_configured_team_you_are_not_in(hub):
         package_push.resolve_owner(api, owner=None, team=None, configured_team=" my-team ")
         == "my-team"
     )
+
+
+def test_a_failed_upload_is_reported_without_a_traceback(hub, package, monkeypatch):
+    def put(url, content, headers, timeout):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(hub_module.httpx, "put", put)
+
+    result = _push("--path", str(package))
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 1
+    assert "Uploading math_env-0.2.0.tar.gz failed: ConnectError: connection refused" in output
+    assert not any(c[1].endswith("/finalize") for c in hub.calls)

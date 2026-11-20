@@ -117,12 +117,15 @@ def declare_artifact(kind: str, path: Path) -> Dict[str, Any]:
 def upload_artifact(upload: Dict[str, Any], path: Path) -> None:
     """PUT one artifact to its signed link, streaming the file."""
     with path.open("rb") as file:
-        response = httpx.put(
-            upload["url"],
-            content=file,
-            headers=upload.get("headers") or {},
-            timeout=UPLOAD_TIMEOUT,
-        )
+        try:
+            response = httpx.put(
+                upload["url"],
+                content=file,
+                headers=upload.get("headers") or {},
+                timeout=UPLOAD_TIMEOUT,
+            )
+        except httpx.RequestError as e:
+            raise APIError(f"Uploading {path.name} failed: {e.__class__.__name__}: {e}") from e
     if not response.is_success:
         raise APIError(
             f"Uploading {path.name} failed: HTTP {response.status_code} {response.text[:200]}"

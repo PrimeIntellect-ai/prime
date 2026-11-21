@@ -36,8 +36,8 @@ class SandboxSshTransport(NamedTuple):
     proxy_command: str
 
     def identity_args(self) -> list[str]:
-        """Use the authorized session key without adding it to the user's agent."""
-        return ["-i", self.key_path, "-o", "IdentitiesOnly=yes", "-o", "AddKeysToAgent=no"]
+        """Limit authentication to configured identities, including the session key."""
+        return ["-i", self.key_path, "-o", "IdentitiesOnly=yes"]
 
 
 @contextmanager

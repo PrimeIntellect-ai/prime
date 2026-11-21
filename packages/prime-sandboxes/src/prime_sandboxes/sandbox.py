@@ -2128,22 +2128,30 @@ def _write_auth_cache(cache_file: Any, data: str) -> None:
         f.write(data)
 
 
+def _prune_expired_auth(cache: Dict[str, Any]) -> int:
+    """Evict expired or malformed entries from `cache` in place; return removed count."""
+    now = datetime.now(timezone.utc)
+    stale = []
+    for sandbox_id, auth_info in list(cache.items()):
+        try:
+            if now >= _auth_refresh_cutoff(auth_info):
+                stale.append(sandbox_id)
+        except Exception:
+            stale.append(sandbox_id)
+    for sandbox_id in stale:
+        cache.pop(sandbox_id, None)
+    return len(stale)
+
+
 def _load_auth_cache(cache_file: Any) -> tuple[Dict[str, Any], bool]:
     """Load auth cache from file and clean expired entries."""
     try:
         if cache_file.exists():
             with open(cache_file, "r") as f:
                 cache = json.load(f)
-            cleaned_cache = {}
-            now = datetime.now(timezone.utc)
-            for sandbox_id, auth_info in cache.items():
-                try:
-                    if now < _auth_refresh_cutoff(auth_info):
-                        cleaned_cache[sandbox_id] = auth_info
-                except Exception:
-                    pass
-
-            return cleaned_cache, len(cleaned_cache) != len(cache)
+            if isinstance(cache, dict):
+                removed = _prune_expired_auth(cache)
+                return cache, removed > 0
     except Exception:
         pass
     return {}, False
@@ -2154,7 +2162,8 @@ class _AuthCacheFile:
 
     The file holds every live token, so rewriting it on each new token is
     quadratic in a bulk create (20k creates rewrote a ~20 MB file 20k times).
-    Writes run at most once per interval; the newest state is flushed at exit.
+    Writes run at most once per interval and prune expired entries before saving;
+    the newest state is flushed at exit.
     """
 
     def __init__(self, path: Any) -> None:
@@ -2172,6 +2181,7 @@ class _AuthCacheFile:
         cache, self._pending = self._pending, None
         if cache is None:
             return
+        _prune_expired_auth(cache)
         self._last_write = time.monotonic()
         try:
             _write_auth_cache(self.path, json.dumps(cache))

@@ -530,6 +530,7 @@ dependencies = [
     { name = "toml" },
     { name = "tomli" },
     { name = "typer" },
+    { name = "urllib3" },
 ]
 
 [package.optional-dependencies]
@@ -563,6 +564,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.0a6" },
     { name = "typer", specifier = ">=0.9.0,<0.26" },
     { name = "types-toml", marker = "extra == 'dev'", specifier = ">=0.10.0" },
+    { name = "urllib3", specifier = ">=2.8.0,<3" },
 ]
 provides-extras = ["dev"]
 

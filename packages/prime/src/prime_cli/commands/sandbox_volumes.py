@@ -154,8 +154,7 @@ def _rsync_command(transport: SandboxSshTransport, path: Path) -> List[str]:
             "ssh",
             "-p",
             str(transport.port),
-            "-i",
-            transport.key_path,
+            *transport.identity_args(),
             "-o",
             f"ProxyCommand={transport.proxy_command}",
             # The sandbox API returns no host key to pin for a session, and the

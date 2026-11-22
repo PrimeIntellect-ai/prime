@@ -35,6 +35,10 @@ class SandboxSshTransport(NamedTuple):
     key_path: str
     proxy_command: str
 
+    def identity_args(self) -> list[str]:
+        """Limit authentication to configured identities, including the session key."""
+        return ["-i", self.key_path, "-o", "IdentitiesOnly=yes"]
+
 
 @contextmanager
 def ssh_transport(sandbox_client: SandboxClient, sandbox_id: str) -> Iterator[SandboxSshTransport]:

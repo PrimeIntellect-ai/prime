@@ -786,6 +786,7 @@ def test_volume_import_happy_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     assert command[7] == "sess-1@gw.example.com:/volume/"
     remote_shell = command[5]
     assert remote_shell.startswith("ssh -p 2022 -i ")
+    assert "-o IdentitiesOnly=yes" in remote_shell
     assert "ProxyCommand=" in remote_shell
     assert "prime_cli.ssh_proxy gw.example.com 2022 sess-1" in remote_shell
     assert "-o StrictHostKeyChecking=no" in remote_shell
@@ -1303,6 +1304,8 @@ def test_ssh_connect_builds_command_and_closes_session(
     assert command[0] == "ssh"
     assert command[1] == "sess-1@gw.example.com"
     assert "-p" in command and "2022" in command
+    options = [value for flag, value in zip(command, command[1:]) if flag == "-o"]
+    assert "IdentitiesOnly=yes" in options
     assert command[-1] == "-v"
     assert closed == [("sbx-1", "sess-1")]
 

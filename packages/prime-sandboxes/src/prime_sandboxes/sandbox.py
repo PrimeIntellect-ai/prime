@@ -2178,9 +2178,12 @@ class _AuthCacheWriterState:
         self.write_lock = threading.Lock()
         self.last_write = float("-inf")
         self.pending: Optional[Dict[str, Any]] = None
+        self.seq = 0
+        self.written_seq = 0
 
-    def save(self, cache: Dict[str, Any], force: bool = False) -> None:
-        snapshot: Optional[Dict[str, Any]] = None
+    def prepare_write(
+        self, cache: Dict[str, Any], force: bool = False
+    ) -> Optional[tuple[int, Dict[str, Any]]]:
         with self.state_lock:
             self.pending = cache
             now = time.monotonic()
@@ -2188,43 +2191,54 @@ class _AuthCacheWriterState:
                 _prune_expired_auth(cache)
                 self.pending = None
                 self.last_write = now
-                snapshot = dict(cache)
-        if snapshot is not None:
-            self._write(snapshot)
+                self.seq += 1
+                return self.seq, dict(cache)
+            return None
 
-    def take_pending(self) -> Optional[Dict[str, Any]]:
+    def write_snapshot(self, seq: int, snapshot: Dict[str, Any]) -> None:
+        with self.write_lock:
+            if seq <= self.written_seq:
+                return
+            try:
+                _write_auth_cache(self.path, json.dumps(snapshot))
+                self.written_seq = seq
+            except Exception:
+                pass
+
+    def save(self, cache: Dict[str, Any], force: bool = False) -> None:
+        prepared = self.prepare_write(cache, force)
+        if prepared is not None:
+            self.write_snapshot(*prepared)
+
+    def take_pending(self) -> Optional[tuple[int, Dict[str, Any]]]:
         """Prune and snapshot any pending throttled cache under synchronization."""
         if self.owner_lock is not None:
             with self.owner_lock:
                 return self._take_pending_locked()
         return self._take_pending_locked()
 
-    def _take_pending_locked(self) -> Optional[Dict[str, Any]]:
+    def _take_pending_locked(self) -> Optional[tuple[int, Dict[str, Any]]]:
         with self.state_lock:
             cache, self.pending = self.pending, None
             if cache is None:
                 return None
             _prune_expired_auth(cache)
             self.last_write = time.monotonic()
-            return dict(cache)
-
-    def _write(self, snapshot: Dict[str, Any]) -> None:
-        with self.write_lock:
-            try:
-                _write_auth_cache(self.path, json.dumps(snapshot))
-            except Exception:
-                pass
+            self.seq += 1
+            return self.seq, dict(cache)
 
     def flush(self) -> None:
-        snapshot = self.take_pending()
-        if snapshot is not None:
-            self._write(snapshot)
+        prepared = self.take_pending()
+        if prepared is not None:
+            self.write_snapshot(*prepared)
 
 
 class _AuthCacheFile:
     """Throttled, atomic persistence for the auth cache.
 
-    Writes run at most once per interval and prune expired entries before saving;
+    Writes run at most once per interval, prune expired entries before saving,
+    and serialize/write ordered snapshots so async callers never block the event
+    loop, hold the cache lock during disk I/O, or overwrite newer state out of order;
     pending throttled writes flush on close, GC, or exit via `weakref.finalize`
     without retaining dead clients or leaking `atexit` entries.
     """
@@ -2234,14 +2248,21 @@ class _AuthCacheFile:
         self._state = _AuthCacheWriterState(path, owner_lock=owner_lock)
         self._finalizer = weakref.finalize(self, self._state.flush)
 
+    def prepare_write(
+        self, cache: Dict[str, Any], force: bool = False
+    ) -> Optional[tuple[int, Dict[str, Any]]]:
+        """Record `cache` as pending; if due (or forced), prune and return `(seq, snapshot)`."""
+        return self._state.prepare_write(cache, force)
+
+    def write_snapshot(self, seq: int, snapshot: Dict[str, Any]) -> None:
+        """Serialize and atomically write `snapshot` unless a newer sequence already wrote."""
+        self._state.write_snapshot(seq, snapshot)
+
     def save(self, cache: Dict[str, Any], force: bool = False) -> None:
         self._state.save(cache, force)
 
-    def take_pending(self) -> Optional[Dict[str, Any]]:
+    def take_pending(self) -> Optional[tuple[int, Dict[str, Any]]]:
         return self._state.take_pending()
-
-    def write(self, snapshot: Dict[str, Any]) -> None:
-        self._state._write(snapshot)
 
     def detach(self) -> None:
         self._finalizer.detach()
@@ -2348,17 +2369,18 @@ class AsyncSandboxAuthCache:
         self._auth_cache: Dict[str, Any] = {}
         self._loaded = False
 
-    async def _ensure_loaded(self) -> None:
+    async def _ensure_loaded(self) -> bool:
         if self._loaded:
-            return
+            return False
         self._auth_cache, needs_save = await asyncio.to_thread(_load_auth_cache, self._cache_file)
         self._loaded = True
-        if needs_save:
-            await self._save_cache()
+        return needs_save
 
-    async def _save_cache(self, force: bool = False) -> None:
-        """Persist the in-memory cache (throttled). Must be called under self._lock."""
-        self._file.save(self._auth_cache, force)
+    async def _flush_snapshot(self, prepared: Optional[tuple[int, Dict[str, Any]]]) -> None:
+        """Write `prepared` off the event loop (must be called without holding `self._lock`)."""
+        if prepared is not None:
+            seq, snapshot = prepared
+            await asyncio.to_thread(self._file.write_snapshot, seq, snapshot)
 
     async def get_or_refresh(self, sandbox_id: str) -> Dict[str, Any]:
         """Get cached auth or fetch a new token.
@@ -2366,13 +2388,18 @@ class AsyncSandboxAuthCache:
         Coalesces concurrent requests for the same sandbox_id so only one
         auth POST is issued while others await the result.
         """
+        if not self._loaded:
+            load_prepared: Optional[tuple[int, Dict[str, Any]]] = None
+            async with self._lock:
+                if await self._ensure_loaded():
+                    load_prepared = self._file.prepare_write(self._auth_cache)
+            await self._flush_snapshot(load_prepared)
+
         while True:
             async with self._lock:
-                await self._ensure_loaded()
                 cached = _check_cached_auth(self._auth_cache, sandbox_id)
                 if cached:
                     return cached
-
                 if sandbox_id in self._inflight:
                     event = self._inflight[sandbox_id]
                 else:
@@ -2387,6 +2414,7 @@ class AsyncSandboxAuthCache:
                         return cached
                 continue
 
+            prepared: Optional[tuple[int, Dict[str, Any]]] = None
             try:
                 response = await self.client.request(
                     "POST",
@@ -2395,39 +2423,43 @@ class AsyncSandboxAuthCache:
                 )
                 async with self._lock:
                     self._auth_cache[sandbox_id] = response
-                    await self._save_cache()
-                return dict(response)
+                    prepared = self._file.prepare_write(self._auth_cache)
             finally:
                 async with self._lock:
                     ev = self._inflight.pop(sandbox_id, None)
                 if ev is not None:
                     ev.set()
+            await self._flush_snapshot(prepared)
+            return dict(response)
 
     async def set(self, sandbox_id: str, auth_info: Dict[str, Any]) -> None:
         async with self._lock:
             await self._ensure_loaded()
             self._auth_cache[sandbox_id] = auth_info
-            await self._save_cache()
+            prepared = self._file.prepare_write(self._auth_cache)
+        await self._flush_snapshot(prepared)
 
     async def invalidate(self, sandbox_id: str) -> None:
         """Drop cached auth for one sandbox (e.g. after a gateway 401)."""
+        prepared: Optional[tuple[int, Dict[str, Any]]] = None
         async with self._lock:
-            await self._ensure_loaded()
-            if self._auth_cache.pop(sandbox_id, None) is not None:
-                await self._save_cache()
+            needs_save = await self._ensure_loaded()
+            if self._auth_cache.pop(sandbox_id, None) is not None or needs_save:
+                prepared = self._file.prepare_write(self._auth_cache)
+        await self._flush_snapshot(prepared)
 
     async def clear(self) -> None:
         async with self._lock:
             self._auth_cache = {}
             self._loaded = True
-            await self._save_cache(force=True)
+            prepared = self._file.prepare_write(self._auth_cache, force=True)
+        await self._flush_snapshot(prepared)
 
     async def aclose(self) -> None:
-        """Flush any pending throttled write and detach the finalizer."""
+        """Flush any pending throttled write off-loop and detach the finalizer."""
         async with self._lock:
-            snapshot = self._file.take_pending()
-        if snapshot is not None:
-            await asyncio.to_thread(self._file.write, snapshot)
+            prepared = self._file.take_pending()
+        await self._flush_snapshot(prepared)
         self._file.detach()
 
 

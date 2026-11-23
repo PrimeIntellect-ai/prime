@@ -23,6 +23,7 @@ from prime_sandboxes import (
     VolumeMount,
     VolumeSyncFailedError,
     VolumeSyncSupersededError,
+    VolumeVisibility,
 )
 from rich.markup import escape
 
@@ -43,7 +44,7 @@ console = get_console()
 
 
 VOLUMES_LIST_JSON_HELP = json_output_help(
-    ".volumes[] = {id, name, user_id?, team_id?, size_gb?, created_at, occupied_bytes}",
+    ".volumes[] = {id, name, user_id?, team_id?, size_gb?, visibility, created_at, occupied_bytes}",
     ".total = number",
     ".page = number",
     ".per_page = number",
@@ -66,6 +67,9 @@ _IMPORTER_TIMEOUT_MINUTES = -1
 _IMPORTER_IDLE_TIMEOUT_MINUTES = 30
 _IMPORTER_LABEL = "prime:volume-import"
 
+# Every command that names an existing volume accepts an owner-qualified ref.
+_VOLUME_REF_HELP = "Volume name, or <namespace>/<name> for another account's PUBLIC volume"
+
 
 def _invalid_volume_mount(spec: str, problem: str) -> None:
     console.print(f"[red]Error:[/red] Invalid volume '{spec}': {problem}")
@@ -73,10 +77,11 @@ def _invalid_volume_mount(spec: str, problem: str) -> None:
 
 
 def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
-    """Parse repeatable ``NAME:/mount/path[:ro|:rw]`` values into volume mounts.
+    """Parse repeatable ``[NAMESPACE/]NAME:/mount/path[:ro|:rw]`` values into mounts.
 
-    Only the syntax is split here; name, mount-path, and count rules are
-    enforced once by the API.
+    The name passes through untouched, so a ``<namespace>/<name>`` ref keeps
+    its slash. Only the syntax is split here; name, mount-path, and count
+    rules are enforced once by the API.
     """
     mounts: List[VolumeMount] = []
     for spec in specs:
@@ -114,6 +119,7 @@ def _print_volume(volume: Volume) -> None:
     console.print(f"Name: [cyan]{escape(volume.name)}[/cyan]")
     console.print(f"ID: {escape(volume.id)}")
     console.print(f"Scope: {_volume_scope(volume)}")
+    console.print(f"Visibility: {volume.visibility.value}")
     # None until the first publish reaches DURABLE, then the newest one.
     head = volume.head_checkpoint_id
     console.print(f"Head checkpoint: {escape(head) if head else 'none (never published)'}")
@@ -450,6 +456,7 @@ def list_volumes(
         [
             ("Name", "cyan"),
             ("Scope", "white"),
+            ("Visibility", "white"),
             ("Size", "white"),
             ("Capacity", "white"),
             ("Created", "white"),
@@ -460,6 +467,7 @@ def list_volumes(
         table.add_row(
             escape(volume.name),
             _volume_scope(volume),
+            volume.visibility.value,
             format_file_size(volume.occupied_bytes),
             _volume_capacity(volume),
             human_age(volume.created_at),
@@ -470,7 +478,7 @@ def list_volumes(
 
 @app.command(no_args_is_help=True)
 def get(
-    name: str = typer.Argument(..., help="Volume name"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
@@ -496,7 +504,7 @@ def get(
 
 @app.command()
 def delete(
-    name: str = typer.Argument(..., help="Volume name"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
@@ -527,7 +535,7 @@ def delete(
 
 @app.command()
 def grow(
-    name: str = typer.Argument(..., help="Volume name"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     size_gb: int = typer.Option(
         ..., "--size-gb", help="New capacity in GiB; must be larger than the current size"
     ),
@@ -555,9 +563,63 @@ def grow(
     _print_volume(volume)
 
 
+def _set_visibility(name: str, visibility: VolumeVisibility, team_id: Optional[str]) -> None:
+    try:
+        volume = _sandbox_client().volumes.set_visibility(name, visibility, team_id=team_id)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        # 404 for a volume outside the caller's scopes, which includes any
+        # volume owned by another account.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+    console.print(
+        f"[green]✓[/green] Volume {escape(volume.name)} is now {volume.visibility.value.lower()}"
+    )
+    _print_volume(volume)
+
+
+@app.command("make-public")
+def make_public(
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
+) -> None:
+    """Let any account mount and sync the volume through its ref.
+
+    Recipients read the published head and their writes stay in their own
+    sandbox: they cannot publish. Only the volume's owner can change this.
+    """
+    _set_visibility(name, VolumeVisibility.PUBLIC, team_id)
+
+
+@app.command("make-private")
+def make_private(
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
+) -> None:
+    """Stop new recipient mounts, syncs and gets of the volume.
+
+    Running recipient sandboxes keep their attachment and what they already
+    read. Only the volume's owner can change this.
+    """
+    _set_visibility(name, VolumeVisibility.PRIVATE, team_id)
+
+
 @app.command()
 def publish(
-    name: str = typer.Argument(..., help="Volume name to publish"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     sandbox_id: str = typer.Option(
         ..., "--sandbox", help="ID of the sandbox that publishes the volume"
     ),
@@ -655,18 +717,26 @@ def _exit_sync_failed(failure: Optional[str]) -> NoReturn:
 
 @app.command()
 def sync(
-    name: str = typer.Argument(..., help="Volume name to sync"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     sandbox_id: str = typer.Option(
         ..., "--sandbox", help="ID of the sandbox whose volume attachment is synced"
     ),
     discard: bool = typer.Option(
         False,
         "--discard",
-        help="Drop this sandbox's unpublished volume writes instead of publishing them",
+        help=(
+            "Drop this sandbox's unpublished volume writes instead of publishing them "
+            "(always the case for a volume owned by another account)"
+        ),
     ),
     no_wait: bool = typer.Option(False, "--no-wait", help="Do not wait for the sync to finish"),
 ) -> None:
-    """Sync a sandbox's attached volume to the volume's committed head."""
+    """Sync a sandbox's attached volume to the volume's committed head.
+
+    A volume owned by another account always syncs as discard, whatever
+    --discard says: this sandbox's unpublished writes are replaced by the
+    volume's current head and are never published into the owner's volume.
+    """
     try:
         result = _sandbox_client().volumes.sync(sandbox_id, name, discard=discard, wait=not no_wait)
     except UnauthorizedError as e:

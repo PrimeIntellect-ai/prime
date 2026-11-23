@@ -212,6 +212,8 @@ prime sandbox download <sandbox-id> /remote/file.txt ./local/
 
 # Attach persistent volumes (repeatable; :ro mounts read-only, :rw is the default)
 prime sandbox create --volume data:/data --volume cache:/mnt:ro python:3.11
+# Mount another account's public volume by ref
+prime sandbox create --volume alice/dataset:/data:ro python:3.11
 
 # Manage volumes (create takes --size-gb; default capacity is 100 GiB)
 prime sandbox volumes create data
@@ -219,6 +221,10 @@ prime sandbox volumes list [--page N] [--num N] [--json]
 prime sandbox volumes get data
 prime sandbox volumes grow data --size-gb 512
 prime sandbox volumes delete data
+
+# Sharing: a public volume mounts from any account through <namespace>/<name>
+prime sandbox volumes make-public data
+prime sandbox volumes make-private data
 
 # Publish a sandbox's private volume writes as a durable checkpoint
 prime sandbox volumes publish data --sandbox <sandbox-id> [--no-wait]
@@ -265,6 +271,16 @@ prints the checkpoint id and state; the data is published once that
 checkpoint is DURABLE and, on servers that merge volume publishes, its
 merge finishes — both checkable with
 `prime sandbox checkpoint get <checkpoint-id>`.
+
+Making a volume public lets any account mount it read-only or read-write, and
+sync it, by its `<namespace>/<name>` ref; a bare name always means the caller's
+or sandbox's own scope. Volumes are unlisted: a recipient needs the ref, and
+`volumes list` stays own-scope while showing each volume's `visibility`. Only
+the owner can make a volume public or private, publish to it, or delete it.
+Recipient sync always discards: the recipient's unpublished writes are replaced
+by the current head and never reach the owner's volume. Making a volume private
+stops new recipient mounts, syncs and gets; running recipient sandboxes keep
+their attachment.
 
 `volumes create --from` copies a local directory into a disposable
 read-write importer sandbox, publishes it, waits until DURABLE, and only

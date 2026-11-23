@@ -586,9 +586,21 @@ class BatchSandboxStatusResponse(BaseModel):
     errors: List[SandboxStatusLookupError]
 
 
+class VolumeVisibility(str, Enum):
+    """Who can mount a volume: any account (PUBLIC) or its owner scope only."""
+
+    PRIVATE = "PRIVATE"
+    PUBLIC = "PUBLIC"
+
+
 class VolumeMount(BaseModel):
-    """One volume to mount in the sandbox, resolved by name in the
-    caller's scope (team scope when team_id is set)."""
+    """One volume to mount in the sandbox.
+
+    A bare name resolves in the sandbox's own scope (team scope when team_id
+    is set). A ``<namespace>/<name>`` ref (user, team slug, ``team-<id>``)
+    names a PUBLIC volume owned by another account; recipient writes stay in
+    the sandbox and cannot be published.
+    """
 
     name: str
     mount_path: str
@@ -608,6 +620,10 @@ class Volume(BaseModel):
     # Newest durable publish, or null for a volume that was never published.
     # Older responses may omit the field entirely.
     head_checkpoint_id: Optional[str] = None
+    # PUBLIC volumes mount from any account by ref; PRIVATE ones only in
+    # their owner scope. Older responses omit the field, which then reads as
+    # PRIVATE (the server default).
+    visibility: VolumeVisibility = VolumeVisibility.PRIVATE
     created_at: datetime
     # Occupied bytes of the latest published version (its checkpoint's
     # occupied_bytes); 0 until the first publish and for grandfathered

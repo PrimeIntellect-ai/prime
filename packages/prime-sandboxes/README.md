@@ -173,11 +173,14 @@ Volumes are persistent ext4 block volumes mounted into VM sandboxes. A volume
 starts empty; every sandbox that mounts it attaches the current head, and its
 writes are private to that sandbox until a publish becomes DURABLE. Names are
 resolved in the caller's scope: pass `team_id` (or set a team in the client
-config) for team scope, otherwise the personal scope applies. `list` responses
-include `total`, `page`, `per_page`, and `has_next`.
+config) for team scope, otherwise the personal scope applies. A
+`<namespace>/<name>` ref (user, team slug, or `team-<id>`) names a PUBLIC
+volume owned by another account and is sent with its slash literal. `list`
+stays own-scope and responses include each volume's `visibility` plus `total`,
+`page`, `per_page`, and `has_next`.
 
 ```python
-from prime_sandboxes import APIClient, SandboxClient
+from prime_sandboxes import APIClient, SandboxClient, VolumeVisibility
 
 volumes = SandboxClient(APIClient()).volumes
 volume = volumes.create("dataset", team_id="team-id")
@@ -185,6 +188,7 @@ volume = volumes.create("dataset", size_gb=512)  # 100 GiB when omitted
 page = volumes.list(team_id="team-id", page=1, per_page=50)
 volume = volumes.get("dataset", team_id="team-id")
 volume = volumes.grow("dataset", 512)
+volume = volumes.set_visibility("dataset", VolumeVisibility.PUBLIC)
 volumes.delete("dataset", team_id="team-id")  # 204, returns None
 ```
 
@@ -196,6 +200,15 @@ lifecycle of its own. `size_gb` is the volume's capacity in whole GiB;
 `grow` is grow-only: the server rejects a size at or below the current
 effective size, and the new size applies to sandboxes created after the
 change — running attachments keep their size.
+
+`set_visibility` makes a volume PUBLIC or PRIVATE for its owner: its user for
+a personal volume, any team member for a team volume. A PUBLIC volume mounts
+and syncs from any account through its `<namespace>/<name>` ref; volumes stay
+unlisted, so a recipient needs the ref. Recipients read the shared head and
+their writes stay in their own sandbox — they cannot publish, and their sync
+always discards local writes, whatever `discard` says. Making a volume PRIVATE
+stops new recipient mounts, syncs, and gets; running recipient sandboxes keep
+their attachment.
 
 Mount volumes when creating a sandbox. Each mount names the volume and the
 absolute guest path to mount it at; a read-only mount cannot publish:
@@ -239,9 +252,9 @@ that moved since the sandbox was created is also HTTP 409.
 transport and polling work, while the namespace owns neither.
 
 Deleting a volume that is attached to a sandbox in any active state (PENDING,
-PROVISIONING, RUNNING, PAUSED, or TERMINATING) fails with HTTP 409. Deleting a
-team volume additionally requires team admin and fails with HTTP 403 otherwise.
-Volume deletes retry transient 5xx automatically.
+PROVISIONING, RUNNING, PAUSED, or TERMINATING) fails with HTTP 409. Any team
+member can delete a team volume. Volume deletes retry transient 5xx
+automatically.
 
 ## Authentication
 

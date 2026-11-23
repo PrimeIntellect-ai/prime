@@ -388,6 +388,22 @@ lost, the source may still become PAUSED; check `get()` and continue it with
 `resume()` (`prime sandbox resume <id>`). The result is a `SandboxCheckpoint`,
 so `checkpoint restore --memory` and other memory restores take its id.
 
+To drive the pause and resume yourself, `wait_for_pause()` and `wait_for_resume()`
+wait until the sandbox reports `PAUSED` or `RUNNING` again:
+
+```python
+paused = sandbox_client.pause(sandbox.id)
+sandbox_client.wait_for_pause(sandbox.id)
+sandbox_client.resume(sandbox.id)
+sandbox_client.wait_for_resume(sandbox.id)
+```
+
+Concurrent waits share batched status lookups and back off like
+`wait_for_creation`, so thousands of sandboxes can wait at once without
+exhausting the status rate limit. They raise `RuntimeError` when the pause or
+resume failed, `SandboxNotRunningError` when the sandbox stopped, and
+`TimeoutError` after `timeout_seconds` (default 300).
+
 No sandbox is created. Restoring always creates a new sandbox; the platform does
 not restore into the same running sandbox. A memory restore needs the source
 sandbox record to exist: the platform keeps it about 7 days after termination,

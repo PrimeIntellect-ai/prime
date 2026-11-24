@@ -4,13 +4,13 @@ import copy
 import json
 import re
 import time
+import tomllib
 import unicodedata
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import toml
 import typer
 from click.exceptions import Abort
 from rich.markup import escape as rich_escape
@@ -370,8 +370,9 @@ def _load_toml(config_path: str) -> Dict[str, Any]:
         console.print(f"[red]Error:[/red] Config file not found: {config_path}")
         raise typer.Exit(1)
     try:
-        return toml.load(p)
-    except toml.TomlDecodeError as e:
+        with p.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid TOML in {config_path}: {e}")
         raise typer.Exit(1)
 
@@ -1246,8 +1247,8 @@ def validate_training_config(
 
     validate_output_format(output, console)
     try:
-        with config_path.open() as stream:
-            raw = toml.load(stream)
+        with config_path.open("rb") as stream:
+            raw = tomllib.load(stream)
         if ref is not None and pr is not None:
             raise ValueError("--ref and --pr are mutually exclusive.")
         source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_path)

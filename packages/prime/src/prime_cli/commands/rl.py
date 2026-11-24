@@ -1839,9 +1839,7 @@ def _list_runs_impl(
     try:
         api_client = APIClient()
         rl_client = RLClient(api_client)
-        config = Config()
-
-        team_id = team or config.team_id
+        team_id = team or Config().team_id
 
         # Pagination and the `mine` filter are applied server-side when the
         # backend supports it, so this normally fetches exactly the
@@ -1855,13 +1853,11 @@ def _list_runs_impl(
             # page/limit/mine and returned the full history. Fall back to
             # the old client-side filter/sort/slice behavior.
             if mine:
-                current_user_id = config.user_id
-                if not current_user_id:
-                    console.print(
-                        "[red]Error:[/red] Cannot filter by user - no user_id configured. "
-                        "Run [bold]prime whoami[/bold] to refresh your config."
-                    )
-                    raise typer.Exit(1)
+                identity = api_client.get("/user/whoami")
+                data = identity.get("data")
+                current_user_id = data.get("id") if isinstance(data, dict) else None
+                if not isinstance(current_user_id, str) or not current_user_id.strip():
+                    raise APIError("Cannot determine the authenticated user from the API response.")
                 runs = [r for r in runs if r.user_id == current_user_id]
 
             total_count = len(runs)
@@ -1939,13 +1935,18 @@ def _list_runs_impl(
 def list_runs(
     team: Optional[str] = typer.Option(None, "--team", "-t", help="Filter by team ID"),
     mine: bool = typer.Option(
-        False, "--mine", help="Filter to only your own runs (useful for admin accounts)"
+        True,
+        "--mine/--all-users",
+        help="Show only your runs (default), or include teammates' runs",
     ),
     num: int = typer.Option(20, "--num", "-n", help="Items per page"),
     page: int = typer.Option(1, "--page", "-p", help="Page number"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List your runs (alias: ls)."""
+    """List your runs (alias: ls).
+
+    Use --all-users to include teammates' runs in the selected account context.
+    """
     _list_runs_impl(team, num, page, output, mine=mine)
 
 

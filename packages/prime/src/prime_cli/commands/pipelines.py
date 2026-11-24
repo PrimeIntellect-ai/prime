@@ -579,12 +579,14 @@ def stop(
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
 ) -> None:
-    """Stop a run. Its runner and every sandbox it started end at once; with --drain, once what's
-    running has finished."""
+    """Stop a run. What's running gets a short grace period, the run's files are saved, then its
+    runner and every sandbox it started end. Evaluations and training it started end at once.
+    With --drain, the run ends once what's running has finished."""
     question = (
         f"Wind down run {run_id}? It starts no new work and ends once what's running finishes."
         if drain
-        else f"Stop run {run_id}? Its runner and every sandbox it started end now."
+        else f"Stop run {run_id}? What's running gets a short grace period and the run's files "
+        "are saved, then its runner and every sandbox it started end."
     )
     if not confirm_or_skip(question, yes):
         console.print("Cancelled.")

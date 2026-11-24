@@ -154,7 +154,8 @@ prime train models
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
-prime train list
+prime train list              # Your runs
+prime train list --all-users  # Include teammates' runs
 prime train logs <run-id> -f
 prime train metrics <run-id>
 prime train checkpoints <run-id>

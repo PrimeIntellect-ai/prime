@@ -625,34 +625,31 @@ def _set_visibility(name: str, visibility: VolumeVisibility, team_id: Optional[s
     _print_volume(volume)
 
 
-@app.command("make-public")
-def make_public(
+@app.command("set-visibility")
+def set_visibility(
     name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
+    public: bool = typer.Option(
+        False, "--public", help="Let any account mount and sync the volume through its ref"
+    ),
+    private: bool = typer.Option(
+        False, "--private", help="Stop new recipient mounts, syncs and gets of the volume"
+    ),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
 ) -> None:
-    """Let any account mount and sync the volume through its ref.
+    """Set a volume's visibility: exactly one of --public or --private.
 
-    Recipients read the published head and their writes stay in their own
-    sandbox: they cannot publish. Only the volume's owner can change this.
+    A public volume mounts and syncs from any account through its ref;
+    recipients read the published head, cannot publish, and their sync always
+    discards local writes. Making it private stops new recipient mounts, syncs
+    and gets, while running recipient sandboxes keep their attachment and what
+    they already read. Only the volume's owner can change the visibility.
     """
-    _set_visibility(name, VolumeVisibility.PUBLIC, team_id)
-
-
-@app.command("make-private")
-def make_private(
-    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
-    team_id: Optional[str] = typer.Option(
-        None, help="Team ID (uses config team_id if not specified)"
-    ),
-) -> None:
-    """Stop new recipient mounts, syncs and gets of the volume.
-
-    Running recipient sandboxes keep their attachment and what they already
-    read. Only the volume's owner can change this.
-    """
-    _set_visibility(name, VolumeVisibility.PRIVATE, team_id)
+    if public == private:
+        console.print("[red]Error:[/red] exactly one of --public or --private is required")
+        raise typer.Exit(1)
+    _set_visibility(name, VolumeVisibility.PUBLIC if public else VolumeVisibility.PRIVATE, team_id)
 
 
 @app.command()

@@ -389,7 +389,7 @@ def _fake_set_visibility(captured: dict[str, Any]) -> Any:
     return fake_set_visibility
 
 
-def test_volume_make_public_prints_the_result(
+def test_volume_set_visibility_public_prints_the_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     _configure_cli(monkeypatch, tmp_path)
@@ -399,7 +399,7 @@ def test_volume_make_public_prints_the_result(
     )
 
     result = runner.invoke(
-        app, ["sandbox", "volumes", "make-public", "data", "--team-id", "team-1"]
+        app, ["sandbox", "volumes", "set-visibility", "data", "--public", "--team-id", "team-1"]
     )
 
     assert result.exit_code == 0, result.output
@@ -410,7 +410,7 @@ def test_volume_make_public_prints_the_result(
     assert "cvol-1" in output
 
 
-def test_volume_make_private_sends_a_ref_and_prints_the_result(
+def test_volume_set_visibility_private_sends_a_ref_and_prints_the_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     _configure_cli(monkeypatch, tmp_path)
@@ -419,7 +419,7 @@ def test_volume_make_private_sends_a_ref_and_prints_the_result(
         "prime_sandboxes.volumes.Volumes.set_visibility", _fake_set_visibility(captured)
     )
 
-    result = runner.invoke(app, ["sandbox", "volumes", "make-private", "alice/data"])
+    result = runner.invoke(app, ["sandbox", "volumes", "set-visibility", "alice/data", "--private"])
 
     assert result.exit_code == 0, result.output
     output = strip_ansi(result.output)
@@ -429,7 +429,28 @@ def test_volume_make_private_sends_a_ref_and_prints_the_result(
     assert "Visibility: PRIVATE" in output
 
 
-def test_volume_make_public_surfaces_a_foreign_ref_404(
+def test_volume_set_visibility_requires_exactly_one_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    calls: list[Any] = []
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.set_visibility",
+        lambda self, name, visibility, team_id=None: calls.append(name),
+    )
+
+    for flags in ([], ["--public", "--private"]):
+        result = runner.invoke(app, ["sandbox", "volumes", "set-visibility", "data", *flags])
+        assert result.exit_code == 1, result.output
+        output = strip_ansi(result.output)
+        assert "exactly one of --public or --private is required" in output
+        assert "Unexpected error" not in output
+
+    # Neither request reached the SDK.
+    assert calls == []
+
+
+def test_volume_set_visibility_surfaces_a_foreign_ref_404(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     _configure_cli(monkeypatch, tmp_path)
@@ -439,7 +460,7 @@ def test_volume_make_public_surfaces_a_foreign_ref_404(
 
     monkeypatch.setattr("prime_sandboxes.volumes.Volumes.set_visibility", not_found)
 
-    result = runner.invoke(app, ["sandbox", "volumes", "make-public", "alice/data"])
+    result = runner.invoke(app, ["sandbox", "volumes", "set-visibility", "alice/data", "--public"])
 
     assert result.exit_code == 1, result.output
     output = strip_ansi(result.output)

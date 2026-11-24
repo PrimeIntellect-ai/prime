@@ -224,8 +224,8 @@ prime sandbox volumes grow data --size-gb 512
 prime sandbox volumes delete data
 
 # Sharing: a public volume mounts from any account through <namespace>/<name>
-prime sandbox volumes make-public data
-prime sandbox volumes make-private data
+prime sandbox volumes set-visibility data --public
+prime sandbox volumes set-visibility data --private
 
 # Publish a sandbox's private volume writes as a durable checkpoint
 prime sandbox volumes publish data --sandbox <sandbox-id> [--no-wait]

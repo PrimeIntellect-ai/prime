@@ -753,6 +753,53 @@ def test_control_paths_encode_the_run_id(review: Dict[str, Any]) -> None:
     assert review["posts"][0][0] == "/pipelines/runs/r%2F1/control"
 
 
+@pytest.mark.parametrize("second", ["report.md", "REPORT.md"])
+def test_an_output_never_replaces_another_output_of_the_run(
+    api: Dict[str, Any], monkeypatch, tmp_path, second
+) -> None:
+    from contextlib import contextmanager
+
+    run = {
+        **RUN,
+        "outputs": [
+            {"name": "report.md", "node": "a", "bytes": 1},
+            {"name": second, "node": "a", "bytes": 1},
+        ],
+    }
+    monkeypatch.setattr(
+        "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: run
+    )
+    bodies = iter([b"first", b"second"])
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def iter_bytes(self):
+            yield next(bodies)
+
+    @contextmanager
+    def stream(self: Any, method: str, url: str, **kwargs: Any):
+        yield Response()
+
+    monkeypatch.setattr("httpx.Client.stream", stream)
+    (tmp_path / "Probe").touch()
+    one_file = second == "report.md" or (tmp_path / "probe").exists()
+
+    result = runner.invoke(
+        app, ["pipelines", "outputs", "run1", "--dir", str(tmp_path)], env=TEST_ENV
+    )
+
+    assert (tmp_path / "a" / "report.md").read_bytes() == b"first"
+    if one_file:
+        assert result.exit_code == 1
+        assert "another output of this run" in strip_ansi(result.output).replace("\n", " ")
+        assert [path.name for path in (tmp_path / "a").iterdir()] == ["report.md"]
+    else:
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "a" / second).read_bytes() == b"second"
+
+
 def test_outputs_say_when_the_folder_cannot_be_made(api: Dict[str, Any], tmp_path) -> None:
     (tmp_path / "file").write_text("in the way")
     result = runner.invoke(

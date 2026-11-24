@@ -466,7 +466,10 @@ interpreter can be supplied with `--schema-python`. No FFT checkout is required.
 Schema setup precompiles Python bytecode to speed up later validations, and the
 CLI removes cached environments unused for 14 days or beyond the four most recent.
 Platform supplies the pinned image digest and schema commit before local parsing;
-`--image-tag`, `--ref`, and `--pr` override runtime selection when needed.
+`--image-tag`, `--ref`, and `--pr` override runtime selection when needed. They
+apply only to teams with their own dedicated cluster; on-demand runs always use
+the platform's default prime-rl image, and the platform refuses them with any of
+these set.
 With `--ref`, `--pr`, or a top-level `source_ref`, validation installs and runs
 that prime-rl commit's schema package on your machine, including on `prime train`
 before the confirmation prompt.

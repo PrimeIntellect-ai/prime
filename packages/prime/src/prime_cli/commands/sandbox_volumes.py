@@ -513,6 +513,10 @@ def get(
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
@@ -544,6 +548,10 @@ def delete(
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
@@ -573,6 +581,10 @@ def grow(
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
@@ -593,6 +605,10 @@ def _set_visibility(name: str, visibility: VolumeVisibility, team_id: Optional[s
     except APIError as e:
         # 404 for a volume outside the caller's scopes, which includes any
         # volume owned by another account.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
@@ -692,7 +708,8 @@ def publish(
             )
         raise typer.Exit(1)
     except ValueError as e:
-        # Invalid --wait-timeout, same handling as `sandbox fork`.
+        # Invalid --wait-timeout or a malformed volume name or ref; both are
+        # rejected before the request.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
@@ -777,6 +794,10 @@ def sync(
     except VolumeSyncSupersededError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         console.print("Run this command again to sync to the current head.")
+        raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")

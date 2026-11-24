@@ -313,6 +313,36 @@ def test_volume_client_ref_omits_team_id_and_keeps_its_slash():
     assert captured["params"] == {}
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["", ".", "..", "a/.", "a/..", "../a", "./a", "a/b/c", "/a", "a/"],
+)
+def test_volume_client_rejects_names_and_refs_that_could_retarget_the_route(name: str):
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(), captured)
+
+    with pytest.raises(ValueError):
+        volumes.get(name)
+    with pytest.raises(ValueError):
+        volumes.delete(name)
+
+    # Nothing reached the transport: the path would have been rewritten by
+    # the HTTP client's dot-segment normalization.
+    assert captured == {}
+
+
+def test_volume_client_publish_and_sync_reject_unroutable_refs():
+    client = RoutingAPIClient(lambda method, path, json: {})
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        volumes.publish("sb-1", "../../sandbox/sb-2", wait=False)
+    with pytest.raises(ValueError):
+        volumes.sync("sb-1", "a/b/c", discard=True, wait=False)
+
+    assert client.calls == []
+
+
 def test_volume_client_paths_keep_ref_slashes_and_quote_everything_else():
     captured: dict[str, Any] = {}
     volumes = _volumes(_volume_response(), captured)

@@ -27,19 +27,34 @@ def _resolved_team_id(
     return team_id if team_id is not None else client.config.team_id
 
 
+def _quoted_volume_ref(name: str) -> str:
+    """Quote a volume name or ``<namespace>/<name>`` ref for a route path.
+
+    A ref has exactly one slash, and no segment may be empty, ``.`` or ``..``:
+    the HTTP client normalizes dot segments, so an unchecked ref like
+    ``../../sandbox/<id>`` would retarget the request at a different route.
+    """
+    namespace, slash, volume_name = name.partition("/")
+    segments = [namespace, volume_name] if slash else [name]
+    if not name or "" in segments or "/" in volume_name:
+        raise ValueError(
+            f"invalid volume name or ref '{name}': expected <name> or <namespace>/<name>"
+        )
+    if any(segment in (".", "..") for segment in segments):
+        raise ValueError(f"invalid volume name or ref '{name}': '.' and '..' are not allowed")
+    return "/".join(quote(segment, safe="") for segment in segments)
+
+
 def _volume_path(name: str) -> str:
-    # A ref's slash is route data (<namespace>/<name>), so it stays literal;
-    # quote the rest so a name that escapes the server's character rules
-    # cannot be reinterpreted as a different route path.
-    return f"/sandbox/volumes/{quote(name, safe='/')}"
+    return f"/sandbox/volumes/{_quoted_volume_ref(name)}"
 
 
 def _publish_path(sandbox_id: str, name: str) -> str:
-    return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='/')}/publish"
+    return f"/sandbox/{sandbox_id}/volumes/{_quoted_volume_ref(name)}/publish"
 
 
 def _sync_path(sandbox_id: str, name: str) -> str:
-    return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='/')}/sync"
+    return f"/sandbox/{sandbox_id}/volumes/{_quoted_volume_ref(name)}/sync"
 
 
 # The server fails a sync past its 10-minute deadline, enforced on a ~1-minute
@@ -89,6 +104,9 @@ class Volumes:
     Reaches the platform through the parent client's transport and waits for
     publishes with the parent's checkpoint waiter; it owns no transport,
     waiter, batcher, or lifecycle of its own.
+
+    Name and ref arguments are validated before any request: a ref has at most
+    one slash and no empty, ``.`` or ``..`` segment, else ValueError.
     """
 
     def __init__(self, parent: "SandboxClient"):
@@ -281,6 +299,9 @@ class AsyncVolumes:
     Reaches the platform through the parent client's transport and waits for
     publishes with the parent's checkpoint waiter; it owns no transport,
     waiter, batcher, or lifecycle of its own.
+
+    Name and ref arguments are validated before any request: a ref has at most
+    one slash and no empty, ``.`` or ``..`` segment, else ValueError.
     """
 
     def __init__(self, parent: "AsyncSandboxClient"):

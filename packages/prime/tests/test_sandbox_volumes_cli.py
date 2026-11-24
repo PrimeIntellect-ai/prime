@@ -271,6 +271,27 @@ def test_volume_get_foreign_public_volume_shows_its_ref(
     assert captured["args"] == ("alice/data", None)
 
 
+def test_volume_get_rejects_a_ref_that_could_retarget_the_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    # Exercises the real SDK path builder through the CLI: an unchecked
+    # "../../sandbox/<id>" would be normalized into DELETE/GET /sandbox/<id>.
+    _configure_cli(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "get", "../../sandbox/sbx-1"])
+
+    assert result.exit_code == 1, result.output
+    output = strip_ansi(result.output)
+    assert "invalid volume name or ref" in output
+    assert "Unexpected error" not in output
+
+    # -y skips the confirmation; the DELETE never leaves the process.
+    deleted = runner.invoke(app, ["sandbox", "volumes", "delete", "../../sandbox/sbx-1", "-y"])
+
+    assert deleted.exit_code == 1, deleted.output
+    assert "invalid volume name or ref" in strip_ansi(deleted.output)
+
+
 def test_volume_delete_and_in_use_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     _configure_cli(monkeypatch, tmp_path)
     deleted: list[Any] = []

@@ -30,13 +30,19 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self.generate_bodies: List[Dict[str, Any]] = []
+        # Served, in order, before the poll that approves.
+        self.statuses: List[Dict[str, Any]] = []
 
     def post(self, url: str, json: Dict[str, Any]) -> FakeResponse:
         self.generate_bodies.append(json)
         self.public_pem = json["encryptionPublicKey"]
-        return FakeResponse({"challenge": "code", "status_auth_token": "status"})
+        return FakeResponse(
+            {"challenge": "code", "status_auth_token": "status", "clientIp": "203.0.113.7"}
+        )
 
     def get(self, url: str, params: Dict[str, Any], headers: Dict[str, str]) -> FakeResponse:
+        if self.statuses:
+            return FakeResponse(self.statuses.pop(0))
         public_key = serialization.load_pem_public_key(self.public_pem.encode())
         encrypted = public_key.encrypt(  # type: ignore[union-attr]
             b"pit_minted",
@@ -97,3 +103,18 @@ def test_login_rejects_out_of_range_limit(backend: FakeBackend) -> None:
 
     assert result.exit_code != 0
     assert backend.generate_bodies == []
+
+
+def test_login_points_a_blocked_remote_login_at_the_setting(
+    backend: FakeBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("prime_cli.commands.login.time.sleep", lambda _: None)
+    backend.statuses = [{"error": "remote_login_blocked"}] * 2
+
+    result = runner.invoke(app, ["login", "--headless"], env=TEST_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert "Requested from 203.0.113.7" in result.output
+    assert result.output.count("Login blocked") == 1
+    assert "dashboard/profile?tab=security" in result.output
+    assert "Successfully logged in!" in result.output

@@ -245,6 +245,12 @@ def login(
             f"[bold yellow]2.[/bold yellow] Your code should be pre-filled. Code:\n\n"
             f"[bold green]{challenge_code}[/bold green]\n"
         )
+        if challenge_response.get("clientIp"):
+            console.print(
+                f"[dim]Requested from {challenge_response['clientIp']}. Approve it from a"
+                " browser on the same network, unless you allow CLI login from another"
+                " network in Settings → Security.[/dim]"
+            )
         console.print("[dim]Waiting for authentication...[/dim]")
 
         # Try to open the browser automatically (after all prints to avoid errors polluting output)
@@ -255,6 +261,7 @@ def login(
                 pass
 
         challenge_auth_header = f"Bearer {challenge_response['status_auth_token']}"
+        blocked_notice_shown = False
         while True:
             try:
                 status_response = httpx.get(
@@ -268,6 +275,15 @@ def login(
                     break
 
                 status_data = status_response.json()
+                if status_data.get("error") == "remote_login_blocked" and not blocked_notice_shown:
+                    blocked_notice_shown = True
+                    console.print(
+                        "[yellow]Login blocked: the browser is on a different network from"
+                        " this machine. If you are logging in on a remote machine, turn on"
+                        " 'Allow CLI login from another network' at"
+                        f" {settings['frontend_url']}/dashboard/profile?tab=security,"
+                        " then go back to the login page. Still waiting...[/yellow]"
+                    )
                 if status_data.get("result"):
                     # Decrypt the result
                     encrypted_result = base64.b64decode(status_data["result"])

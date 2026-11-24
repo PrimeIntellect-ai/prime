@@ -522,6 +522,8 @@ def outputs(
         console.print("This run has no outputs yet.")
         return
     base = directory.resolve()
+    # The files saved so far, as the filesystem knows them.
+    saved: set[tuple[int, int]] = set()
     for out in listed:
         parts = (str(out["node"]), str(out["name"]))
         # Nothing but dots and spaces is `.` or `..` to Windows, which drops trailing ones.
@@ -557,9 +559,21 @@ def outputs(
                 with os.fdopen(handle, "wb") as file:
                     for chunk in response.iter_bytes():
                         file.write(chunk)
+            # Two outputs can be one file to the filesystem (`a.md` and `A.md` where case
+            # doesn't count), and the second would replace the first.
+            there = os.stat(target) if target.exists() else None
+            if there is not None and (there.st_dev, there.st_ino) in saved:
+                _fail(
+                    APIError(
+                        f"refusing {out['node']}/{out['name']}: here it is the same file as "
+                        "another output of this run, which it would replace"
+                    )
+                )
             # Only a complete download replaces what was there.
             partial.replace(target)
             partial = None
+            now = os.stat(target)
+            saved.add((now.st_dev, now.st_ino))
         except (httpx.HTTPError, OSError) as error:
             _fail(APIError(f"downloading {out['name']}: {error}"))
         finally:

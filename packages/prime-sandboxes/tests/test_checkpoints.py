@@ -55,6 +55,22 @@ def sandbox_response() -> dict:
     }
 
 
+def test_total_stored_bytes_adds_pause_memory() -> None:
+    pause = SandboxCheckpoint.model_validate(
+        checkpoint_response("DURABLE")
+        | {"stored_bytes": 100, "has_memory": True, "snapshot_bytes": 50}
+    )
+    assert pause.total_stored_bytes == 150
+    assert pause.model_dump()["total_stored_bytes"] == 150
+    disk_only = SandboxCheckpoint.model_validate(
+        checkpoint_response("DURABLE") | {"stored_bytes": 100}
+    )
+    assert not disk_only.has_memory
+    assert disk_only.total_stored_bytes == 100
+    # Unstored checkpoints and older responses omit sizes.
+    assert SandboxCheckpoint.model_validate(checkpoint_response()).total_stored_bytes is None
+
+
 def test_restore_request_rejects_image_and_disk_size() -> None:
     with pytest.raises(ValueError, match="omit docker_image"):
         CreateSandboxRequest(

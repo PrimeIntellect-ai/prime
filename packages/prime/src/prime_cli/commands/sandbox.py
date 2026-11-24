@@ -860,6 +860,8 @@ def checkpoint_list(
     # One sandbox: show lineage (Parent); account-wide: which sandbox it came from.
     # Expires only when some checkpoint has a TTL, to keep the table narrow.
     show_expiry = any(c.expires_at for c in results)
+    # Memory only when some checkpoint is a pause's, to keep the table narrow.
+    show_memory = any(c.has_memory for c in results)
     table = build_table(
         f"Checkpoints: {escape(sandbox_id or 'all sandboxes')}",
         [
@@ -867,29 +869,36 @@ def checkpoint_list(
             ("Parent" if sandbox_id else "Sandbox", "white"),
             ("State", "white"),
             ("Depth", "white"),
-            # Size is the quota measure (occupied bytes); Stored is the
-            # compressed billing metric — they differ by design.
+            # Size is the uncompressed disk data; Stored is the compressed disk
+            # plus any pause memory, the size counted against the storage limit.
             ("Size", "white"),
             ("Stored", "white"),
+            *([("Memory", "white")] if show_memory else []),
             ("Age", "white"),
             *([("Expires", "white")] if show_expiry else []),
             ("Error", "red"),
         ],
     )
     for c in results:
+        memory = [_mib(c.snapshot_bytes) if c.has_memory else "-"]
         expiry = [c.expires_at.strftime("%Y-%m-%d %H:%M UTC") if c.expires_at else "-"]
         table.add_row(
             escape(c.id),
             escape((c.parent_id or "-") if sandbox_id else c.sandbox_id),
             escape(c.state),
             str(c.depth),
-            f"{c.occupied_bytes / 1024**2:.1f} MiB",
-            f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
+            _mib(c.occupied_bytes),
+            _mib(c.total_stored_bytes),
+            *(memory if show_memory else []),
             human_age(c.created_at),
             *(expiry if show_expiry else []),
             escape(c.error or ""),
         )
     console.print(table)
+
+
+def _mib(size_bytes: Optional[int]) -> str:
+    return f"{size_bytes / 1024**2:.1f} MiB" if size_bytes is not None else "-"
 
 
 def _older_than(value: Optional[str]) -> Optional[datetime]:
@@ -921,7 +930,11 @@ def checkpoint_get(
         console.print(f"Merge: {escape(checkpoint.merge)}")
         if checkpoint.merge_error:
             console.print(f"Merge error: {escape(checkpoint.merge_error)}")
-    console.print(f"Size: {checkpoint.occupied_bytes / 1024**2:.1f} MiB")
+    console.print(f"Size: {_mib(checkpoint.occupied_bytes)}")
+    stored = _mib(checkpoint.total_stored_bytes)
+    if checkpoint.has_memory:
+        stored += f" (incl. {_mib(checkpoint.snapshot_bytes)} memory)"
+    console.print(f"Stored: {stored}")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
 

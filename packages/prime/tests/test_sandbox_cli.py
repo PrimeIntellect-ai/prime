@@ -63,7 +63,7 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
     assert table.exit_code == 0, table.output
     assert "checkpoint-1" in table.output and "DURABLE" in table.output
-    # Size (quota measure) and Stored (compressed billing metric) both shown.
+    # Size (uncompressed data) and Stored (compressed) both shown.
     assert "Size" in table.output and "2.0 MiB" in table.output
     assert "1.0 MiB" in table.output
 
@@ -258,6 +258,44 @@ def test_checkpoint_get_by_id_shows_volume_merge_status(monkeypatch: pytest.Monk
         result = runner.invoke(app, ["sandbox", "checkpoint", "get", checkpoint_id])
         assert result.exit_code == 0, result.output
         assert line in " ".join(strip_ansi(result.output).split())
+
+
+def test_checkpoint_list_and_get_show_pause_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    pause = SandboxCheckpoint(
+        id="pause-1",
+        sandbox_id="sandbox-1",
+        state="DURABLE",
+        depth=1,
+        docker_image="python:3.11-slim",
+        stored_bytes=1024**2,
+        has_memory=True,
+        snapshot_bytes=4 * 1024**2,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.list_checkpoints",
+        lambda self, sandbox_id, checkpoint_id=None: [pause],
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint",
+        lambda self, checkpoint_id: pause,
+    )
+
+    table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
+    assert table.exit_code == 0, table.output
+    assert "Memory" in table.output
+
+    listed_json = runner.invoke(
+        app, ["sandbox", "checkpoint", "list", "sandbox-1", "--output", "json"]
+    )
+    # Stored is disk plus memory: what counts against the storage limit.
+    assert json.loads(listed_json.output)["checkpoints"][0]["total_stored_bytes"] == 5 * 1024**2
+
+    got = runner.invoke(app, ["sandbox", "checkpoint", "get", "pause-1"])
+    assert got.exit_code == 0, got.output
+    assert "Stored: 5.0 MiB (incl. 4.0 MiB memory)" in " ".join(strip_ansi(got.output).split())
 
 
 def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:

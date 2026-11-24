@@ -120,7 +120,8 @@ prime train models
 prime train rl.toml
 
 # Inspect and manage Hosted Training runs
-prime train list
+prime train list              # Your runs
+prime train list --all-users  # Include teammates' runs
 prime train logs <run-id> -f
 prime train metrics <run-id>
 prime train checkpoints <run-id>
@@ -195,18 +196,22 @@ prime sandbox run <sandbox-id> --user ubuntu -- id
 
 # Request a filesystem checkpoint; check again until it is DURABLE
 prime sandbox checkpoint create <sandbox-id>
+# Capture memory and processes without creating a sandbox; resumes the source
+prime sandbox snapshot <sandbox-id> [--wait-timeout 300]
 prime sandbox checkpoint list <sandbox-id> [--checkpoint-id <checkpoint-id>]
 # Any checkpoint by id, rootfs or volume
 prime sandbox checkpoint get <checkpoint-id>
 prime sandbox checkpoint restore <checkpoint-id> --name restored-sandbox
-# Pause, fork, and resume in one step: the fork continues the source's memory and disk
+# Checkpoint + restore in one step, inheriting the source's resources
 prime sandbox fork <sandbox-id> [--name forked-sandbox]
+# Also fork the source's memory: pause it, fork, then resume it asynchronously
+prime sandbox fork <sandbox-id> [--with-memory]
 
 # Upload/download files
 prime sandbox upload <sandbox-id> local_file.py /remote/path/
 prime sandbox download <sandbox-id> /remote/file.txt ./local/
 
-# Attach persistent volumes (repeatable; :ro mounts read-only)
+# Attach persistent volumes (repeatable; :ro mounts read-only, :rw is the default)
 prime sandbox create --volume data:/data --volume cache:/mnt:ro python:3.11
 
 # Manage volumes (create takes --size-gb; default capacity is 100 GiB)
@@ -226,15 +231,30 @@ prime sandbox volumes create data --from ~/datasets/my-data
 prime sandbox delete <sandbox-id>
 ```
 
-`prime sandbox fork` pauses the source for the memory snapshot, creates a new
-sandbox that continues its memory and disk, then requests the source's resume,
-which completes asynchronously (`prime sandbox get` shows when it runs again).
-The fork keeps the paused sandbox's shape, environment, and secrets. It is an
-exact copy of the paused guest: userspace random generators and keys, tokens, or
-IDs already in memory are the same in every fork, so rekey or regenerate them in
-the workload. GPU sandboxes and sandboxes with volumes cannot be paused, so they
-cannot be forked this way. For a disk-only copy, use
-`prime sandbox checkpoint create` and `prime sandbox checkpoint restore`.
+`prime sandbox snapshot` pauses the source, waits until the memory snapshot is
+restorable, then resumes the same source asynchronously; `--wait-timeout` bounds
+only that pause-ready wait. It prints the captured checkpoint, which is not
+necessarily `DURABLE`; `prime sandbox checkpoint get` shows the upload. A
+non-durable snapshot is usable on the pausing node while the source exists.
+Restore with `prime sandbox checkpoint restore <checkpoint-id> --memory`, which
+creates a new sandbox. GPU sandboxes and sandboxes with volumes cannot be paused,
+and a memory restore needs the source sandbox record to exist. A memory snapshot
+copies userspace random state and keys or tokens already in memory, so rekey or
+regenerate them in the workload. If the pause request fails or its response is
+lost, `prime sandbox get <sandbox-id>` shows whether the source became PAUSED;
+`prime sandbox resume <sandbox-id>` continues it.
+
+`prime sandbox fork` checkpoints the source's filesystem and restores it into a
+new sandbox that inherits the source's shape, team, region, timeout, and labels;
+the source keeps running. `--with-memory` also forks the source's memory and
+running processes: the source is paused for the snapshot, resumed afterwards
+asynchronously (`prime sandbox get` shows when it runs again), and the fork takes
+the paused sandbox's shape, environment, and secrets, so `--with-memory` rejects
+`--cpu-cores` and `--memory-gb`. A memory fork is an exact copy of the paused
+guest: userspace random generators and keys, tokens, or IDs already in memory are
+the same in every fork, so rekey or regenerate them in the workload. GPU
+sandboxes and sandboxes with volumes cannot be paused, so they cannot be
+memory-forked. `--wait-timeout` bounds the checkpoint or snapshot wait.
 
 Volume writes are private to a sandbox until a publish reaches DURABLE
 and its merge finishes. A

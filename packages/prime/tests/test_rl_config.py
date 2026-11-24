@@ -29,6 +29,17 @@ def test_load_toml_returns_raw_table(tmp_path: Path) -> None:
     assert _load_toml(str(config_path)) == {"model": {"name": "Qwen/Qwen3-0.6B"}}
 
 
+def test_load_toml_keeps_dotted_key_with_multiline_string(tmp_path: Path) -> None:
+    # toml 0.10.2 dropped the `taskset.` prefix here and hoisted the key onto the env entry.
+    config_path = tmp_path / "rl.toml"
+    config_path.write_text(
+        '[[train.env]]\nid = "x"\ntaskset.append_to_system_prompt = """\nline1\nline2"""\n'
+    )
+    assert _load_toml(str(config_path)) == {
+        "train": {"env": [{"id": "x", "taskset": {"append_to_system_prompt": "line1\nline2"}}]}
+    }
+
+
 def test_looks_like_lora_top_level_model_string() -> None:
     assert _looks_like_lora({"model": "Qwen/Qwen3-0.6B", "max_steps": 10}) is True
 

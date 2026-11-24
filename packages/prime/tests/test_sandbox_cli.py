@@ -7,7 +7,7 @@ import pytest
 from prime_cli.commands.sandbox import _format_sandbox_expiry
 from prime_cli.main import app
 from prime_cli.utils import strip_ansi
-from prime_sandboxes import APIError, HeaderRule, SandboxCheckpoint, StartCommand
+from prime_sandboxes import APIError, HeaderRule, SandboxCheckpoint, StartCommand, VolumeMount
 from typer.testing import CliRunner
 
 runner = CliRunner()
@@ -63,7 +63,7 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
     assert table.exit_code == 0, table.output
     assert "checkpoint-1" in table.output and "DURABLE" in table.output
-    # Size (quota measure) and Stored (compressed billing metric) both shown.
+    # Size (uncompressed data) and Stored (compressed) both shown.
     assert "Size" in table.output and "2.0 MiB" in table.output
     assert "1.0 MiB" in table.output
 
@@ -83,6 +83,96 @@ def test_checkpoint_command_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
     assert durable.exit_code == 0, durable.output
     assert json.loads(durable.output)["checkpoints"][0]["state"] == "DURABLE"
     assert listed == [("sandbox-1", None), ("sandbox-1", "checkpoint-1")]
+
+
+def _frozen_snapshot() -> SandboxCheckpoint:
+    return SandboxCheckpoint(
+        id="pause-1",
+        sandbox_id="sandbox-1",
+        state="FROZEN",
+        depth=1,
+        docker_image="python:3.11-slim",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+def test_snapshot_forwards_timeout_and_prints_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpoint = _frozen_snapshot()
+    calls: list[tuple[str, float]] = []
+
+    def snapshot(self: Any, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
+        calls.append((sandbox_id, timeout_seconds))
+        return checkpoint
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
+
+    result = runner.invoke(
+        app, ["sandbox", "snapshot", "sandbox-1", "--wait-timeout", "45", "--output", "json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("sandbox-1", 45)]
+    assert json.loads(result.output) == checkpoint.model_dump(mode="json")
+
+
+def test_snapshot_prints_the_resume_and_restore_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpoint = _frozen_snapshot()
+    calls: list[float] = []
+
+    def snapshot(self: Any, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
+        calls.append(timeout_seconds)
+        return checkpoint
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
+
+    result = runner.invoke(app, ["sandbox", "snapshot", "sandbox-1"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [300]
+    text = _flat(result.output)
+    assert "Memory snapshot captured" in text
+    assert "source is resuming asynchronously" in text
+    assert "prime sandbox checkpoint restore pause-1 --memory" in text
+    assert "non-DURABLE snapshot" in text
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (
+            TimeoutError(
+                "Sandbox sandbox-1 did not finish pausing within 2s; "
+                "the pause may still complete (checkpoint pause-1)"
+            ),
+            "checkpoint pause-1",
+        ),
+        (
+            RuntimeError(
+                "Pause checkpoint pause-1 cannot be restored (state=FAILED): "
+                "sandboxes with volumes cannot be paused"
+            ),
+            "sandboxes with volumes cannot be paused",
+        ),
+    ],
+)
+def test_snapshot_prints_capture_failures(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def snapshot(self: Any, *args: Any, **kwargs: Any) -> SandboxCheckpoint:
+        raise error
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.snapshot", snapshot)
+
+    result = runner.invoke(app, ["sandbox", "snapshot", "sandbox-1"])
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" in result.output
+    assert expected in _flat(result.output)
 
 
 def test_checkpoint_get_by_id_states_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,6 +260,44 @@ def test_checkpoint_get_by_id_shows_volume_merge_status(monkeypatch: pytest.Monk
         assert line in " ".join(strip_ansi(result.output).split())
 
 
+def test_checkpoint_list_and_get_show_pause_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    pause = SandboxCheckpoint(
+        id="pause-1",
+        sandbox_id="sandbox-1",
+        state="DURABLE",
+        depth=1,
+        docker_image="python:3.11-slim",
+        stored_bytes=1024**2,
+        has_memory=True,
+        snapshot_bytes=4 * 1024**2,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.list_checkpoints",
+        lambda self, sandbox_id, checkpoint_id=None: [pause],
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.get_checkpoint",
+        lambda self, checkpoint_id: pause,
+    )
+
+    table = runner.invoke(app, ["sandbox", "checkpoint", "list", "sandbox-1"])
+    assert table.exit_code == 0, table.output
+    assert "Memory" in table.output
+
+    listed_json = runner.invoke(
+        app, ["sandbox", "checkpoint", "list", "sandbox-1", "--output", "json"]
+    )
+    # Stored is disk plus memory: what counts against the storage limit.
+    assert json.loads(listed_json.output)["checkpoints"][0]["total_stored_bytes"] == 5 * 1024**2
+
+    got = runner.invoke(app, ["sandbox", "checkpoint", "get", "pause-1"])
+    assert got.exit_code == 0, got.output
+    assert "Stored: 5.0 MiB (incl. 4.0 MiB memory)" in " ".join(strip_ansi(got.output).split())
+
+
 def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
     captured: dict[str, Any] = {}
@@ -188,7 +316,46 @@ def test_restore_command_creates_from_checkpoint(monkeypatch: pytest.MonkeyPatch
     assert captured["request"].name == "fork"
     assert captured["request"].docker_image is None
     assert captured["request"].disk_size_gb is None
+    assert captured["request"].volumes is None
     assert "restored-1" in result.output
+
+
+def test_restore_command_mounts_only_the_volumes_it_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        captured["request"] = request
+        return SimpleNamespace(id="restored-1")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "checkpoint",
+            "restore",
+            "cp-1",
+            "--volume",
+            "data:/data",
+            "--volume",
+            "ref:/ref:ro",
+            "-y",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].volumes == [
+        VolumeMount(name="data", mount_path="/data", read_only=False),
+        VolumeMount(name="ref", mount_path="/ref", read_only=True),
+    ]
+
+    captured.clear()
+    result = runner.invoke(
+        app, ["sandbox", "checkpoint", "restore", "cp-1", "--volume", "data", "-y"]
+    )
+    assert result.exit_code == 1, result.output
+    assert captured == {}
 
 
 def test_restore_command_memory_forks_with_the_paused_shape(
@@ -215,33 +382,148 @@ def test_restore_command_memory_forks_with_the_paused_shape(
     assert disk.cpu_cores == 1.0
 
 
-def test_fork_command_forks_with_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fork_checkpoints_waits_and_restores(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_cli(monkeypatch)
     calls: list[Any] = []
+    source = _fake_sandbox(
+        id="sbx-1", team_id="team-1", region="us", gpu_count=0, gpu_type=None, labels=["a"]
+    )
+    pending = SimpleNamespace(id="checkpoint-1")
+
+    def create(self: Any, request: Any) -> SimpleNamespace:
+        calls.append(request)
+        return SimpleNamespace(id="forked-1")
+
+    def wait(self: Any, checkpoint_id: str, timeout_seconds: float) -> SimpleNamespace:
+        calls.append(("wait", checkpoint_id, timeout_seconds))
+        return pending
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.checkpoint", lambda self, sid: pending
+    )
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.wait_for_checkpoint", wait)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.create", create)
+
+    result = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--cpu-cores", "4", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0] == ("wait", "checkpoint-1", 300)
+    request = calls[1]
+    assert request.checkpoint_id == "checkpoint-1"
+    assert request.name == "box-fork"
+    assert request.cpu_cores == 4
+    assert request.memory_gb == source.memory_gb
+    assert request.team_id == "team-1" and request.labels == ["a"]
+    assert request.volumes is None
+    assert "forked-1" in result.output
+
+
+def test_fork_with_memory_calls_the_memory_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    calls: list[dict[str, Any]] = []
     source = _fake_sandbox(id="sbx-1", team_id="team-1", labels=["a"])
 
     def fork(self: Any, sandbox_id: str, **kwargs: Any) -> SimpleNamespace:
-        calls.append((sandbox_id, kwargs))
+        calls.append({"sandbox_id": sandbox_id, **kwargs})
         return SimpleNamespace(id="forked-1")
 
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
     monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.fork", fork)
 
-    prompted = runner.invoke(
-        app, ["sandbox", "fork", "sbx-1", "--timeout-minutes", "30"], input="y\n"
+    result = runner.invoke(
+        app,
+        [
+            "sandbox",
+            "fork",
+            "sbx-1",
+            "--with-memory",
+            "--timeout-minutes",
+            "30",
+            "--wait-timeout",
+            "60",
+            "--yes",
+        ],
     )
-    assert prompted.exit_code == 0, prompted.output
-    assert "paused for the memory snapshot, then resumed asynchronously" in " ".join(
-        strip_ansi(prompted.output).split()
-    )
-    assert "forked-1" in prompted.output
 
-    skipped = runner.invoke(app, ["sandbox", "fork", "sbx-1", "-y"])
-    assert skipped.exit_code == 0, skipped.output
+    assert result.exit_code == 0, result.output
     assert calls == [
-        ("sbx-1", {"name": "box-fork", "timeout_minutes": 30, "timeout_seconds": 300}),
-        ("sbx-1", {"name": "box-fork", "timeout_minutes": None, "timeout_seconds": 300}),
+        {
+            "sandbox_id": "sbx-1",
+            "name": "box-fork",
+            "timeout_minutes": 30,
+            "with_memory": True,
+            "timeout_seconds": 60,
+        }
     ]
+    assert "forked-1" in result.output
+
+
+def test_fork_with_memory_prompt_states_the_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    source = _fake_sandbox(id="sbx-1")
+
+    def fork(self: Any, *args: Any, **kwargs: Any) -> SimpleNamespace:
+        raise AssertionError("a declined prompt must not fork")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.fork", fork)
+
+    result = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--with-memory"], input="n\n")
+
+    assert result.exit_code == 0, result.output
+    assert "paused for the memory snapshot" in result.output
+
+
+def test_fork_with_memory_rejects_shape_overrides_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_cli(monkeypatch)
+
+    def get(self: Any, sandbox_id: str) -> None:
+        raise AssertionError("an invalid flag combination must not request anything")
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", get)
+
+    result = runner.invoke(
+        app, ["sandbox", "fork", "sbx-1", "--with-memory", "--cpu-cores", "4", "--yes"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "--with-memory cannot be combined with --cpu-cores or --memory-gb" in result.output
+    assert "keeps the source's shape" in result.output
+
+
+def test_fork_mounts_only_the_volumes_it_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    checkpointed: list[str] = []
+    created: list[Any] = []
+    source = _fake_sandbox(
+        id="sbx-1", team_id=None, region="us", gpu_count=0, gpu_type=None, labels=[]
+    )
+    pending = SimpleNamespace(id="checkpoint-1")
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.get", lambda self, sid: source)
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.checkpoint",
+        lambda self, sid: checkpointed.append(sid) or pending,
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.wait_for_checkpoint",
+        lambda self, checkpoint_id, timeout_seconds: pending,
+    )
+    monkeypatch.setattr(
+        "prime_cli.commands.sandbox.SandboxClient.create",
+        lambda self, request: created.append(request) or SimpleNamespace(id="forked-1"),
+    )
+
+    # A malformed spec fails before the source is checkpointed.
+    bad = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--volume", "data", "--yes"])
+    assert bad.exit_code == 1, bad.output
+    assert checkpointed == []
+
+    result = runner.invoke(app, ["sandbox", "fork", "sbx-1", "--volume", "data:/data:ro", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert created[0].volumes == [VolumeMount(name="data", mount_path="/data", read_only=True)]
 
 
 def _fake_sandbox(**overrides: Any) -> SimpleNamespace:

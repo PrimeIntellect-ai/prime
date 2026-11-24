@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 from datetime import datetime
 
 # Wheel METADATA files use RFC 822 format (PEP 566), same as email headers
@@ -13,7 +14,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
-import toml
 import typer
 from rich.table import Table
 from rich.text import Text
@@ -815,7 +815,7 @@ def push(
         raise typer.Exit(1)
 
     try:
-        pyproject_data = toml.load(pyproject_path)
+        pyproject_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     except Exception as e:
         console.print(f"[red]Failed to parse pyproject.toml: {e}[/red]")
         raise typer.Exit(1)
@@ -844,7 +844,9 @@ def push(
         console.print(f"Auto-bumping version: {current_version} → {new_version}")
         try:
             update_pyproject_version(pyproject_path, new_version)
-            project_info = toml.load(pyproject_path).get("project", {})
+            project_info = tomllib.loads(pyproject_path.read_text(encoding="utf-8")).get(
+                "project", {}
+            )
             console.print("[green]✓ Updated version in pyproject.toml[/green]")
         except Exception as e:
             console.print(f"[red]Failed to update version in pyproject.toml: {e}[/red]")
@@ -2269,7 +2271,7 @@ def _get_version_from_pyproject(env_path: Path) -> Optional[str]:
     if not pyproject_path.exists():
         return None
     try:
-        pyproject_data = toml.load(pyproject_path)
+        pyproject_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
         return pyproject_data.get("project", {}).get("version")
     except Exception:
         return None

@@ -6,7 +6,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    computed_field,
+    model_validator,
+)
 
 from .image_references import is_docker_hub_reference
 
@@ -515,11 +522,15 @@ class SandboxCheckpoint(BaseModel):
     depth: int
     docker_image: str
     disk_size_bytes: Optional[int] = None
+    # Compressed packed disk bytes; see total_stored_bytes.
     stored_bytes: Optional[int] = None
-    # Quota-size measure: non-hole uncompressed bytes of the packed version.
-    # stored_bytes stays the compressed billing metric; do not conflate the two.
-    # 0 for grandfathered pre-measurement records; older responses omit it.
+    # Non-hole uncompressed bytes of the packed version: the volume quota
+    # measure. 0 for grandfathered pre-measurement records; older responses omit it.
     occupied_bytes: int = 0
+    # A committed pause's checkpoint: it carries memory a sandbox can resume.
+    has_memory: bool = False
+    # Stored bytes of a pause's memory snapshot; None until it is stored.
+    snapshot_bytes: Optional[int] = None
     error: Optional[str] = None
     # When the platform deletes it (set by a TTL at creation); None keeps it.
     expires_at: Optional[datetime] = None
@@ -529,6 +540,15 @@ class SandboxCheckpoint(BaseModel):
     merge_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def total_stored_bytes(self) -> Optional[int]:
+        """Disk plus memory snapshot bytes: the size billed and counted against
+        the checkpoint storage limit. None until the disk is stored."""
+        if self.stored_bytes is None:
+            return None
+        return self.stored_bytes + (self.snapshot_bytes or 0)
 
 
 class CheckpointLookupError(BaseModel):
@@ -620,6 +640,27 @@ class Volume(BaseModel):
     # responses omit both.
     account_storage_used_bytes: Optional[int] = None
     account_storage_limit_gb: Optional[int] = None
+
+
+class VolumeSync(BaseModel):
+    """One sandbox attachment's current volume sync.
+
+    state is null before the first sync, then one of UNMOUNTING,
+    PUBLISHING, REMOUNTING, ROLLING_BACK, DONE, or FAILED; ROLLING_BACK means
+    the sync failed after the unmount and is re-attaching the volume at its
+    previous head (failure is already set). head_id is the attachment's
+    current head (the synced head once state is DONE); updated_at is the
+    last transition time. failure says why the sync failed or is rolling back
+    (BUSY, PUBLISH_FAILED, MERGE_FAILED, DEADLINE, NODE_ERROR or
+    ROLLBACK_FAILED) and is null otherwise. It stays set when the sandbox
+    leaves RUNNING mid-rollback.
+    """
+
+    sync_id: Optional[str] = None
+    state: Optional[str] = None
+    head_id: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    failure: Optional[str] = None
 
 
 class VolumeListResponse(BaseModel):

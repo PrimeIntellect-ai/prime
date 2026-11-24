@@ -171,6 +171,65 @@ def _table_cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("│┃").split("│" if "│" in line else "┃")]
 
 
+@pytest.mark.parametrize(
+    ("command", "flag", "mine"),
+    [("list", [], True), ("list", ["--mine"], True), ("ls", ["--all-users"], False)],
+)
+def test_train_list_requests_user_scope(monkeypatch, command, flag, mine) -> None:
+    def mock_get(self, endpoint, params=None, timeout=None):
+        assert endpoint == "/rft/runs"
+        expected = {"team_id": "selected-team", "page": 2, "limit": 10}
+        if mine:
+            expected["mine"] = "true"
+        assert params == expected
+        return {"runs": [], "total": 0}
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+    result = runner.invoke(
+        app,
+        ["train", command, "--team", "selected-team", "--page", "2", "--num", "10", *flag],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key"},
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected_run", "expected_total"),
+    [([], "own-run", 1), (["--all-users"], "teammate-run", 2)],
+)
+def test_train_list_legacy_scope_before_pagination(
+    monkeypatch, flag, expected_run, expected_total
+) -> None:
+    def mock_get(self, endpoint, params=None, timeout=None):
+        if endpoint == "/user/whoami":
+            assert not flag
+            return {"data": {"id": "user-1"}}
+        assert endpoint == "/rft/runs"
+        return {
+            "runs": [
+                _fake_run_payload("RUNNING", run_id="own-run"),
+                {
+                    **_fake_run_payload("RUNNING", run_id="teammate-run"),
+                    "userId": "user-2",
+                    "createdAt": "2026-08-26T00:00:00Z",
+                },
+            ]
+        }
+
+    monkeypatch.setattr("prime_cli.core.client.APIClient.get", mock_get)
+    result = runner.invoke(
+        app,
+        ["train", "list", "--num", "1", "-o", "json", *flag],
+        env={**TEST_ENV, "PRIME_API_KEY": "test-key", "PRIME_USER_ID": "user-2"},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [run["id"] for run in payload["runs"]] == [expected_run]
+    assert payload["total"] == expected_total
+
+
 def test_train_list_shows_gpu_count(monkeypatch) -> None:
     runs = [
         {**_fake_run_payload("RUNNING", run_id="run-gpu"), "gpuCount": 16},

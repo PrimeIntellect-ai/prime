@@ -737,7 +737,9 @@ app.add_typer(checkpoint_app, name="checkpoint")
 app.add_typer(sandbox_volumes_app, name="volumes")
 
 
-def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
+def _print_checkpoint(
+    checkpoint: SandboxCheckpoint, output: str, *, memory_snapshot: bool = False
+) -> None:
     if output == "json":
         output_data_as_json(checkpoint.model_dump(mode="json"), console)
         return
@@ -745,6 +747,21 @@ def _print_checkpoint(checkpoint: SandboxCheckpoint, output: str) -> None:
     console.print(f"State: {escape(checkpoint.state)}")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
+    elif memory_snapshot:
+        console.print(
+            "Memory snapshot captured. The source is resuming asynchronously; "
+            f"check with 'prime sandbox get {escape(checkpoint.sandbox_id)}'."
+        )
+        console.print(
+            f"Restore with 'prime sandbox checkpoint restore {escape(checkpoint.id)} --memory'."
+        )
+        if checkpoint.state != "DURABLE":
+            console.print(
+                "A non-DURABLE snapshot is usable on the pausing node while the source exists. "
+                "Wait for DURABLE "
+                f"('prime sandbox checkpoint get {escape(checkpoint.id)}') before deleting the "
+                "source; the public checkpoint model does not report whether memory is included."
+            )
     elif checkpoint.state != "DURABLE":
         console.print(
             "Restorable once DURABLE. Check with "
@@ -843,6 +860,8 @@ def checkpoint_list(
     # One sandbox: show lineage (Parent); account-wide: which sandbox it came from.
     # Expires only when some checkpoint has a TTL, to keep the table narrow.
     show_expiry = any(c.expires_at for c in results)
+    # Memory only when some checkpoint is a pause's, to keep the table narrow.
+    show_memory = any(c.has_memory for c in results)
     table = build_table(
         f"Checkpoints: {escape(sandbox_id or 'all sandboxes')}",
         [
@@ -850,29 +869,36 @@ def checkpoint_list(
             ("Parent" if sandbox_id else "Sandbox", "white"),
             ("State", "white"),
             ("Depth", "white"),
-            # Size is the quota measure (occupied bytes); Stored is the
-            # compressed billing metric — they differ by design.
+            # Size is the uncompressed disk data; Stored is the compressed disk
+            # plus any pause memory, the size counted against the storage limit.
             ("Size", "white"),
             ("Stored", "white"),
+            *([("Memory", "white")] if show_memory else []),
             ("Age", "white"),
             *([("Expires", "white")] if show_expiry else []),
             ("Error", "red"),
         ],
     )
     for c in results:
+        memory = [_mib(c.snapshot_bytes) if c.has_memory else "-"]
         expiry = [c.expires_at.strftime("%Y-%m-%d %H:%M UTC") if c.expires_at else "-"]
         table.add_row(
             escape(c.id),
             escape((c.parent_id or "-") if sandbox_id else c.sandbox_id),
             escape(c.state),
             str(c.depth),
-            f"{c.occupied_bytes / 1024**2:.1f} MiB",
-            f"{c.stored_bytes / 1024**2:.1f} MiB" if c.stored_bytes is not None else "-",
+            _mib(c.occupied_bytes),
+            _mib(c.total_stored_bytes),
+            *(memory if show_memory else []),
             human_age(c.created_at),
             *(expiry if show_expiry else []),
             escape(c.error or ""),
         )
     console.print(table)
+
+
+def _mib(size_bytes: Optional[int]) -> str:
+    return f"{size_bytes / 1024**2:.1f} MiB" if size_bytes is not None else "-"
 
 
 def _older_than(value: Optional[str]) -> Optional[datetime]:
@@ -904,7 +930,11 @@ def checkpoint_get(
         console.print(f"Merge: {escape(checkpoint.merge)}")
         if checkpoint.merge_error:
             console.print(f"Merge error: {escape(checkpoint.merge_error)}")
-    console.print(f"Size: {checkpoint.occupied_bytes / 1024**2:.1f} MiB")
+    console.print(f"Size: {_mib(checkpoint.occupied_bytes)}")
+    stored = _mib(checkpoint.total_stored_bytes)
+    if checkpoint.has_memory:
+        stored += f" (incl. {_mib(checkpoint.snapshot_bytes)} memory)"
+    console.print(f"Stored: {stored}")
     if checkpoint.error:
         console.print(f"Error: {escape(checkpoint.error)}")
 
@@ -1058,10 +1088,21 @@ def checkpoint_restore(
             "sandbox continues from the paused state with its shape, environment and secrets"
         ),
     ),
+    volume: Optional[List[str]] = typer.Option(
+        None,
+        "--volume",
+        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Create a new sandbox from a checkpoint's disk, or with --memory fork a paused sandbox."""
+    """Create a new sandbox from a checkpoint's disk, or with --memory fork a paused sandbox.
+
+    A checkpoint holds only the root disk, so the new sandbox mounts no volume unless you pass
+    --volume. A volume is mounted at its latest published content, not the state at checkpoint
+    time. --volume cannot be combined with --memory.
+    """
     sandbox_name = name or f"restore-{checkpoint_id[:8]}"
+    volume_mounts = parse_volume_mount_specs(volume or [])
     try:
         shape = {
             field: value
@@ -1074,6 +1115,7 @@ def checkpoint_restore(
             restore_memory=True if memory else None,
             team_id=team_id,
             timeout_minutes=timeout_minutes,
+            volumes=volume_mounts or None,
             **shape,
         )
         if not confirm_or_skip(
@@ -1096,32 +1138,128 @@ def checkpoint_restore(
 def fork(
     sandbox_id: str,
     name: Optional[str] = typer.Option(None, help="Name for the new sandbox"),
+    cpu_cores: Optional[float] = typer.Option(None, help="CPU cores (default: source's)"),
+    memory_gb: Optional[float] = typer.Option(None, help="Memory in GB (default: source's)"),
     timeout_minutes: Optional[int] = typer.Option(
         None, help="Timeout in minutes (default: source's)"
     ),
-    wait_timeout: float = typer.Option(300, help="Seconds to wait for the pause to finish"),
+    wait_timeout: float = typer.Option(
+        300, help="Seconds to wait for the fork's snapshot to be ready"
+    ),
+    with_memory: bool = typer.Option(
+        False,
+        "--with-memory",
+        help=(
+            "Fork the source's memory and running processes too: pause it for the "
+            "snapshot, fork, then resume it asynchronously"
+        ),
+    ),
+    volume: Optional[List[str]] = typer.Option(
+        None,
+        "--volume",
+        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Fork a running sandbox into a new sandbox that continues its memory and disk."""
+    """Fork a running sandbox into a new sandbox with the same filesystem.
+
+    With --with-memory the fork also continues the source's processes, memory, and
+    disk; the source is paused for the snapshot and resumed afterwards.
+
+    A checkpoint holds only the root disk, so the fork mounts no volume unless you pass
+    --volume. A volume is mounted at its latest published content, not the state at
+    checkpoint time: sync the source first to include its unpublished writes.
+    --volume cannot be combined with --with-memory.
+    """
+    # Reject the incompatible options before any API request.
+    if with_memory and (cpu_cores is not None or memory_gb is not None):
+        console.print(
+            "[red]Error:[/red] --with-memory cannot be combined with --cpu-cores or "
+            "--memory-gb: a memory fork keeps the source's shape"
+        )
+        raise typer.Exit(1)
+    if with_memory and volume:
+        console.print("[red]Error:[/red] --with-memory cannot be combined with --volume")
+        raise typer.Exit(1)
+    volume_mounts = parse_volume_mount_specs(volume or [])
     client = SandboxClient(APIClient())
     try:
         source = client.get(sandbox_id)
         sandbox_name = name or f"{source.name}-fork"
-        prompt = (
-            f"Fork sandbox {sandbox_id} into {sandbox_name}? "
-            "The source is paused for the memory snapshot, then resumed asynchronously."
-        )
+        prompt = f"Fork sandbox {sandbox_id} into {sandbox_name}?"
+        if with_memory:
+            prompt += " The source is paused for the memory snapshot, then resumed asynchronously."
         if not confirm_or_skip(prompt, yes, default=True):
             return
-        with console.status("[bold blue]Forking sandbox...", spinner="dots"):
-            sandbox = client.fork(
-                sandbox_id,
+        if with_memory:
+            with console.status("[bold blue]Forking sandbox...", spinner="dots"):
+                sandbox = client.fork(
+                    sandbox_id,
+                    name=sandbox_name,
+                    timeout_minutes=timeout_minutes,
+                    with_memory=True,
+                    timeout_seconds=wait_timeout,
+                )
+        else:
+            with console.status("[bold blue]Forking sandbox...", spinner="dots"):
+                checkpoint = client.checkpoint(sandbox_id)
+                try:
+                    checkpoint = client.wait_for_checkpoint(
+                        checkpoint.id, timeout_seconds=wait_timeout
+                    )
+                except TimeoutError as exc:
+                    raise TimeoutError(
+                        f"Fork of {sandbox_id} was not ready within {wait_timeout:g}s"
+                    ) from exc
+                except RuntimeError as exc:
+                    raise RuntimeError(f"Fork of {sandbox_id} failed") from exc
+            request = CreateSandboxRequest(
                 name=sandbox_name,
-                timeout_minutes=timeout_minutes,
-                timeout_seconds=wait_timeout,
+                checkpoint_id=checkpoint.id,
+                team_id=source.team_id,
+                region=source.region,
+                cpu_cores=cpu_cores if cpu_cores is not None else source.cpu_cores,
+                memory_gb=memory_gb if memory_gb is not None else source.memory_gb,
+                gpu_count=source.gpu_count,
+                gpu_type=source.gpu_type,
+                timeout_minutes=(
+                    timeout_minutes if timeout_minutes is not None else source.timeout_minutes
+                ),
+                labels=source.labels,
+                volumes=volume_mounts or None,
             )
+            with console.status("[bold blue]Forking sandbox...", spinner="dots"):
+                sandbox = client.create(request)
         console.print(f"[green]Successfully forked into sandbox {escape(sandbox.id)}[/green]")
         console.print(f"Use 'prime sandbox get {escape(sandbox.id)}' to check its status")
+    except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+
+@app.command("snapshot")
+def snapshot(
+    sandbox_id: str,
+    wait_timeout: float = typer.Option(
+        300,
+        "--wait-timeout",
+        help="Seconds to wait for the pause-ready wait (source PAUSED)",
+    ),
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """Capture a memory snapshot of a running sandbox, then resume it.
+
+    The source is paused for the capture and resumed asynchronously. The returned
+    checkpoint restores with 'prime sandbox checkpoint restore <id> --memory'."""
+    validate_output_format(output, console)
+    client = SandboxClient(APIClient())
+    try:
+        if output == "json":
+            checkpoint = client.snapshot(sandbox_id, timeout_seconds=wait_timeout)
+        else:
+            with console.status("[bold blue]Capturing memory snapshot...", spinner="dots"):
+                checkpoint = client.snapshot(sandbox_id, timeout_seconds=wait_timeout)
+        _print_checkpoint(checkpoint, output, memory_snapshot=True)
     except (APIError, ValueError, RuntimeError, TimeoutError) as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
@@ -1236,7 +1374,7 @@ def create(
     volume: Optional[List[str]] = typer.Option(
         None,
         "--volume",
-        help="Attach a volume as NAME:/mount/path[:ro]. Can be specified multiple times.",
+        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
     ),
     gang: int = typer.Option(
         1,
@@ -2416,8 +2554,7 @@ def ssh_connect(
                 f"{transport.user}@{transport.host}",
                 "-p",
                 str(transport.port),
-                "-i",
-                transport.key_path,
+                *transport.identity_args(),
                 "-o",
                 f"ProxyCommand={transport.proxy_command}",
                 "-o",

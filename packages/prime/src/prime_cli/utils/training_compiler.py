@@ -317,7 +317,13 @@ def compile_locally(
     config: dict[str, Any], preparation: dict[str, Any], *, schema_python: Path | None = None
 ) -> dict[str, Any]:
     response = _schema_request(
-        {"config": config, "sft_online_eval_keys": sorted(SFT_ONLINE_EVAL_KEYS)},
+        {
+            "config": config,
+            "sft_online_eval_keys": sorted(SFT_ONLINE_EVAL_KEYS),
+            # Platforms that run supervised online evals from components;
+            # older ones validate those blocks themselves.
+            "online_eval_components": preparation.get("supervised_online_eval_supported") is True,
+        },
         preparation,
         schema_python,
     )

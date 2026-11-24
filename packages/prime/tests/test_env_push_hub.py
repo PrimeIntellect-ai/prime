@@ -35,7 +35,7 @@ def package(tmp_path, monkeypatch) -> Path:
     )
 
     def build(package_dir: Path) -> Path:
-        project = env_command.toml.load(package_dir / "pyproject.toml")["project"]
+        project = env_command.tomllib.loads((package_dir / "pyproject.toml").read_text())["project"]
         return write_wheel(
             package_dir / "dist",
             project["name"],

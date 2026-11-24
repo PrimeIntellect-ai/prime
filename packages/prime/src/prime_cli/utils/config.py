@@ -1,9 +1,9 @@
 """Configuration file utilities."""
 
+import tomllib
 from pathlib import Path
 from typing import Any
 
-import toml
 import typer
 from pydantic import BaseModel
 from rich.console import Console
@@ -33,8 +33,9 @@ def load_toml(path: str, console: Console | None = None) -> dict[str, Any]:
         raise typer.Exit(1)
 
     try:
-        return toml.load(p)
-    except toml.TomlDecodeError as e:
+        with p.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
         console.print(f"[red]Error:[/red] Invalid TOML in {path}: {e}")
         raise typer.Exit(1)
 

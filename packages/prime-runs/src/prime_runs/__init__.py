@@ -29,7 +29,7 @@ from .models import (
 )
 from .run import MODE_ENV, Run, init
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 __all__ = [
     "init",

@@ -879,7 +879,7 @@ def test_volume_model_parses_size_gb():
 
 def test_volume_model_parses_namespace():
     # The response shows the owner's slug, or the id form when the owner has
-    # no slug or its slug starts with "team-".
+    # no slug, its slug starts with "team-", or its slug is an existing user id.
     assert Volume.model_validate(_volume_response(namespace="andrew")).namespace == "andrew"
     assert (
         Volume.model_validate(_volume_response(namespace="team-team-1")).namespace == "team-team-1"

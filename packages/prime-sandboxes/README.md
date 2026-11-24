@@ -179,9 +179,11 @@ is sent with its slash literal; the namespace may be a user id or slug, a
 team slug, or `team-<teamId>`. `list` stays own-scope and responses include
 each volume's `namespace` and `visibility`, plus `total`, `page`, `per_page`,
 and `has_next`. A response's `namespace` is the owner's user or team slug, or
-the id form (the user id, or `team-<teamId>`) when it has no slug or its slug
-starts with `team-`. `get` by a foreign ref returns only `name`, `namespace`,
-`visibility`, `size_gb`, `occupied_bytes`, and `created_at`.
+the id form (the user id, or `team-<teamId>`) when it has no slug, its slug
+starts with `team-`, or its slug is an existing user id (that namespace
+resolves to that user, not to the owner). `get` by a foreign ref returns only
+`name`, `namespace`, `visibility`, `size_gb`, `occupied_bytes`, and
+`created_at`.
 
 ```python
 from prime_sandboxes import APIClient, SandboxClient, VolumeVisibility

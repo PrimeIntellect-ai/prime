@@ -619,9 +619,10 @@ class Volume(BaseModel):
     id: Optional[str] = None
     name: str
     # Display namespace of the owner: the user or team slug, or the id form
-    # (the user id, or ``team-<teamId>``) when the owner has no slug or its
-    # slug starts with ``team-``. ``namespace/name`` is the ref to share. Refs
-    # accept both forms. Absent on responses from servers older than the field.
+    # (the user id, or ``team-<teamId>``) when the owner has no slug, its slug
+    # starts with ``team-``, or its slug is an existing user id, which would
+    # resolve to that user. ``namespace/name`` is the ref to share; refs accept
+    # both forms. Absent on responses from servers older than the field.
     namespace: Optional[str] = None
     user_id: Optional[str] = None
     team_id: Optional[str] = None

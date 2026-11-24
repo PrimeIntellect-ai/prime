@@ -50,7 +50,7 @@ VOLUMES_LIST_JSON_HELP = json_output_help(
     ".page = number",
     ".per_page = number",
     ".has_next = boolean",
-    ".volumes[].namespace? = string (owner slug; id form when it has none)",
+    ".volumes[].namespace? = string (owner slug; id form when unset, team-*, or a user id)",
     ".storage_used_bytes = number? (account-wide usage)",
     ".storage_limit_gb = number? (whole GiB)",
 )

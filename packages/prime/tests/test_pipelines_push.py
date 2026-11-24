@@ -86,6 +86,16 @@ def test_a_folder_without_a_project_is_refused(hub: FakeHub, tmp_path):
     assert hub.calls == []
 
 
+def test_a_project_that_is_not_a_table_is_refused(hub: FakeHub, tmp_path):
+    (tmp_path / "pyproject.toml").write_text('project = "math-loop"\n')
+
+    result = _push("--path", str(tmp_path))
+
+    assert result.exit_code == 1
+    assert "needs [project] name and version" in strip_ansi(result.output)
+    assert hub.calls == []
+
+
 def test_json_stays_clean_when_a_username_is_chosen_first(hub: FakeHub, pipeline):
     hub.slug = None
 

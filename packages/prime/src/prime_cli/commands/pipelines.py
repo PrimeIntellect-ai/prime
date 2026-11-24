@@ -205,6 +205,8 @@ def push(
             project = tomllib.load(file).get("project", {})
     except (OSError, tomllib.TOMLDecodeError) as error:
         _fail(ValueError(f"Can't read {package_dir / 'pyproject.toml'}: {error}"))
+    if not isinstance(project, dict):
+        project = {}
     name, version = project.get("name"), project.get("version")
     if not name or not version:
         _fail(ValueError("pyproject.toml needs [project] name and version"))

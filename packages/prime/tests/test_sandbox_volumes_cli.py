@@ -208,7 +208,8 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         return Volume(
             id="cvol-1",
             name="data",
-            namespace="user-1",
+            # A response namespace is the owner's slug, not the user id.
+            namespace="andrew",
             user_id="user-1",
             size_gb=512,
             visibility="PUBLIC",
@@ -229,7 +230,7 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     assert "Head checkpoint: chk-9" in output
     assert "Visibility: PUBLIC" in output
     assert "Scope: Personal" in output
-    assert "Ref: user-1/data" in output
+    assert "Ref: andrew/data" in output
     assert "Capacity: 512 GiB" in output
     assert "Size: 1.5 GB" in output
     assert "Account storage: 2.0 GB used of 1024 GiB limit" in output

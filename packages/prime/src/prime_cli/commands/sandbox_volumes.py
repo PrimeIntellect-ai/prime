@@ -50,6 +50,7 @@ VOLUMES_LIST_JSON_HELP = json_output_help(
     ".page = number",
     ".per_page = number",
     ".has_next = boolean",
+    ".volumes[].namespace? = string (owner slug; id form when it has none)",
     ".storage_used_bytes = number? (account-wide usage)",
     ".storage_limit_gb = number? (whole GiB)",
 )
@@ -69,7 +70,10 @@ _IMPORTER_IDLE_TIMEOUT_MINUTES = 30
 _IMPORTER_LABEL = "prime:volume-import"
 
 # Every command that names an existing volume accepts an owner-qualified ref.
-_VOLUME_REF_HELP = "Volume name, or <namespace>/<name> for another account's PUBLIC volume"
+_VOLUME_REF_HELP = (
+    "Volume name, or <namespace>/<name> for another account's PUBLIC volume "
+    "(namespace: the owner's user or team slug, or its id form)"
+)
 
 
 def _invalid_volume_mount(spec: str, problem: str) -> None:

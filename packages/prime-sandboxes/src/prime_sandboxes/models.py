@@ -618,9 +618,10 @@ class Volume(BaseModel):
     # None only for a foreign PUBLIC volume, whose GET never exposes ids.
     id: Optional[str] = None
     name: str
-    # Ref prefix that always resolves for the owner: a user id, or
-    # ``team-<teamId>``. ``namespace/name`` is the ref to share. Absent on
-    # responses from servers older than the field.
+    # Display namespace of the owner: the user or team slug, or the id form
+    # (the user id, or ``team-<teamId>``) when the owner has no slug or its
+    # slug starts with ``team-``. ``namespace/name`` is the ref to share. Refs
+    # accept both forms. Absent on responses from servers older than the field.
     namespace: Optional[str] = None
     user_id: Optional[str] = None
     team_id: Optional[str] = None

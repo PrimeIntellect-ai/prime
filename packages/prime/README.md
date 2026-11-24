@@ -273,8 +273,10 @@ merge finishes — both checkable with
 `prime sandbox checkpoint get <checkpoint-id>`.
 
 Making a volume public lets any account mount it read-only or read-write, and
-sync it, by its `<namespace>/<name>` ref; a bare name always means the caller's
-or sandbox's own scope. Volumes are unlisted: a recipient needs the ref, and
+sync it, by its `<namespace>/<name>` ref (a user id or slug, a team slug, or
+`team-<teamId>`); a bare name always means the caller's or sandbox's own
+scope. `volumes get` shows the ref with the owner's slug-or-id namespace.
+Volumes are unlisted: a recipient needs the ref, and
 `volumes list` stays own-scope while showing each volume's `visibility`. Only
 the owner can make a volume public or private, publish to it, or delete it.
 Recipient sync always discards: the recipient's unpublished writes are replaced

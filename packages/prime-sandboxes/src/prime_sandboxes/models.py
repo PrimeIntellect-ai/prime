@@ -597,9 +597,9 @@ class VolumeMount(BaseModel):
     """One volume to mount in the sandbox.
 
     A bare name resolves in the sandbox's own scope (team scope when team_id
-    is set). A ``<namespace>/<name>`` ref (user, team slug, ``team-<id>``)
-    names a PUBLIC volume owned by another account; recipient writes stay in
-    the sandbox and cannot be published.
+    is set). A ``<namespace>/<name>`` ref (a user id or slug, a team slug, or
+    ``team-<teamId>``) names a PUBLIC volume owned by another account;
+    recipient writes stay in the sandbox and cannot be published.
     """
 
     name: str
@@ -608,10 +608,20 @@ class VolumeMount(BaseModel):
 
 
 class Volume(BaseModel):
-    """A sandbox volume, owned by exactly one of user/team scope."""
+    """A sandbox volume, owned by exactly one of user/team scope.
 
-    id: str
+    A foreign PUBLIC volume read by ref carries only name, namespace,
+    visibility, occupied_bytes, size_gb and created_at: it has no id, owner
+    fields or head checkpoint.
+    """
+
+    # None only for a foreign PUBLIC volume, whose GET never exposes ids.
+    id: Optional[str] = None
     name: str
+    # Ref prefix that always resolves for the owner: a user id, or
+    # ``team-<teamId>``. ``namespace/name`` is the ref to share. Absent on
+    # responses from servers older than the field.
+    namespace: Optional[str] = None
     user_id: Optional[str] = None
     team_id: Optional[str] = None
     # Capacity in whole GiB (100 GiB unless set at create or grown via

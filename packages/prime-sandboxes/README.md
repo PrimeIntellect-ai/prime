@@ -176,8 +176,10 @@ resolved in the caller's scope: pass `team_id` (or set a team in the client
 config) for team scope, otherwise the personal scope applies. A
 `<namespace>/<name>` ref (user, team slug, or `team-<id>`) names a PUBLIC
 volume owned by another account and is sent with its slash literal. `list`
-stays own-scope and responses include each volume's `visibility` plus `total`,
-`page`, `per_page`, and `has_next`.
+stays own-scope and responses include each volume's `namespace` (the ref
+prefix: a user id, or `team-<teamId>`) and `visibility`, plus `total`, `page`,
+`per_page`, and `has_next`. `get` by a foreign ref returns only `name`,
+`namespace`, `visibility`, `size_gb`, `occupied_bytes`, and `created_at`.
 
 ```python
 from prime_sandboxes import APIClient, SandboxClient, VolumeVisibility

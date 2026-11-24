@@ -44,7 +44,8 @@ console = get_console()
 
 
 VOLUMES_LIST_JSON_HELP = json_output_help(
-    ".volumes[] = {id, name, user_id?, team_id?, size_gb?, visibility, created_at, occupied_bytes}",
+    ".volumes[] = {id, name, namespace?, user_id?, team_id?, size_gb?, visibility, "
+    "created_at, occupied_bytes}",
     ".total = number",
     ".page = number",
     ".per_page = number",
@@ -97,10 +98,22 @@ def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
     return mounts
 
 
+def _is_foreign(volume: Volume) -> bool:
+    """A foreign PUBLIC volume: its GET omits the id and the owner fields."""
+    return volume.id is None
+
+
+def _volume_ref(volume: Volume) -> Optional[str]:
+    """The owner-qualified ref, when the server reports its namespace."""
+    return f"{volume.namespace}/{volume.name}" if volume.namespace else None
+
+
 def _volume_scope(volume: Volume) -> str:
     if volume.team_id:
         return f"team: {volume.team_id}"
-    return "Personal"
+    if volume.user_id or not _is_foreign(volume):
+        return "Personal"
+    return "Other account"
 
 
 def _print_account_storage(used_bytes: int, limit_gb: Optional[int]) -> None:
@@ -116,9 +129,14 @@ def _volume_capacity(volume: Volume) -> str:
 
 
 def _print_volume(volume: Volume) -> None:
-    console.print(f"Name: [cyan]{escape(volume.name)}[/cyan]")
-    console.print(f"ID: {escape(volume.id)}")
+    ref = _volume_ref(volume)
+    foreign = _is_foreign(volume)
+    # A foreign volume has no id, so its ref is the only way to name it.
+    console.print(f"Name: [cyan]{escape(ref if foreign and ref else volume.name)}[/cyan]")
+    console.print(f"ID: {escape(volume.id) if volume.id else '-'}")
     console.print(f"Scope: {_volume_scope(volume)}")
+    if ref and not foreign:
+        console.print(f"Ref: {escape(ref)}")
     console.print(f"Visibility: {volume.visibility.value}")
     # None until the first publish reaches DURABLE, then the newest one.
     head = volume.head_checkpoint_id
@@ -471,7 +489,7 @@ def list_volumes(
             format_file_size(volume.occupied_bytes),
             _volume_capacity(volume),
             human_age(volume.created_at),
-            escape(volume.id),
+            escape(volume.id) if volume.id else "-",
         )
     console.print(table)
 

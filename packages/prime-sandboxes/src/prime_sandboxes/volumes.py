@@ -132,8 +132,9 @@ class Volumes:
 
         A ``<namespace>/<name>`` ref to another account's PUBLIC volume
         returns its summary only (name, namespace, size, visibility, head
-        size, created_at); a ref to a missing or PRIVATE foreign volume
-        raises APIError 404.
+        size, created_at): that response has no volume id, owner fields, head
+        checkpoint or account storage. A ref to a missing or PRIVATE foreign
+        volume raises APIError 404.
         """
         response = self._parent.client.request(
             "GET",
@@ -323,8 +324,9 @@ class AsyncVolumes:
 
         A ``<namespace>/<name>`` ref to another account's PUBLIC volume
         returns its summary only (name, namespace, size, visibility, head
-        size, created_at); a ref to a missing or PRIVATE foreign volume
-        raises APIError 404.
+        size, created_at): that response has no volume id, owner fields, head
+        checkpoint or account storage. A ref to a missing or PRIVATE foreign
+        volume raises APIError 404.
         """
         response = await self._parent.client.request(
             "GET",

@@ -208,6 +208,7 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         return Volume(
             id="cvol-1",
             name="data",
+            namespace="user-1",
             user_id="user-1",
             size_gb=512,
             visibility="PUBLIC",
@@ -227,10 +228,47 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     assert "data" in output and "cvol-1" in output and "Personal" in output
     assert "Head checkpoint: chk-9" in output
     assert "Visibility: PUBLIC" in output
+    assert "Scope: Personal" in output
+    assert "Ref: user-1/data" in output
     assert "Capacity: 512 GiB" in output
     assert "Size: 1.5 GB" in output
     assert "Account storage: 2.0 GB used of 1024 GiB limit" in output
     assert captured["args"] == ("data", "team-1")
+
+
+def test_volume_get_foreign_public_volume_shows_its_ref(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_get(self: Any, name: str, team_id: Any = None) -> Volume:
+        captured["args"] = (name, team_id)
+        # P7: a foreign GET carries no id and no owner fields.
+        return Volume(
+            name="data",
+            namespace="alice",
+            visibility="PUBLIC",
+            occupied_bytes=1536 * 1024**2,
+            size_gb=512,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.get", fake_get)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "get", "alice/data"])
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert "Name: alice/data" in output
+    assert "Scope: Other account" in output
+    assert "Scope: Personal" not in output
+    assert "ID: -" in output
+    assert "Visibility: PUBLIC" in output
+    assert "Capacity: 512 GiB" in output
+    assert "Size: 1.5 GB" in output
+    assert "Account storage" not in output
+    assert captured["args"] == ("alice/data", None)
 
 
 def test_volume_delete_and_in_use_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:

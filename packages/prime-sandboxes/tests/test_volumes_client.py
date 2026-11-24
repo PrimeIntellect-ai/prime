@@ -847,6 +847,37 @@ def test_volume_model_parses_size_gb():
     assert VolumeListResponse.model_validate(_volume_list_response()).volumes[0].size_gb is None
 
 
+def test_volume_model_parses_namespace():
+    volume = Volume.model_validate(_volume_response(namespace="user-abc"))
+    assert volume.namespace == "user-abc"
+
+    # Older responses omit the field entirely.
+    assert Volume.model_validate(_volume_response()).namespace is None
+
+
+def test_volume_model_tolerates_a_foreign_public_volume():
+    # P7 GET shape: no id, owner fields, head checkpoint or account storage.
+    volume = Volume.model_validate(
+        {
+            "name": "data",
+            "namespace": "alice",
+            "visibility": "PUBLIC",
+            "occupied_bytes": 2048,
+            "size_gb": 512,
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    assert volume.id is None
+    assert volume.name == "data"
+    assert volume.namespace == "alice"
+    assert volume.visibility is VolumeVisibility.PUBLIC
+    assert volume.size_gb == 512
+    assert volume.occupied_bytes == 2048
+    assert volume.user_id is None and volume.team_id is None
+    assert volume.head_checkpoint_id is None
+    assert volume.account_storage_used_bytes is None
+
+
 def test_volume_model_parses_visibility():
     assert (
         Volume.model_validate(_volume_response(visibility="PUBLIC")).visibility

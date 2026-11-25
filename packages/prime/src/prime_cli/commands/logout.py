@@ -5,13 +5,22 @@ import typer
 
 from prime_cli.core import Config
 
-from ..utils import PlainTyper, get_console, require_persistent_context
+from ..utils import PlainTyper, get_console, kube_token_cache, require_persistent_context
 
 app = PlainTyper(help="Log out of Prime Intellect", no_args_is_help=False)
 console = get_console()
 
 
 _ENV_OVERRIDES = ("PRIME_API_KEY", "PRIME_TEAM_ID", "PRIME_USER_ID")
+
+
+def _clear_kube_tokens() -> None:
+    """Cached cluster tokens stay valid for up to an hour; they go with the key."""
+    try:
+        if kube_token_cache.clear_all():
+            console.print("[dim]Cleared cached Kubernetes credentials.[/dim]")
+    except OSError as e:
+        console.print(f"[yellow]Could not clear cached Kubernetes credentials: {e}[/yellow]")
 
 
 def _clear_env_file(config: Config) -> None:
@@ -60,6 +69,8 @@ def logout(
     raw = config.config
     if not raw.get("api_key") and not raw.get("user_id") and not raw.get("team_id"):
         console.print("[yellow]Not logged in.[/yellow]")
+        # Tokens minted with a PRIME_API_KEY from the environment are cached too.
+        _clear_kube_tokens()
         set_overrides = [name for name in _ENV_OVERRIDES if os.getenv(name)]
         if set_overrides:
             console.print(
@@ -79,6 +90,7 @@ def logout(
     config.set_team(None)
     config.set_user_id(None)
     _clear_env_file(config)
+    _clear_kube_tokens()
 
     console.print("[green]Logged out.[/green]")
 

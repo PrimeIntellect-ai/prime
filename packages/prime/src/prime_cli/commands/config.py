@@ -10,7 +10,7 @@ from rich.text import Text
 from prime_cli.core import Config
 
 from ..client import APIClient, APIError
-from ..utils import PlainTyper, get_console, require_persistent_context
+from ..utils import PlainTyper, get_console, kube_token_cache, require_persistent_context
 from .teams import fetch_teams
 
 app = PlainTyper(help="Configure the CLI", no_args_is_help=True)
@@ -478,6 +478,10 @@ def reset(
         config.set_ssh_key_path(Config.DEFAULT_SSH_KEY_PATH)
         config.set_traces_opt_out(False)
         config.set_current_environment("production")
+        try:
+            kube_token_cache.clear_all()
+        except OSError as e:
+            console.print(f"[yellow]Could not clear cached Kubernetes credentials: {e}[/yellow]")
         console.print("[green]Configuration reset to defaults![/green]")
 
 

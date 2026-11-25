@@ -1681,3 +1681,9 @@ def factory_nodes(
 from .factory_slurm import app as slurm_app  # noqa: E402
 
 app.add_typer(slurm_app, name="slurm", rich_help_panel="Model Factory")
+
+# Researcher kubeconfig setup for the team's Kubernetes reservations.
+from .factory_k8s import app as k8s_app  # noqa: E402
+
+app.add_typer(k8s_app, name="k8s", rich_help_panel="Model Factory")
+app.add_typer(k8s_app, name="kubernetes", rich_help_panel="Model Factory", hidden=True)

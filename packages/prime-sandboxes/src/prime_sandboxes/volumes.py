@@ -13,7 +13,7 @@ from ._polling import (
     _jittered_poll_delay,
 )
 from .exceptions import VolumeSyncFailedError, VolumeSyncSupersededError
-from .models import SandboxCheckpoint, Volume, VolumeListResponse, VolumeSync
+from .models import SandboxCheckpoint, Volume, VolumeListResponse, VolumeSync, VolumeVisibility
 
 if TYPE_CHECKING:
     from .core import APIClient, AsyncAPIClient
@@ -27,18 +27,34 @@ def _resolved_team_id(
     return team_id if team_id is not None else client.config.team_id
 
 
+def _quoted_volume_ref(name: str) -> str:
+    """Quote a volume name or ``<namespace>/<name>`` ref for a route path.
+
+    A ref has exactly one slash, and no segment may be empty, ``.`` or ``..``:
+    the HTTP client normalizes dot segments, so an unchecked ref like
+    ``../../sandbox/<id>`` would retarget the request at a different route.
+    """
+    namespace, slash, volume_name = name.partition("/")
+    segments = [namespace, volume_name] if slash else [name]
+    if not name or "" in segments or "/" in volume_name:
+        raise ValueError(
+            f"invalid volume name or ref '{name}': expected <name> or <namespace>/<name>"
+        )
+    if any(segment in (".", "..") for segment in segments):
+        raise ValueError(f"invalid volume name or ref '{name}': '.' and '..' are not allowed")
+    return "/".join(quote(segment, safe="") for segment in segments)
+
+
 def _volume_path(name: str) -> str:
-    # Quote so a name that escapes the server's character rules cannot be
-    # reinterpreted as a different route path; valid names stay unchanged.
-    return f"/sandbox/volumes/{quote(name, safe='')}"
+    return f"/sandbox/volumes/{_quoted_volume_ref(name)}"
 
 
 def _publish_path(sandbox_id: str, name: str) -> str:
-    return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/publish"
+    return f"/sandbox/{sandbox_id}/volumes/{_quoted_volume_ref(name)}/publish"
 
 
 def _sync_path(sandbox_id: str, name: str) -> str:
-    return f"/sandbox/{sandbox_id}/volumes/{quote(name, safe='')}/sync"
+    return f"/sandbox/{sandbox_id}/volumes/{_quoted_volume_ref(name)}/sync"
 
 
 # The server fails a sync past its 10-minute deadline, enforced on a ~1-minute
@@ -70,7 +86,12 @@ def _sync_timeout_message(
     )
 
 
-def _name_params(client: "APIClient | AsyncAPIClient", team_id: Optional[str]) -> dict[str, object]:
+def _name_params(
+    client: "APIClient | AsyncAPIClient", team_id: Optional[str], name: str
+) -> dict[str, object]:
+    # A ref carries its own namespace, so a team_id beside it would be ambiguous.
+    if "/" in name:
+        return {}
     resolved_team_id = _resolved_team_id(client, team_id)
     if resolved_team_id:
         return {"team_id": resolved_team_id}
@@ -83,6 +104,9 @@ class Volumes:
     Reaches the platform through the parent client's transport and waits for
     publishes with the parent's checkpoint waiter; it owns no transport,
     waiter, batcher, or lifecycle of its own.
+
+    Name and ref arguments are validated before any request: a ref has at most
+    one slash and no empty, ``.`` or ``..`` segment, else ValueError.
     """
 
     def __init__(self, parent: "SandboxClient"):
@@ -93,8 +117,9 @@ class Volumes:
     ) -> Volume:
         """Create an empty volume in the caller's personal scope or in a team.
 
-        ``size_gb`` is the requested capacity in whole GiB; omitted means
-        the base image size (100 GiB).
+        ``name`` is a bare name, unique in that scope; refs name existing
+        volumes and are not accepted here. ``size_gb`` is the requested
+        capacity in whole GiB; omitted means the base image size (100 GiB).
         """
         payload: dict[str, object] = {"name": name}
         resolved_team_id = _resolved_team_id(self._parent.client, team_id)
@@ -121,25 +146,33 @@ class Volumes:
         return VolumeListResponse.model_validate(response)
 
     def get(self, name: str, *, team_id: Optional[str] = None) -> Volume:
-        """Get a volume by name in the caller's scope."""
+        """Get a volume by name in the caller's scope, or by ref.
+
+        A ``<namespace>/<name>`` ref to another account's PUBLIC volume
+        returns its summary only (name, namespace, size, visibility, head
+        size, created_at): that response has no volume id, owner fields, head
+        checkpoint or account storage. A ref to a missing or PRIVATE foreign
+        volume raises APIError 404.
+        """
         response = self._parent.client.request(
             "GET",
             _volume_path(name),
-            params=_name_params(self._parent.client, team_id),
+            params=_name_params(self._parent.client, team_id, name),
         )
         return Volume.model_validate(response)
 
     def delete(self, name: str, *, team_id: Optional[str] = None) -> None:
-        """Delete a volume and its data; deleting a team volume requires
-        team admin.
+        """Delete a volume and its data; any team member can delete a team
+        volume.
 
         DELETE is retried on transient 5xx, so a 503 while the server is
-        still removing data can succeed on a later attempt.
+        still removing data can succeed on a later attempt. A ref to a
+        volume owned by another account raises APIError 404.
         """
         self._parent.client.request(
             "DELETE",
             _volume_path(name),
-            params=_name_params(self._parent.client, team_id),
+            params=_name_params(self._parent.client, team_id, name),
         )
 
     def grow(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
@@ -148,13 +181,34 @@ class Volumes:
         Grow-only: the server rejects a size at or below the volume's
         current effective size (its set size, or the 100 GiB base image
         size when unset). The new size applies to sandboxes created after
-        the change; running attachments keep their current size.
+        the change; running attachments keep their current size. A ref to a
+        volume owned by another account raises APIError 404.
         """
         response = self._parent.client.request(
             "PATCH",
             _volume_path(name),
             json={"size_gb": size_gb},
-            params=_name_params(self._parent.client, team_id),
+            params=_name_params(self._parent.client, team_id, name),
+        )
+        return Volume.model_validate(response)
+
+    def set_visibility(
+        self, name: str, visibility: VolumeVisibility, *, team_id: Optional[str] = None
+    ) -> Volume:
+        """Make a volume PUBLIC or PRIVATE.
+
+        A PUBLIC volume is mountable and syncable by any account through its
+        ``<namespace>/<name>`` ref. Making it PRIVATE stops new recipient
+        mounts, syncs and gets; running recipient sandboxes keep their mount.
+        Only the volume's owner can change it: its user for a personal
+        volume, any member of its team for a team volume. Repeating the
+        current value is a no-op.
+        """
+        response = self._parent.client.request(
+            "PATCH",
+            _volume_path(name),
+            json={"visibility": visibility.value},
+            params=_name_params(self._parent.client, team_id, name),
         )
         return Volume.model_validate(response)
 
@@ -165,8 +219,11 @@ class Volumes:
         removed ``force`` flag) raises instead of silently meaning
         ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
-        writable volume with that name (404), makes the volume read-only
-        (400), or has another sandbox's publish in flight (409). With
+        writable volume with that name or ref (404), makes the volume
+        read-only (400), or has another sandbox's publish in flight (409).
+        Publishing a volume owned by another account is rejected: 403 when
+        this sandbox has it attached, 404 otherwise. Only its owner can move
+        the shared head. With
         wait=True (the default), the returned checkpoint is the published
         head once DURABLE; on servers that report volume-merge status the
         wait also covers the checkpoint's merge, and a failed merge raises
@@ -196,7 +253,10 @@ class Volumes:
 
         Read-only and discard syncs re-attach without publishing; a read-write
         sync publishes this sandbox's unpublished writes first and waits for
-        their merge. With wait=True (the default), the returned sync is the
+        their merge. A volume owned by another account always syncs as
+        discard, whatever ``discard`` says: this sandbox's unpublished writes
+        are replaced by the volume's current head, and the stored sync
+        records that. With wait=True (the default), the returned sync is the
         final state once DONE; a FAILED sync raises VolumeSyncFailedError and
         an unfinished sync TimeoutError. The wait polls at a fixed fast
         cadence for its first seconds and then with exponential backoff,
@@ -239,6 +299,9 @@ class AsyncVolumes:
     Reaches the platform through the parent client's transport and waits for
     publishes with the parent's checkpoint waiter; it owns no transport,
     waiter, batcher, or lifecycle of its own.
+
+    Name and ref arguments are validated before any request: a ref has at most
+    one slash and no empty, ``.`` or ``..`` segment, else ValueError.
     """
 
     def __init__(self, parent: "AsyncSandboxClient"):
@@ -249,8 +312,9 @@ class AsyncVolumes:
     ) -> Volume:
         """Create an empty volume in the caller's personal scope or in a team.
 
-        ``size_gb`` is the requested capacity in whole GiB; omitted means
-        the base image size (100 GiB).
+        ``name`` is a bare name, unique in that scope; refs name existing
+        volumes and are not accepted here. ``size_gb`` is the requested
+        capacity in whole GiB; omitted means the base image size (100 GiB).
         """
         payload: dict[str, object] = {"name": name}
         resolved_team_id = _resolved_team_id(self._parent.client, team_id)
@@ -277,25 +341,33 @@ class AsyncVolumes:
         return VolumeListResponse.model_validate(response)
 
     async def get(self, name: str, *, team_id: Optional[str] = None) -> Volume:
-        """Get a volume by name in the caller's scope."""
+        """Get a volume by name in the caller's scope, or by ref.
+
+        A ``<namespace>/<name>`` ref to another account's PUBLIC volume
+        returns its summary only (name, namespace, size, visibility, head
+        size, created_at): that response has no volume id, owner fields, head
+        checkpoint or account storage. A ref to a missing or PRIVATE foreign
+        volume raises APIError 404.
+        """
         response = await self._parent.client.request(
             "GET",
             _volume_path(name),
-            params=_name_params(self._parent.client, team_id),
+            params=_name_params(self._parent.client, team_id, name),
         )
         return Volume.model_validate(response)
 
     async def delete(self, name: str, *, team_id: Optional[str] = None) -> None:
-        """Delete a volume and its data; deleting a team volume requires
-        team admin.
+        """Delete a volume and its data; any team member can delete a team
+        volume.
 
         DELETE is retried on transient 5xx, so a 503 while the server is
-        still removing data can succeed on a later attempt.
+        still removing data can succeed on a later attempt. A ref to a
+        volume owned by another account raises APIError 404.
         """
         await self._parent.client.request(
             "DELETE",
             _volume_path(name),
-            params=_name_params(self._parent.client, team_id),
+            params=_name_params(self._parent.client, team_id, name),
         )
 
     async def grow(self, name: str, size_gb: int, *, team_id: Optional[str] = None) -> Volume:
@@ -304,13 +376,34 @@ class AsyncVolumes:
         Grow-only: the server rejects a size at or below the volume's
         current effective size (its set size, or the 100 GiB base image
         size when unset). The new size applies to sandboxes created after
-        the change; running attachments keep their current size.
+        the change; running attachments keep their current size. A ref to a
+        volume owned by another account raises APIError 404.
         """
         response = await self._parent.client.request(
             "PATCH",
             _volume_path(name),
             json={"size_gb": size_gb},
-            params=_name_params(self._parent.client, team_id),
+            params=_name_params(self._parent.client, team_id, name),
+        )
+        return Volume.model_validate(response)
+
+    async def set_visibility(
+        self, name: str, visibility: VolumeVisibility, *, team_id: Optional[str] = None
+    ) -> Volume:
+        """Make a volume PUBLIC or PRIVATE.
+
+        A PUBLIC volume is mountable and syncable by any account through its
+        ``<namespace>/<name>`` ref. Making it PRIVATE stops new recipient
+        mounts, syncs and gets; running recipient sandboxes keep their mount.
+        Only the volume's owner can change it: its user for a personal
+        volume, any member of its team for a team volume. Repeating the
+        current value is a no-op.
+        """
+        response = await self._parent.client.request(
+            "PATCH",
+            _volume_path(name),
+            json={"visibility": visibility.value},
+            params=_name_params(self._parent.client, team_id, name),
         )
         return Volume.model_validate(response)
 
@@ -321,8 +414,11 @@ class AsyncVolumes:
         removed ``force`` flag) raises instead of silently meaning
         ``wait=False``.
         The server rejects the publish unless the sandbox is attached to a
-        writable volume with that name (404), makes the volume read-only
-        (400), or has another sandbox's publish in flight (409). With
+        writable volume with that name or ref (404), makes the volume
+        read-only (400), or has another sandbox's publish in flight (409).
+        Publishing a volume owned by another account is rejected: 403 when
+        this sandbox has it attached, 404 otherwise. Only its owner can move
+        the shared head. With
         wait=True (the default), the returned checkpoint is the published
         head once DURABLE; on servers that report volume-merge status the
         wait also covers the checkpoint's merge, and a failed merge raises
@@ -352,7 +448,10 @@ class AsyncVolumes:
 
         Read-only and discard syncs re-attach without publishing; a read-write
         sync publishes this sandbox's unpublished writes first and waits for
-        their merge. With wait=True (the default), the returned sync is the
+        their merge. A volume owned by another account always syncs as
+        discard, whatever ``discard`` says: this sandbox's unpublished writes
+        are replaced by the volume's current head, and the stored sync
+        records that. With wait=True (the default), the returned sync is the
         final state once DONE; a FAILED sync raises VolumeSyncFailedError and
         an unfinished sync TimeoutError. The wait polls at a fixed fast
         cadence for its first seconds and then with exponential backoff,

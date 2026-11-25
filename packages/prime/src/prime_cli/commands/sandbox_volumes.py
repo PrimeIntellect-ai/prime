@@ -23,6 +23,7 @@ from prime_sandboxes import (
     VolumeMount,
     VolumeSyncFailedError,
     VolumeSyncSupersededError,
+    VolumeVisibility,
 )
 from rich.markup import escape
 
@@ -43,11 +44,13 @@ console = get_console()
 
 
 VOLUMES_LIST_JSON_HELP = json_output_help(
-    ".volumes[] = {id, name, user_id?, team_id?, size_gb?, created_at, occupied_bytes}",
+    ".volumes[] = {id, name, namespace?, user_id?, team_id?, size_gb?, visibility, "
+    "created_at, occupied_bytes}",
     ".total = number",
     ".page = number",
     ".per_page = number",
     ".has_next = boolean",
+    ".volumes[].namespace? = string (owner slug; id form when unset, team-*, or a user id)",
     ".storage_used_bytes = number? (account-wide usage)",
     ".storage_limit_gb = number? (whole GiB)",
 )
@@ -66,6 +69,12 @@ _IMPORTER_TIMEOUT_MINUTES = -1
 _IMPORTER_IDLE_TIMEOUT_MINUTES = 30
 _IMPORTER_LABEL = "prime:volume-import"
 
+# Every command that names an existing volume accepts an owner-qualified ref.
+_VOLUME_REF_HELP = (
+    "Volume name, or <namespace>/<name> for another account's PUBLIC volume "
+    "(namespace: the owner's user or team slug, or its id form)"
+)
+
 
 def _invalid_volume_mount(spec: str, problem: str) -> None:
     console.print(f"[red]Error:[/red] Invalid volume '{spec}': {problem}")
@@ -73,10 +82,11 @@ def _invalid_volume_mount(spec: str, problem: str) -> None:
 
 
 def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
-    """Parse repeatable ``NAME:/mount/path[:ro|:rw]`` values into volume mounts.
+    """Parse repeatable ``[NAMESPACE/]NAME:/mount/path[:ro|:rw]`` values into mounts.
 
-    Only the syntax is split here; name, mount-path, and count rules are
-    enforced once by the API.
+    The name passes through untouched, so a ``<namespace>/<name>`` ref keeps
+    its slash. Only the syntax is split here; name, mount-path, and count
+    rules are enforced once by the API.
     """
     mounts: List[VolumeMount] = []
     for spec in specs:
@@ -92,10 +102,22 @@ def parse_volume_mount_specs(specs: List[str]) -> List[VolumeMount]:
     return mounts
 
 
+def _is_foreign(volume: Volume) -> bool:
+    """A foreign PUBLIC volume: its GET omits the id and the owner fields."""
+    return volume.id is None
+
+
+def _volume_ref(volume: Volume) -> Optional[str]:
+    """The owner-qualified ref, when the server reports its namespace."""
+    return f"{volume.namespace}/{volume.name}" if volume.namespace else None
+
+
 def _volume_scope(volume: Volume) -> str:
     if volume.team_id:
         return f"team: {volume.team_id}"
-    return "Personal"
+    if volume.user_id or not _is_foreign(volume):
+        return "Personal"
+    return "Other account"
 
 
 def _print_account_storage(used_bytes: int, limit_gb: Optional[int]) -> None:
@@ -111,9 +133,15 @@ def _volume_capacity(volume: Volume) -> str:
 
 
 def _print_volume(volume: Volume) -> None:
-    console.print(f"Name: [cyan]{escape(volume.name)}[/cyan]")
-    console.print(f"ID: {escape(volume.id)}")
+    ref = _volume_ref(volume)
+    foreign = _is_foreign(volume)
+    # A foreign volume has no id, so its ref is the only way to name it.
+    console.print(f"Name: [cyan]{escape(ref if foreign and ref else volume.name)}[/cyan]")
+    console.print(f"ID: {escape(volume.id) if volume.id else '-'}")
     console.print(f"Scope: {_volume_scope(volume)}")
+    if ref and not foreign:
+        console.print(f"Ref: {escape(ref)}")
+    console.print(f"Visibility: {volume.visibility.value}")
     # None until the first publish reaches DURABLE, then the newest one.
     head = volume.head_checkpoint_id
     console.print(f"Head checkpoint: {escape(head) if head else 'none (never published)'}")
@@ -450,6 +478,7 @@ def list_volumes(
         [
             ("Name", "cyan"),
             ("Scope", "white"),
+            ("Visibility", "white"),
             ("Size", "white"),
             ("Capacity", "white"),
             ("Created", "white"),
@@ -460,17 +489,18 @@ def list_volumes(
         table.add_row(
             escape(volume.name),
             _volume_scope(volume),
+            volume.visibility.value,
             format_file_size(volume.occupied_bytes),
             _volume_capacity(volume),
             human_age(volume.created_at),
-            escape(volume.id),
+            escape(volume.id) if volume.id else "-",
         )
     console.print(table)
 
 
 @app.command(no_args_is_help=True)
 def get(
-    name: str = typer.Argument(..., help="Volume name"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
@@ -487,6 +517,10 @@ def get(
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
@@ -496,7 +530,7 @@ def get(
 
 @app.command()
 def delete(
-    name: str = typer.Argument(..., help="Volume name"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     team_id: Optional[str] = typer.Option(
         None, help="Team ID (uses config team_id if not specified)"
     ),
@@ -518,6 +552,10 @@ def delete(
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
@@ -527,7 +565,7 @@ def delete(
 
 @app.command()
 def grow(
-    name: str = typer.Argument(..., help="Volume name"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     size_gb: int = typer.Option(
         ..., "--size-gb", help="New capacity in GiB; must be larger than the current size"
     ),
@@ -547,6 +585,10 @@ def grow(
     except APIError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         console.print_exception(show_locals=False)
@@ -555,9 +597,64 @@ def grow(
     _print_volume(volume)
 
 
+def _set_visibility(name: str, visibility: VolumeVisibility, team_id: Optional[str]) -> None:
+    try:
+        volume = _sandbox_client().volumes.set_visibility(name, visibility, team_id=team_id)
+    except UnauthorizedError as e:
+        console.print(f"[red]Unauthorized:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except PaymentRequiredError as e:
+        console.print(f"[red]Payment Required:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except APIError as e:
+        # 404 for a volume outside the caller's scopes, which includes any
+        # volume owned by another account.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        console.print_exception(show_locals=False)
+        raise typer.Exit(1)
+    console.print(
+        f"[green]✓[/green] Volume {escape(volume.name)} is now {volume.visibility.value.lower()}"
+    )
+    _print_volume(volume)
+
+
+@app.command("set-visibility")
+def set_visibility(
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
+    public: bool = typer.Option(
+        False, "--public", help="Let any account mount and sync the volume through its ref"
+    ),
+    private: bool = typer.Option(
+        False, "--private", help="Stop new recipient mounts, syncs and gets of the volume"
+    ),
+    team_id: Optional[str] = typer.Option(
+        None, help="Team ID (uses config team_id if not specified)"
+    ),
+) -> None:
+    """Set a volume's visibility: exactly one of --public or --private.
+
+    A public volume mounts and syncs from any account through its ref;
+    recipients read the published head, cannot publish, and their sync always
+    discards local writes. Making it private stops new recipient mounts, syncs
+    and gets, while running recipient sandboxes keep their attachment and what
+    they already read. Only the volume's owner can change the visibility.
+    """
+    if public == private:
+        console.print("[red]Error:[/red] exactly one of --public or --private is required")
+        raise typer.Exit(1)
+    _set_visibility(name, VolumeVisibility.PUBLIC if public else VolumeVisibility.PRIVATE, team_id)
+
+
 @app.command()
 def publish(
-    name: str = typer.Argument(..., help="Volume name to publish"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     sandbox_id: str = typer.Option(
         ..., "--sandbox", help="ID of the sandbox that publishes the volume"
     ),
@@ -612,7 +709,8 @@ def publish(
             )
         raise typer.Exit(1)
     except ValueError as e:
-        # Invalid --wait-timeout, same handling as `sandbox fork`.
+        # Invalid --wait-timeout or a malformed volume name or ref; both are
+        # rejected before the request.
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
@@ -655,18 +753,26 @@ def _exit_sync_failed(failure: Optional[str]) -> NoReturn:
 
 @app.command()
 def sync(
-    name: str = typer.Argument(..., help="Volume name to sync"),
+    name: str = typer.Argument(..., help=_VOLUME_REF_HELP),
     sandbox_id: str = typer.Option(
         ..., "--sandbox", help="ID of the sandbox whose volume attachment is synced"
     ),
     discard: bool = typer.Option(
         False,
         "--discard",
-        help="Drop this sandbox's unpublished volume writes instead of publishing them",
+        help=(
+            "Drop this sandbox's unpublished volume writes instead of publishing them "
+            "(always the case for a volume owned by another account)"
+        ),
     ),
     no_wait: bool = typer.Option(False, "--no-wait", help="Do not wait for the sync to finish"),
 ) -> None:
-    """Sync a sandbox's attached volume to the volume's committed head."""
+    """Sync a sandbox's attached volume to the volume's committed head.
+
+    A volume owned by another account always syncs as discard, whatever
+    --discard says: this sandbox's unpublished writes are replaced by the
+    volume's current head and are never published into the owner's volume.
+    """
     try:
         result = _sandbox_client().volumes.sync(sandbox_id, name, discard=discard, wait=not no_wait)
     except UnauthorizedError as e:
@@ -689,6 +795,10 @@ def sync(
     except VolumeSyncSupersededError as e:
         console.print(f"[red]Error:[/red] {escape(str(e))}")
         console.print("Run this command again to sync to the current head.")
+        raise typer.Exit(1)
+    except ValueError as e:
+        # A malformed volume name or ref, rejected before any request.
+        console.print(f"[red]Error:[/red] {escape(str(e))}")
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")

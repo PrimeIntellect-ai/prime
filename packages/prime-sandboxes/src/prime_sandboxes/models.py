@@ -606,9 +606,21 @@ class BatchSandboxStatusResponse(BaseModel):
     errors: List[SandboxStatusLookupError]
 
 
+class VolumeVisibility(str, Enum):
+    """Who can mount a volume: any account (PUBLIC) or its owner scope only."""
+
+    PRIVATE = "PRIVATE"
+    PUBLIC = "PUBLIC"
+
+
 class VolumeMount(BaseModel):
-    """One volume to mount in the sandbox, resolved by name in the
-    caller's scope (team scope when team_id is set)."""
+    """One volume to mount in the sandbox.
+
+    A bare name resolves in the sandbox's own scope (team scope when team_id
+    is set). A ``<namespace>/<name>`` ref (a user id or slug, a team slug, or
+    ``team-<teamId>``) names a PUBLIC volume owned by another account;
+    recipient writes stay in the sandbox and cannot be published.
+    """
 
     name: str
     mount_path: str
@@ -616,10 +628,22 @@ class VolumeMount(BaseModel):
 
 
 class Volume(BaseModel):
-    """A sandbox volume, owned by exactly one of user/team scope."""
+    """A sandbox volume, owned by exactly one of user/team scope.
 
-    id: str
+    A foreign PUBLIC volume read by ref carries only name, namespace,
+    visibility, occupied_bytes, size_gb and created_at: it has no id, owner
+    fields or head checkpoint.
+    """
+
+    # None only for a foreign PUBLIC volume, whose GET never exposes ids.
+    id: Optional[str] = None
     name: str
+    # Display namespace of the owner: the user or team slug, or the id form
+    # (the user id, or ``team-<teamId>``) when the owner has no slug, its slug
+    # starts with ``team-``, or its slug is an existing user id, which would
+    # resolve to that user. ``namespace/name`` is the ref to share; refs accept
+    # both forms. Absent on responses from servers older than the field.
+    namespace: Optional[str] = None
     user_id: Optional[str] = None
     team_id: Optional[str] = None
     # Capacity in whole GiB (100 GiB unless set at create or grown via
@@ -628,6 +652,10 @@ class Volume(BaseModel):
     # Newest durable publish, or null for a volume that was never published.
     # Older responses may omit the field entirely.
     head_checkpoint_id: Optional[str] = None
+    # PUBLIC volumes mount from any account by ref; PRIVATE ones only in
+    # their owner scope. Older responses omit the field, which then reads as
+    # PRIVATE (the server default).
+    visibility: VolumeVisibility = VolumeVisibility.PRIVATE
     created_at: datetime
     # Occupied bytes of the latest published version (its checkpoint's
     # occupied_bytes); 0 until the first publish and for grandfathered

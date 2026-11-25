@@ -20,6 +20,7 @@ from prime_sandboxes import (
     VolumeSync,
     VolumeSyncFailedError,
     VolumeSyncSupersededError,
+    VolumeVisibility,
 )
 
 
@@ -260,13 +261,101 @@ def test_volume_client_grow_uses_configured_team_by_default():
     assert captured["params"] == {"team_id": "team-configured"}
 
 
-def test_volume_client_grow_quotes_names_outside_the_valid_character_set():
+def test_volume_client_set_visibility_sends_patch_with_the_enum_value():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(visibility="PUBLIC"), captured, team_id="team-configured")
+
+    volume = volumes.set_visibility("dataset", VolumeVisibility.PUBLIC, team_id="team-explicit")
+
+    assert captured == {
+        "method": "PATCH",
+        "path": "/sandbox/volumes/dataset",
+        "json": {"visibility": "PUBLIC"},
+        "params": {"team_id": "team-explicit"},
+    }
+    assert volume.visibility is VolumeVisibility.PUBLIC
+
+
+def test_volume_client_set_visibility_to_private_uses_the_configured_team():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(visibility="PRIVATE"), captured, team_id="team-configured")
+
+    volume = volumes.set_visibility("dataset", VolumeVisibility.PRIVATE)
+
+    assert captured["json"] == {"visibility": "PRIVATE"}
+    assert captured["params"] == {"team_id": "team-configured"}
+    assert volume.visibility is VolumeVisibility.PRIVATE
+
+
+def test_volume_client_set_visibility_personal_scope_omits_team_id():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(visibility="PUBLIC"), captured)
+
+    volumes.set_visibility("dataset", VolumeVisibility.PUBLIC)
+
+    assert captured["params"] == {}
+
+
+def test_volume_client_ref_omits_team_id_and_keeps_its_slash():
+    # A ref names its own namespace; a team_id beside it would be ambiguous.
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(visibility="PUBLIC"), captured, team_id="team-configured")
+
+    volumes.get("alice/data")
+
+    assert captured["path"] == "/sandbox/volumes/alice/data"
+    assert captured["params"] == {}
+
+    volumes.set_visibility("alice/data", VolumeVisibility.PUBLIC, team_id="team-explicit")
+
+    assert captured["path"] == "/sandbox/volumes/alice/data"
+    assert captured["json"] == {"visibility": "PUBLIC"}
+    assert captured["params"] == {}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", ".", "..", "a/.", "a/..", "../a", "./a", "a/b/c", "/a", "a/"],
+)
+def test_volume_client_rejects_names_and_refs_that_could_retarget_the_route(name: str):
     captured: dict[str, Any] = {}
     volumes = _volumes(_volume_response(), captured)
 
-    volumes.grow("a/b", 512)
+    with pytest.raises(ValueError):
+        volumes.get(name)
+    with pytest.raises(ValueError):
+        volumes.delete(name)
 
-    assert captured["path"] == "/sandbox/volumes/a%2Fb"
+    # Nothing reached the transport: the path would have been rewritten by
+    # the HTTP client's dot-segment normalization.
+    assert captured == {}
+
+
+def test_volume_client_publish_and_sync_reject_unroutable_refs():
+    client = RoutingAPIClient(lambda method, path, json: {})
+    volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        volumes.publish("sb-1", "../../sandbox/sb-2", wait=False)
+    with pytest.raises(ValueError):
+        volumes.sync("sb-1", "a/b/c", discard=True, wait=False)
+
+    assert client.calls == []
+
+
+def test_volume_client_paths_keep_ref_slashes_and_quote_everything_else():
+    captured: dict[str, Any] = {}
+    volumes = _volumes(_volume_response(), captured)
+
+    # A ref's slash is route data, so it is sent literally.
+    volumes.get("alice/data")
+
+    assert captured["path"] == "/sandbox/volumes/alice/data"
+
+    # Every other reserved character is still quoted.
+    volumes.delete("alice/data?x=1")
+
+    assert captured["path"] == "/sandbox/volumes/alice/data%3Fx%3D1"
 
 
 def test_async_volume_namespace_is_cached_on_the_parent_client():
@@ -375,6 +464,44 @@ def test_async_volume_personal_scope_omits_team_id(monkeypatch: pytest.MonkeyPat
     asyncio.run(scenario())
 
 
+def test_async_volume_client_set_visibility_wire_contract(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("PRIME_TEAM_ID", "team-configured")
+    captured: dict[str, Any] = {}
+
+    async def scenario() -> None:
+        client = AsyncSandboxClient(api_key="test-key")
+
+        async def request(
+            method: str,
+            path: str,
+            json: dict[str, Any] | None = None,
+            params: dict[str, Any] | None = None,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            captured.update(method=method, path=path, json=json, params=params)
+            return _volume_response(visibility="PUBLIC")
+
+        client.client.request = request
+
+        volume = await client.volumes.set_visibility("dataset", VolumeVisibility.PUBLIC)
+        assert volume.visibility is VolumeVisibility.PUBLIC
+        assert captured == {
+            "method": "PATCH",
+            "path": "/sandbox/volumes/dataset",
+            "json": {"visibility": "PUBLIC"},
+            "params": {"team_id": "team-configured"},
+        }
+
+        await client.volumes.set_visibility("alice/data", VolumeVisibility.PRIVATE)
+        assert captured["path"] == "/sandbox/volumes/alice/data"
+        assert captured["json"] == {"visibility": "PRIVATE"}
+        assert captured["params"] == {}
+
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_volume_delete_swallows_real_204_response():
     from prime_sandboxes.core.client import APIClient as CoreAPIClient
 
@@ -411,13 +538,9 @@ def test_volume_client_quotes_names_outside_the_valid_character_set():
     captured: dict[str, Any] = {}
     volumes = _volumes(_volume_response(), captured)
 
-    volumes.get("a/b?c=d")
+    volumes.get("a b?c=d")
 
-    assert captured["path"] == "/sandbox/volumes/a%2Fb%3Fc%3Dd"
-
-    volumes.delete("a/b")
-
-    assert captured["path"] == "/sandbox/volumes/a%2Fb"
+    assert captured["path"] == "/sandbox/volumes/a%20b%3Fc%3Dd"
 
 
 def test_create_sandbox_request_omits_unset_volumes():
@@ -434,15 +557,16 @@ def test_create_sandbox_request_dumps_volume_mounts_in_snake_case():
         docker_image="ubuntu:22.04",
         volumes=[
             VolumeMount(name="dataset", mount_path="/data"),
-            VolumeMount(name="logs", mount_path="/logs", read_only=True),
+            VolumeMount(name="alice/logs", mount_path="/logs", read_only=True),
         ],
     )
 
     payload = request.model_dump(by_alias=False, exclude_none=True)
 
+    # A ref keeps its slash through the create payload.
     assert payload["volumes"] == [
         {"name": "dataset", "mount_path": "/data", "read_only": False},
-        {"name": "logs", "mount_path": "/logs", "read_only": True},
+        {"name": "alice/logs", "mount_path": "/logs", "read_only": True},
     ]
 
 
@@ -550,13 +674,17 @@ def test_publish_sends_exact_post_path_and_body():
     assert checkpoint.state == "PENDING"
 
 
-def test_publish_quotes_name_in_path():
+def test_publish_keeps_ref_slash_in_path():
     client = RoutingAPIClient(lambda method, path, json: _checkpoint_response())
     volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
 
-    volumes.publish("sb-1", "a/b", wait=False)
+    volumes.publish("sb-1", "alice/data", wait=False)
+    volumes.publish("sb-1", "a?b", wait=False)
 
-    assert client.calls == [("POST", "/sandbox/sb-1/volumes/a%2Fb/publish", {})]
+    assert client.calls == [
+        ("POST", "/sandbox/sb-1/volumes/alice/data/publish", {}),
+        ("POST", "/sandbox/sb-1/volumes/a%3Fb/publish", {}),
+    ]
 
 
 def test_publish_wait_true_polls_until_durable(waiter_clock):
@@ -749,6 +877,57 @@ def test_volume_model_parses_size_gb():
     assert VolumeListResponse.model_validate(_volume_list_response()).volumes[0].size_gb is None
 
 
+def test_volume_model_parses_namespace():
+    # The response shows the owner's slug, or the id form when the owner has
+    # no slug, its slug starts with "team-", or its slug is an existing user id.
+    assert Volume.model_validate(_volume_response(namespace="andrew")).namespace == "andrew"
+    assert (
+        Volume.model_validate(_volume_response(namespace="team-team-1")).namespace == "team-team-1"
+    )
+
+    # Older responses omit the field entirely.
+    assert Volume.model_validate(_volume_response()).namespace is None
+
+
+def test_volume_model_tolerates_a_foreign_public_volume():
+    # P7 GET shape: no id, owner fields, head checkpoint or account storage.
+    volume = Volume.model_validate(
+        {
+            "name": "data",
+            "namespace": "alice",
+            "visibility": "PUBLIC",
+            "occupied_bytes": 2048,
+            "size_gb": 512,
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    assert volume.id is None
+    assert volume.name == "data"
+    assert volume.namespace == "alice"
+    assert volume.visibility is VolumeVisibility.PUBLIC
+    assert volume.size_gb == 512
+    assert volume.occupied_bytes == 2048
+    assert volume.user_id is None and volume.team_id is None
+    assert volume.head_checkpoint_id is None
+    assert volume.account_storage_used_bytes is None
+
+
+def test_volume_model_parses_visibility():
+    assert (
+        Volume.model_validate(_volume_response(visibility="PUBLIC")).visibility
+        is VolumeVisibility.PUBLIC
+    )
+    assert (
+        Volume.model_validate(_volume_response(visibility="PRIVATE")).visibility
+        is VolumeVisibility.PRIVATE
+    )
+
+    # Older responses omit the field; the server default is PRIVATE.
+    assert Volume.model_validate(_volume_response()).visibility is VolumeVisibility.PRIVATE
+    listed = VolumeListResponse.model_validate(_volume_list_response())
+    assert listed.volumes[0].visibility is VolumeVisibility.PRIVATE
+
+
 def test_volume_model_parses_storage_fields():
     volume = Volume.model_validate(
         _volume_response(
@@ -858,13 +1037,15 @@ def test_sync_sends_exact_post_path_and_body():
     assert sync.state == "DONE"
 
 
-def test_sync_discard_true_quotes_name_in_path():
+def test_sync_keeps_ref_slash_in_path():
     client = RoutingAPIClient(lambda method, path, json: _sync("DONE"))
     volumes = SandboxClient(client).volumes  # type: ignore[arg-type]
 
-    volumes.sync("sb-1", "a/b", discard=True, wait=False)
+    volumes.sync("sb-1", "alice/data", discard=True, wait=False)
 
-    assert client.calls == [("POST", "/sandbox/sb-1/volumes/a%2Fb/sync", {"discard": True})]
+    assert client.calls == [
+        ("POST", "/sandbox/sb-1/volumes/alice/data/sync", {"discard": True}),
+    ]
 
 
 def test_sync_wait_true_polls_until_done(sync_waiter_clock):

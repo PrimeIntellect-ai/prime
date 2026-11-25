@@ -1091,7 +1091,10 @@ def checkpoint_restore(
     volume: Optional[List[str]] = typer.Option(
         None,
         "--volume",
-        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
+        help=(
+            "Attach a volume as NAME:/mount/path[:ro|:rw], where NAME may be NAMESPACE/NAME "
+            "for another account's public volume. Can be specified multiple times."
+        ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
@@ -1157,7 +1160,10 @@ def fork(
     volume: Optional[List[str]] = typer.Option(
         None,
         "--volume",
-        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
+        help=(
+            "Attach a volume as NAME:/mount/path[:ro|:rw], where NAME may be NAMESPACE/NAME "
+            "for another account's public volume. Can be specified multiple times."
+        ),
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
@@ -1374,7 +1380,10 @@ def create(
     volume: Optional[List[str]] = typer.Option(
         None,
         "--volume",
-        help="Attach a volume as NAME:/mount/path[:ro|:rw]. Can be specified multiple times.",
+        help=(
+            "Attach a volume as NAME:/mount/path[:ro|:rw], where NAME may be NAMESPACE/NAME "
+            "for another account's public volume. Can be specified multiple times."
+        ),
     ),
     gang: int = typer.Option(
         1,

@@ -17,6 +17,7 @@ from prime_sandboxes import (
     VolumeSync,
     VolumeSyncFailedError,
     VolumeSyncSupersededError,
+    VolumeVisibility,
 )
 from typer.testing import CliRunner
 
@@ -93,6 +94,7 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
                 id="cvol-2",
                 name="shared",
                 team_id="team-1",
+                visibility="PUBLIC",
                 occupied_bytes=512 * 1024**2,
                 created_at=created,
             ),
@@ -124,6 +126,9 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
     assert "Capacity" in output
     assert "512 GiB" in output
     assert "Account storage: 2.0 GB used of 1024 GiB limit" in output
+    assert "Visibility" in output
+    # A server without the field reads as PRIVATE, the server default.
+    assert "PRIVATE" in output and "PUBLIC" in output
     assert captured["team_id"] == "team-1"
     assert captured == {"team_id": "team-1", "page": 1, "per_page": 50}
 
@@ -141,6 +146,7 @@ def test_volume_list_table_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: A
         512 * 1024**2,
     ]
     assert [v["size_gb"] for v in payload["volumes"]] == [512, None]
+    assert [v["visibility"] for v in payload["volumes"]] == ["PRIVATE", "PUBLIC"]
     assert payload["storage_used_bytes"] == 2 * 1024**3
     assert payload["storage_limit_gb"] == 1024
 
@@ -202,8 +208,11 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
         return Volume(
             id="cvol-1",
             name="data",
+            # A response namespace is the owner's slug, not the user id.
+            namespace="andrew",
             user_id="user-1",
             size_gb=512,
+            visibility="PUBLIC",
             head_checkpoint_id="chk-9",
             occupied_bytes=1536 * 1024**2,
             account_storage_used_bytes=2 * 1024**3,
@@ -219,10 +228,69 @@ def test_volume_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     output = strip_ansi(result.output)
     assert "data" in output and "cvol-1" in output and "Personal" in output
     assert "Head checkpoint: chk-9" in output
+    assert "Visibility: PUBLIC" in output
+    assert "Scope: Personal" in output
+    assert "Ref: andrew/data" in output
     assert "Capacity: 512 GiB" in output
     assert "Size: 1.5 GB" in output
     assert "Account storage: 2.0 GB used of 1024 GiB limit" in output
     assert captured["args"] == ("data", "team-1")
+
+
+def test_volume_get_foreign_public_volume_shows_its_ref(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_get(self: Any, name: str, team_id: Any = None) -> Volume:
+        captured["args"] = (name, team_id)
+        # P7: a foreign GET carries no id and no owner fields.
+        return Volume(
+            name="data",
+            namespace="alice",
+            visibility="PUBLIC",
+            occupied_bytes=1536 * 1024**2,
+            size_gb=512,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.get", fake_get)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "get", "alice/data"])
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert "Name: alice/data" in output
+    assert "Scope: Other account" in output
+    assert "Scope: Personal" not in output
+    assert "ID: -" in output
+    assert "Visibility: PUBLIC" in output
+    assert "Capacity: 512 GiB" in output
+    assert "Size: 1.5 GB" in output
+    assert "Account storage" not in output
+    assert captured["args"] == ("alice/data", None)
+
+
+def test_volume_get_rejects_a_ref_that_could_retarget_the_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    # Exercises the real SDK path builder through the CLI: an unchecked
+    # "../../sandbox/<id>" would be normalized into DELETE/GET /sandbox/<id>.
+    _configure_cli(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "get", "../../sandbox/sbx-1"])
+
+    assert result.exit_code == 1, result.output
+    output = strip_ansi(result.output)
+    assert "invalid volume name or ref" in output
+    assert "Unexpected error" not in output
+
+    # -y skips the confirmation; the DELETE never leaves the process.
+    deleted = runner.invoke(app, ["sandbox", "volumes", "delete", "../../sandbox/sbx-1", "-y"])
+
+    assert deleted.exit_code == 1, deleted.output
+    assert "invalid volume name or ref" in strip_ansi(deleted.output)
 
 
 def test_volume_delete_and_in_use_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
@@ -305,6 +373,114 @@ def test_volume_grow_requires_size_option(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     assert result.exit_code == 2, result.output
     assert "--size-gb" in strip_ansi(result.output)
+
+
+def _fake_set_visibility(captured: dict[str, Any]) -> Any:
+    def fake_set_visibility(self: Any, name: str, requested: Any, *, team_id: Any = None) -> Volume:
+        captured["args"] = (name, requested, team_id)
+        return Volume(
+            id="cvol-1",
+            name=name,
+            team_id="team-1",
+            visibility=requested,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    return fake_set_visibility
+
+
+def test_volume_set_visibility_public_prints_the_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.set_visibility", _fake_set_visibility(captured)
+    )
+
+    result = runner.invoke(
+        app, ["sandbox", "volumes", "set-visibility", "data", "--public", "--team-id", "team-1"]
+    )
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    assert captured["args"] == ("data", VolumeVisibility.PUBLIC, "team-1")
+    assert "Volume data is now public" in output
+    assert "Visibility: PUBLIC" in output
+    assert "cvol-1" in output
+
+
+def test_volume_set_visibility_private_sends_a_ref_and_prints_the_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.set_visibility", _fake_set_visibility(captured)
+    )
+
+    result = runner.invoke(app, ["sandbox", "volumes", "set-visibility", "alice/data", "--private"])
+
+    assert result.exit_code == 0, result.output
+    output = strip_ansi(result.output)
+    # The ref reaches the SDK untouched; the server resolves its namespace.
+    assert captured["args"] == ("alice/data", VolumeVisibility.PRIVATE, None)
+    assert "Volume alice/data is now private" in output
+    assert "Visibility: PRIVATE" in output
+
+
+def test_volume_set_visibility_requires_exactly_one_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+    calls: list[Any] = []
+    monkeypatch.setattr(
+        "prime_sandboxes.volumes.Volumes.set_visibility",
+        lambda self, name, visibility, team_id=None: calls.append(name),
+    )
+
+    for flags in ([], ["--public", "--private"]):
+        result = runner.invoke(app, ["sandbox", "volumes", "set-visibility", "data", *flags])
+        assert result.exit_code == 1, result.output
+        output = strip_ansi(result.output)
+        assert "exactly one of --public or --private is required" in output
+        assert "Unexpected error" not in output
+
+    # Neither request reached the SDK.
+    assert calls == []
+
+
+def test_volume_set_visibility_surfaces_a_foreign_ref_404(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+
+    def not_found(self: Any, name: str, visibility: Any, *, team_id: Any = None) -> Volume:
+        raise APIError("HTTP 404: Volume alice/data does not exist")
+
+    monkeypatch.setattr("prime_sandboxes.volumes.Volumes.set_visibility", not_found)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "set-visibility", "alice/data", "--public"])
+
+    assert result.exit_code == 1, result.output
+    output = strip_ansi(result.output)
+    assert "HTTP 404" in output
+    assert "Unexpected error" not in output
+
+
+def test_volume_sync_help_names_the_forced_discard_for_foreign_volumes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _configure_cli(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["sandbox", "volumes", "sync", "--help"])
+
+    assert result.exit_code == 0, result.output
+    output = " ".join(strip_ansi(result.output).split())
+    # P10: a recipient sync always discards, whatever --discard says.
+    assert "always syncs as discard" in output
+    assert "never published into the owner's volume" in output
+    assert "<namespace>/<name>" in output
 
 
 # --- D2: prime sandbox volumes publish ---
@@ -559,6 +735,8 @@ def test_sandbox_create_volume_option(monkeypatch: pytest.MonkeyPatch, tmp_path:
             "ro-data:/mnt:ro",
             "--volume",
             "rw-data:/work:rw",
+            "--volume",
+            "alice/shared:/shared:ro",
             "--yes",
         ],
     )
@@ -566,10 +744,12 @@ def test_sandbox_create_volume_option(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert result.exit_code == 0, result.output
     output = strip_ansi(result.output)
     assert "Volumes: data:/data, ro-data:/mnt (ro), rw-data:/work" in output
+    # A ref keeps its slash and reaches the create payload untouched.
     assert captured["request"].volumes == [
         VolumeMount(name="data", mount_path="/data", read_only=False),
         VolumeMount(name="ro-data", mount_path="/mnt", read_only=True),
         VolumeMount(name="rw-data", mount_path="/work", read_only=False),
+        VolumeMount(name="alice/shared", mount_path="/shared", read_only=True),
     ]
 
 

@@ -22,7 +22,7 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -60,13 +60,13 @@ jobs:
 
       - name: Set up Python
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.11'
 
       - name: Install uv
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Build package
         if: steps.check_tag.outputs.exists != 'true' || inputs.force_release == 'true'

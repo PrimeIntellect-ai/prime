@@ -19,9 +19,9 @@ def test_train_help_promotes_config_run_path() -> None:
     result = runner.invoke(app, ["train", "--help"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
-    assert "prime train [OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]..." in result.output
+    assert "prime train [OPTIONS] CONFIG_PATH... [ARGS]... | COMMAND [ARGS]..." in result.output
     assert "Launch and manage Hosted Training runs." in result.output
-    assert "Path to a TOML config file to launch as a" in result.output
+    assert "TOML config files to launch as" in result.output
     assert "logs" in result.output
     assert "request" in result.output
     # Retired with shared LoRA training: both only knew the LoRA schema.
@@ -842,6 +842,38 @@ def _capture_fft_dispatch(monkeypatch) -> list[dict[str, Any]]:
 
     monkeypatch.setattr("prime_cli.api.training.HostedTrainingClient.create_run", fake_create_run)
     return captured
+
+
+def test_train_dispatches_a_merged_config_stack(monkeypatch, tmp_path: Path) -> None:
+    """A prime-rl `@ a.toml @ b.toml` stack pastes as-is and ships merged,
+    with each file's env files resolved next to it."""
+    captured = _capture_fft_dispatch(monkeypatch)
+    (tmp_path / "model").mkdir()
+    (tmp_path / "data").mkdir()
+    model = tmp_path / "model" / "rl.toml"
+    model.write_text('env_files = ["secrets.env"]\n' + _FFT_BODY)
+    (tmp_path / "model" / "secrets.env").write_text("WANDB_API_KEY=wandb-key\n")
+    data = tmp_path / "data" / "swe.toml"
+    data.write_text("[deployment]\nnum_infer_gpus = 2\n[orchestrator]\nbatch_size = 8\n")
+
+    result = runner.invoke(
+        app, ["train", "@", str(model), "@", str(data), "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0]["config"] == {
+        "model": {"name": "Qwen/Qwen3-0.6B"},
+        "deployment": {"num_train_gpus": 1, "num_infer_gpus": 2},
+        "orchestrator": {"batch_size": 8},
+    }
+    assert captured[0]["wandbApiKey"] == "wandb-key"
+
+    sft = tmp_path / "sft.toml"
+    sft.write_text('mode = "sft"\n')
+    result = runner.invoke(app, ["train", str(model), str(sft), "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "conflicting modes" in result.output
+    assert len(captured) == 1
 
 
 def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:

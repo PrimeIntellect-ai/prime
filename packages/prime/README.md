@@ -119,6 +119,10 @@ prime train models
 # ("rl", "sft" or "pretrain") picks the run kind
 prime train rl.toml
 
+# Layer configs as prime-rl does: later files win, tables merge key by key,
+# arrays replace. prime-rl's `@ a.toml @ b.toml` form works as-is.
+prime train @ rl.toml @ gpu/h200.toml @ data/swe.toml
+
 # Inspect and manage Hosted Training runs
 prime train list              # Your runs
 prime train list --all-users  # Include teammates' runs
@@ -476,6 +480,7 @@ by Platform, including its default image:
 ```bash
 prime train validate rl.toml
 prime train validate rl.toml --ref your-branch
+prime train validate @ rl.toml @ gpu/h200.toml @ data/swe.toml
 prime train validate sft.toml --artifact-out normalized.json
 ```
 

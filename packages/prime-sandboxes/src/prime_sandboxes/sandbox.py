@@ -2080,6 +2080,39 @@ def _error_with_hint(error: BaseException, hint: str) -> BaseException:
     return error
 
 
+_LIFECYCLE_FAILURES = {"PAUSED": "PAUSE_FAILED", "RUNNING": "RESUME_FAILED"}
+
+
+def _is_rate_limited(error: Exception) -> bool:
+    return isinstance(error, APIError) and str(error).startswith("HTTP 429")
+
+
+def _reached_lifecycle_status(sandbox_id: str, sandbox: SandboxStatusSnapshot, status: str) -> bool:
+    """Whether a pause or resume settled at ``status``; raises when it never will."""
+    if sandbox.status == status:
+        return True
+    if sandbox.error_type == _LIFECYCLE_FAILURES[status]:
+        raise RuntimeError(
+            f"Sandbox {sandbox_id} did not reach {status} ({sandbox.error_type}): "
+            f"{sandbox.error_message or 'no error details'}"
+        )
+    if sandbox.status in ("ERROR", "TERMINATED", "TIMEOUT"):
+        _raise_not_running_error(
+            sandbox_id,
+            {
+                "status": sandbox.status,
+                "error_type": sandbox.error_type,
+                "error_message": sandbox.error_message,
+            },
+        )
+    return False
+
+
+def _check_wait_timeout(timeout_seconds: float) -> None:
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be finite and greater than zero")
+
+
 def _raise_not_running_error(
     sandbox_id: str,
     ctx: dict,
@@ -2782,7 +2815,8 @@ class SandboxClient:
         return Sandbox.model_validate(response)
 
     def pause(self, sandbox_id: str) -> PausedSandbox:
-        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously.
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously
+        (``wait_for_pause`` waits for it).
 
         The result carries the pause's ``checkpoint_id``: ``resume`` continues the
         sandbox, and ``create`` with that checkpoint and ``restore_memory=True`` forks it."""
@@ -2790,9 +2824,57 @@ class SandboxClient:
         return PausedSandbox.model_validate(response)
 
     def resume(self, sandbox_id: str) -> Sandbox:
-        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
+        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously
+        (``wait_for_resume`` waits for it)."""
         response = self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
+
+    def wait_for_pause(self, sandbox_id: str, timeout_seconds: float = 300) -> None:
+        """Wait until a requested pause leaves the sandbox PAUSED.
+
+        Concurrent waits share batched status lookups of up to 100 sandboxes and
+        back off like creation waits (1 s, growing to 10 s, jittered), so thousands
+        of waits stay near the platform's status rate limit; a rate-limited lookup
+        is retried until ``timeout_seconds``. Raises RuntimeError when the pause
+        failed (the sandbox keeps running), SandboxNotRunningError when the sandbox stopped, and
+        TimeoutError on expiry."""
+        self._wait_for_lifecycle_status(sandbox_id, "PAUSED", timeout_seconds)
+
+    def wait_for_resume(self, sandbox_id: str, timeout_seconds: float = 300) -> None:
+        """Wait until a requested resume leaves the sandbox RUNNING.
+
+        Concurrent waits share batched status lookups of up to 100 sandboxes and
+        back off like creation waits (1 s, growing to 10 s, jittered), so thousands
+        of waits stay near the platform's status rate limit; a rate-limited lookup
+        is retried until ``timeout_seconds``. Raises RuntimeError when the resume
+        failed (the sandbox stays paused), SandboxNotRunningError when the sandbox stopped, and
+        TimeoutError on expiry."""
+        self._wait_for_lifecycle_status(sandbox_id, "RUNNING", timeout_seconds)
+
+    def _wait_for_lifecycle_status(
+        self, sandbox_id: str, status: str, timeout_seconds: float
+    ) -> None:
+        _check_wait_timeout(timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Sandbox {sandbox_id} did not reach {status} within {timeout_seconds:g}s"
+                )
+            # Sleep first: the request was just accepted, so an immediate lookup
+            # would only spend rate limit.
+            time.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+            try:
+                sandbox = self._sandbox_status_batcher.get(sandbox_id)
+            except APIError as error:
+                if not _is_rate_limited(error):
+                    raise
+                continue
+            if _reached_lifecycle_status(sandbox_id, sandbox, status):
+                return
 
     def fork(
         self,
@@ -2910,7 +2992,9 @@ class SandboxClient:
                 f"'prime sandbox resume {sandbox_id}' (or resume())",
             )
         try:
-            return source, self._wait_for_pause(sandbox_id, source.checkpoint_id, timeout_seconds)
+            return source, self._wait_for_pause_checkpoint(
+                sandbox_id, source.checkpoint_id, timeout_seconds
+            )
         except BaseException as error:
             try:
                 self.resume(sandbox_id)
@@ -2924,7 +3008,7 @@ class SandboxClient:
                     )
             raise
 
-    def _wait_for_pause(
+    def _wait_for_pause_checkpoint(
         self, sandbox_id: str, checkpoint_id: str, timeout_seconds: float
     ) -> SandboxCheckpoint:
         """Wait until the pause checkpoint holds its memory and the source is PAUSED."""
@@ -4861,7 +4945,8 @@ class AsyncSandboxClient:
         return Sandbox.model_validate(response)
 
     async def pause(self, sandbox_id: str) -> PausedSandbox:
-        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously.
+        """Request a pause of a running VM sandbox; it reaches PAUSED asynchronously
+        (``wait_for_pause`` waits for it).
 
         The result carries the pause's ``checkpoint_id``: ``resume`` continues the
         sandbox, and ``create`` with that checkpoint and ``restore_memory=True`` forks it."""
@@ -4869,9 +4954,57 @@ class AsyncSandboxClient:
         return PausedSandbox.model_validate(response)
 
     async def resume(self, sandbox_id: str) -> Sandbox:
-        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously."""
+        """Request a resume of a paused VM sandbox; it reaches RUNNING asynchronously
+        (``wait_for_resume`` waits for it)."""
         response = await self.client.request("POST", f"/sandbox/{sandbox_id}/resume")
         return Sandbox.model_validate(response)
+
+    async def wait_for_pause(self, sandbox_id: str, timeout_seconds: float = 300) -> None:
+        """Wait until a requested pause leaves the sandbox PAUSED.
+
+        Concurrent waits share batched status lookups of up to 100 sandboxes and
+        back off like creation waits (1 s, growing to 10 s, jittered), so thousands
+        of waits stay near the platform's status rate limit; a rate-limited lookup
+        is retried until ``timeout_seconds``. Raises RuntimeError when the pause
+        failed (the sandbox keeps running), SandboxNotRunningError when the sandbox stopped, and
+        TimeoutError on expiry."""
+        await self._wait_for_lifecycle_status(sandbox_id, "PAUSED", timeout_seconds)
+
+    async def wait_for_resume(self, sandbox_id: str, timeout_seconds: float = 300) -> None:
+        """Wait until a requested resume leaves the sandbox RUNNING.
+
+        Concurrent waits share batched status lookups of up to 100 sandboxes and
+        back off like creation waits (1 s, growing to 10 s, jittered), so thousands
+        of waits stay near the platform's status rate limit; a rate-limited lookup
+        is retried until ``timeout_seconds``. Raises RuntimeError when the resume
+        failed (the sandbox stays paused), SandboxNotRunningError when the sandbox stopped, and
+        TimeoutError on expiry."""
+        await self._wait_for_lifecycle_status(sandbox_id, "RUNNING", timeout_seconds)
+
+    async def _wait_for_lifecycle_status(
+        self, sandbox_id: str, status: str, timeout_seconds: float
+    ) -> None:
+        _check_wait_timeout(timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        poll_index = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Sandbox {sandbox_id} did not reach {status} within {timeout_seconds:g}s"
+                )
+            # Sleep first: the request was just accepted, so an immediate lookup
+            # would only spend rate limit.
+            await asyncio.sleep(min(_creation_poll_delay(poll_index), remaining))
+            poll_index += 1
+            try:
+                sandbox = await self._sandbox_status_batcher.get(sandbox_id)
+            except APIError as error:
+                if not _is_rate_limited(error):
+                    raise
+                continue
+            if _reached_lifecycle_status(sandbox_id, sandbox, status):
+                return
 
     async def fork(
         self,
@@ -4991,7 +5124,7 @@ class AsyncSandboxClient:
                 f"'prime sandbox resume {sandbox_id}' (or resume())",
             )
         try:
-            return source, await self._wait_for_pause(
+            return source, await self._wait_for_pause_checkpoint(
                 sandbox_id, source.checkpoint_id, timeout_seconds
             )
         except BaseException as error:
@@ -5007,7 +5140,7 @@ class AsyncSandboxClient:
                     )
             raise
 
-    async def _wait_for_pause(
+    async def _wait_for_pause_checkpoint(
         self, sandbox_id: str, checkpoint_id: str, timeout_seconds: float
     ) -> SandboxCheckpoint:
         """Wait until the pause checkpoint holds its memory and the source is PAUSED."""

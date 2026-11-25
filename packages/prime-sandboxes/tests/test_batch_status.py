@@ -1697,3 +1697,130 @@ async def test_async_close_joins_output_before_transports() -> None:
     with pytest.raises(RuntimeError, match="closed"):
         await lookup
     assert close_order == ["output-close", "gateway-close", "platform-close"]
+
+
+def _status(sandbox_id: str, status: str, error_type: Optional[str] = None) -> dict[str, Any]:
+    return {
+        "sandbox_id": sandbox_id,
+        "status": status,
+        "error_type": error_type,
+        "error_message": "boom" if error_type else None,
+        "pending_image_build_id": None,
+    }
+
+
+class _ScriptedStatusClient:
+    """Answers the Nth status batch with the Nth scripted (status, error_type), or
+    raises it when it is an exception."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self.script = script
+        self.calls: list[list[str]] = []
+
+    def _answer(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        sandbox_ids = kwargs["json"]["sandbox_ids"]
+        self.calls.append(sandbox_ids)
+        step = self.script[min(len(self.calls), len(self.script)) - 1]
+        if isinstance(step, Exception):
+            raise step
+        return {"statuses": [_status(i, *step) for i in sandbox_ids], "errors": []}
+
+    def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        return self._answer(kwargs)
+
+
+class _AsyncScriptedStatusClient(_ScriptedStatusClient):
+    async def request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
+        return self._answer(kwargs)
+
+    async def aclose(self) -> None:
+        pass
+
+
+@pytest.fixture
+def _no_poll_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("prime_sandboxes.sandbox._creation_poll_delay", lambda _index: 0.0)
+
+
+@pytest.mark.usefixtures("_no_poll_delay")
+def test_concurrent_sync_pause_waits_share_batches_until_paused() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    platform = _ScriptedStatusClient([("RUNNING", None), ("PAUSED", None)])
+    cast(Any, client).client = platform
+
+    barrier = threading.Barrier(2)
+
+    def wait(sandbox_id: str) -> None:
+        barrier.wait()
+        client.wait_for_pause(sandbox_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        for future in [executor.submit(wait, i) for i in ["sandbox-a", "sandbox-b"]]:
+            future.result()
+
+    assert any(set(ids) == {"sandbox-a", "sandbox-b"} for ids in platform.calls)
+
+
+@pytest.mark.usefixtures("_no_poll_delay")
+def test_sync_pause_wait_raises_on_pause_failure() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    cast(Any, client).client = _ScriptedStatusClient([("RUNNING", "PAUSE_FAILED")])
+
+    with pytest.raises(RuntimeError, match="PAUSE_FAILED"):
+        client.wait_for_pause("sandbox-a")
+
+
+@pytest.mark.usefixtures("_no_poll_delay")
+def test_sync_resume_wait_raises_when_sandbox_stopped() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    cast(Any, client).client = _ScriptedStatusClient([("TERMINATED", None)])
+
+    with pytest.raises(SandboxNotRunningError):
+        client.wait_for_resume("sandbox-a")
+
+
+def test_sync_pause_wait_times_out() -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    client.client.client.close()
+    cast(Any, client).client = _ScriptedStatusClient([("RUNNING", None)])
+
+    with pytest.raises(TimeoutError, match="PAUSED"):
+        client.wait_for_pause("sandbox-a", timeout_seconds=0.05)
+    with pytest.raises(ValueError):
+        client.wait_for_pause("sandbox-a", timeout_seconds=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_no_poll_delay")
+async def test_async_resume_wait_outlasts_rate_limited_lookups() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    platform = _AsyncScriptedStatusClient(
+        [APIError("HTTP 429: Too Many Requests"), ("PAUSED", None), ("RUNNING", None)]
+    )
+    cast(Any, client).client = platform
+    try:
+        await client.wait_for_resume("sandbox-a")
+    finally:
+        await client.aclose()
+
+    assert len(platform.calls) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_no_poll_delay")
+async def test_async_resume_wait_raises_on_resume_failure_and_other_errors() -> None:
+    client = AsyncSandboxClient(api_key="test-key")
+    await client.client.aclose()
+    cast(Any, client).client = _AsyncScriptedStatusClient([("PAUSED", "RESUME_FAILED")])
+    try:
+        with pytest.raises(RuntimeError, match="RESUME_FAILED"):
+            await client.wait_for_resume("sandbox-a")
+        cast(Any, client).client = _AsyncScriptedStatusClient([APIError("HTTP 500: boom")])
+        with pytest.raises(APIError, match="500"):
+            await client.wait_for_resume("sandbox-b")
+    finally:
+        await client.aclose()

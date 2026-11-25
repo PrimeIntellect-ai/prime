@@ -15,7 +15,8 @@ from .exceptions import EvalsAPIError, InvalidEvaluationError
 def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code == 429
-    return isinstance(exc, httpx.RequestError)
+    # POST /samples appends rows. A lost response may follow a successful write.
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
 
 
 def _build_user_agent() -> str:

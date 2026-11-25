@@ -1220,7 +1220,12 @@ def validate_training_config(
         dir_okay=False,
         help="Reuse an existing schema interpreter; its commit must match the hosted runtime.",
     ),
-    image_tag: Optional[str] = typer.Option(None, "--image-tag"),
+    image_tag: Optional[str] = typer.Option(
+        None,
+        "--image-tag",
+        help="prime-rl container image tag to validate against. Only for teams with "
+        "their own dedicated cluster; on-demand runs use the default image.",
+    ),
     ref: Optional[str] = typer.Option(
         None,
         "--ref",
@@ -1339,7 +1344,8 @@ def create_run(
         help=(
             "prime-rl container image tag for the run. "
             'Falls back to a top-level `image_tag = "..."` in the TOML '
-            "if unset, then to the backend default."
+            "if unset, then to the backend default. Only for teams with "
+            "their own dedicated cluster; on-demand runs use the default image."
         ),
     ),
     gpu_type: Optional[str] = typer.Option(
@@ -2166,7 +2172,8 @@ def resume_run(
     image_tag: Optional[str] = typer.Option(
         None,
         "--image-tag",
-        help="prime-rl image tag to resume with. Defaults to the paused run's.",
+        help="prime-rl image tag to resume with. Defaults to the paused run's. Only "
+        "for runs on your team's own dedicated cluster.",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),

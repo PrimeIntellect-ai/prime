@@ -349,7 +349,7 @@ def test_stop_without_a_terminal_stops_nothing_unless_told_yes(api: Dict[str, An
     assert result.exit_code == 0 and api["post"] == ("/pipelines/runs/run1/stop", None)
 
 
-def test_the_group_is_eight_commands(api: Dict[str, Any]) -> None:
+def test_the_group_is_nine_commands(api: Dict[str, Any]) -> None:
     from prime_cli.commands.pipelines import app as pipelines
 
     assert [command.name for command in pipelines.registered_commands] == [
@@ -358,6 +358,7 @@ def test_the_group_is_eight_commands(api: Dict[str, Any]) -> None:
         "runs",
         "get",
         "reply",
+        "launch",
         "outputs",
         "stop",
         "delete",
@@ -1190,3 +1191,116 @@ def test_run_says_when_the_launch_file_cannot_be_read(
     )
     assert result.exit_code == 1 and "can't read" in result.output
     assert "Traceback" not in result.output and "post" not in api
+
+
+IDLE = {
+    **RUN,
+    "idle": True,
+    "idle_until": "2026-11-25T19:29:12Z",
+    "launches": [{"n": 1, "ended_at": "2026-11-25T19:19:12Z", "ok": True}],
+}
+
+
+def _get(review: Dict[str, Any], run: Dict[str, Any], *args: str) -> str:
+    review["run"] = run
+    result = runner.invoke(
+        app, ["pipelines", "get", "run1", *args], env={**TEST_ENV, "COLUMNS": "2000"}
+    )
+    assert result.exit_code == 0, result.output
+    return " ".join(result.output.split())
+
+
+def test_get_says_an_idle_run_is_idle_until_when_and_how_to_launch_it(
+    review: Dict[str, Any],
+) -> None:
+    text = _get(review, IDLE)
+    for expected in (
+        "Run run1: RUNNING (idle)",
+        "Idle: its process has finished, and its machine stays up until 2026-11-25 19:29 UTC.",
+        "Launch it again: prime pipelines launch run1",
+        "Launch 1 (with the run): succeeded 2026-11-25 19:19",
+    ):
+        assert expected in text, text
+
+
+def test_get_shows_why_an_idle_runs_process_failed(review: Dict[str, Any]) -> None:
+    failed = {"n": 1, "ended_at": "2026-11-25T19:19:12Z", "ok": False, "error": "no [tasks]"}
+    text = _get(review, {**IDLE, "launches": [failed]})
+    assert "its process has failed" in text and "no [tasks]" in text
+    assert "Launch 1 (with the run): failed 2026-11-25 19:19" in text
+
+
+def test_get_gives_someone_who_didnt_start_the_run_no_launch_command(
+    review: Dict[str, Any],
+) -> None:
+    text = _get(review, {**IDLE, "may_operate": False})
+    assert "The person who started it can launch it again." in text
+    assert "prime pipelines launch" not in text
+
+
+def test_get_lists_each_launch_and_who_started_it(review: Dict[str, Any]) -> None:
+    launches = [
+        {"n": 1, "ended_at": "2026-11-25T19:19:12Z", "ok": True},
+        {
+            "n": 2,
+            "started_at": "2026-11-25T19:20:00Z",
+            "ended_at": "2026-11-25T19:24:00Z",
+            "ok": False,
+            "error": "boom",
+        },
+        {
+            "n": 3,
+            "started_at": "2026-11-25T19:25:00Z",
+            "from_machine": True,
+            "settings": ["flow.seconds"],
+        },
+    ]
+    text = _get(review, {**RUN, "launches": launches})
+    for expected in (
+        "Launch 1 (with the run): succeeded 2026-11-25 19:19",
+        "Launch 2 (by its starter): failed 2026-11-25 19:24",
+        "Launch 3 (from its machine, with flow.seconds): running",
+    ):
+        assert expected in text, text
+    # A run that was launched again is running, not idle.
+    assert "(idle)" not in text and "Idle:" not in text
+
+
+def test_a_run_that_says_nothing_of_idling_reads_as_before(review: Dict[str, Any]) -> None:
+    text = _get(review, RUN)
+    assert "Run run1: RUNNING Pipeline" in text and "Launch" not in text
+
+
+def test_a_stopped_run_is_not_called_idle(review: Dict[str, Any]) -> None:
+    text = _get(review, {**IDLE, "status": "FAILED", "stopped": True})
+    assert "Run run1: FAILED (stopped)" in text and "Idle:" not in text
+
+
+def test_runs_lists_an_idle_run_as_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    found = {"runs": [IDLE, {**RUN, "id": "run2"}], "total": 2, "page": 1, "per_page": 20}
+    monkeypatch.setattr(
+        "prime_cli.client.APIClient.get", lambda self, endpoint, params=None, timeout=None: found
+    )
+    result = runner.invoke(app, ["pipelines", "runs"], env={**TEST_ENV, "COLUMNS": "2000"})
+    assert result.exit_code == 0, result.output
+    rows = {line.split()[1]: line for line in result.output.splitlines() if "run" in line}
+    assert "IDLE" in rows["run1"] and "RUNNING" in rows["run2"]
+
+
+def test_launch_sends_the_launch_control(review: Dict[str, Any]) -> None:
+    result = runner.invoke(app, ["pipelines", "launch", "run1"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert review["posts"] == [("/pipelines/runs/run1/control", {"control": {"type": "launch"}})]
+    assert "Sent (control 7)" in result.output and "prime pipelines get run1" in result.output
+
+
+def test_launch_says_why_the_platform_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from prime_cli.client import APIError
+
+    def refuse(self: Any, endpoint: str, json: Any = None, timeout: Any = None) -> Any:
+        raise APIError("This run is running: it can be launched again once it has ended")
+
+    monkeypatch.setattr("prime_cli.client.APIClient.post", refuse)
+    result = runner.invoke(app, ["pipelines", "launch", "run1"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "it can be launched again once it has ended" in " ".join(result.output.split())

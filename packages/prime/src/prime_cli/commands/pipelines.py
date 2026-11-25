@@ -35,7 +35,8 @@ app = PlainTyper(
 console = get_console()
 
 _RUN_FIELDS = (
-    "id, pipeline_id, version, package?, status, error?, stopped, "
+    "id, pipeline_id, version, package?, status, error?, stopped, idle, idle_until?, "
+    "launches[{n, started_at?, ended_at?, ok?, error?, from_machine, settings[]}], "
     "outputs[{node, name, bytes}], network{allow[]}, evaluations[], trainings[], deployments[], "
     "spend_limit?, created_at, started_at?, completed_at?"
 )
@@ -73,9 +74,35 @@ def _fail(error: Exception) -> NoReturn:
     raise typer.Exit(1)
 
 
+def _when(value: Optional[str]) -> str:
+    """A time the platform sent, to the minute, in UTC."""
+    return value[:16].replace("T", " ") if value else ""
+
+
+def _idle(run: dict[str, Any]) -> None:
+    """What an idle run is, until when, and the command that launches it again."""
+    ended = [launch for launch in run.get("launches") or [] if launch.get("ended_at")]
+    last = ended[-1] if ended else {}
+    how = "finished" if last.get("ok", True) else "failed"
+    until = f" until {_when(run['idle_until'])} UTC" if run.get("idle_until") else " for a while"
+    console.print(
+        f"[yellow]Idle[/yellow]: its process has {how}, and its machine stays up{until}. "
+        "Then the run ends."
+    )
+    if last.get("error") and not last.get("ok"):
+        console.print(f"[red]{escape(str(last['error']))}[/red]")
+    # Only on reads of one run, and only its starter may: nobody else is given the command.
+    if run.get("may_operate") is False:
+        console.print("  The person who started it can launch it again.")
+    else:
+        again = shlex.join(["prime", "pipelines", "launch", run["id"]])
+        console.print(f"  Launch it again: {escape(again)}")
+
+
 def _summary(run: dict[str, Any]) -> None:
-    stopped = " (stopped)" if run.get("stopped") else ""
-    console.print(f"Run [bold]{run['id']}[/bold]: {run['status']}{stopped}")
+    idle = bool(run.get("idle")) and not run.get("stopped")
+    note = " (stopped)" if run.get("stopped") else " (idle)" if idle else ""
+    console.print(f"Run [bold]{run['id']}[/bold]: {run['status']}{note}")
     if run.get("pipeline_id"):
         console.print(f"Pipeline: {run['pipeline_id']}")
     if run.get("package"):
@@ -83,6 +110,8 @@ def _summary(run: dict[str, Any]) -> None:
     console.print(f"Version: {run['version'][:12]}")
     if run.get("error") and not run.get("stopped"):
         console.print(f"[red]{escape(run['error'])}[/red]")
+    if idle:
+        _idle(run)
 
 
 def _run(run_id: str) -> dict[str, Any]:
@@ -266,13 +295,11 @@ def run(
     console.print(f"Follow it with: prime pipelines get {started['id']}")
 
 
-def _when(value: Optional[str]) -> str:
-    """A time the platform sent, to the minute, in UTC."""
-    return value[:16].replace("T", " ") if value else ""
-
-
 def _status(found: dict[str, Any]) -> str:
-    return "STOPPED" if found.get("stopped") else str(found["status"])
+    if found.get("stopped"):
+        return "STOPPED"
+    # Its status is RUNNING, and nothing of it runs: its process has ended, its machine is up.
+    return "IDLE" if found.get("idle") else str(found["status"])
 
 
 def _page(page: int, num: int, total: int, shown: int, what: str) -> None:
@@ -386,13 +413,28 @@ def _waiting(run_id: str, held: dict[str, Any]) -> None:
     console.print(f"  Answer: prime pipelines reply {escape(where)} --patch JSON")
 
 
+def _launched(launch: dict[str, Any]) -> str:
+    """One launch of the run, in a line: who started it and how it went."""
+    if launch.get("from_machine"):
+        changed = ", ".join(str(name) for name in launch.get("settings") or [])
+        by = "from its machine" + (f", with {changed}" if changed else "")
+    else:
+        by = "by its starter" if launch.get("started_at") else "with the run"
+    if not launch.get("ended_at"):
+        went = "running"
+    else:
+        went = ("succeeded" if launch.get("ok") else "failed") + f" {_when(launch['ended_at'])}"
+    return f"Launch {launch['n']} ({escape(by)}): {went}"
+
+
 @app.command("get", epilog=GET_JSON_HELP)
 def get(
     run_id: str = typer.Argument(..., help="The run's id."),
     output: str = typer.Option("table", "--output", "-o", help="table or json"),
 ) -> None:
     """A run: its status, each stage's job counts, what waits on you and how to answer, what it
-    started and spent, and its outputs."""
+    started and spent, and its outputs. An idle run says until when its machine stays up, and how
+    to launch it again."""
     validate_output_format(output, console)
     found = _run(run_id)
     if output == "json":
@@ -407,6 +449,8 @@ def get(
         for stage, counts in stages.items():
             table.add_row(escape(stage), *(str(counts.get(status, 0)) for status in statuses))
         console.print(table)
+    for launch in found.get("launches") or []:
+        console.print(_launched(launch))
     for control in state.get("skipped_controls") or []:
         console.print(
             f"[red]Not applied[/red] (control {control['seq']}): {escape(control['error'])}"
@@ -492,6 +536,20 @@ def reply(
     console.print(
         f"Sent (control {seq}). The run picks it up in a few seconds; "
         f"if it can't, prime pipelines get {escape(shlex.quote(run_id))} says why."
+    )
+
+
+@app.command("launch")
+def launch_again(
+    run_id: str = typer.Argument(..., help="The run's id."),
+) -> None:
+    """Start an idle run again, on the same machine and files, as the run's page does. A run is
+    idle once its process has ended while its machine is still up: `prime pipelines get` says
+    until when. Only the person who started the run can launch it again."""
+    seq = _control(run_id, {"type": "launch"})
+    console.print(
+        f"Sent (control {seq}). The run starts again in a few seconds; "
+        f"prime pipelines get {escape(shlex.quote(run_id))} shows it."
     )
 
 
@@ -595,7 +653,8 @@ def stop(
 ) -> None:
     """Stop a run. What's running gets a short grace period, the run's files are saved, then its
     runner and every sandbox it started end. Evaluations and training it started end at once.
-    With --drain, the run ends once what's running has finished."""
+    With --drain, the run ends once what's running has finished. An idle run has nothing running
+    and ends at once."""
     question = (
         f"Wind down run {run_id}? It starts no new work and ends once what's running finishes."
         if drain

@@ -274,9 +274,10 @@ def test_a_failed_run_still_lands_its_config_and_summary(make_platform_client, e
 
     # The config/summary go up first, on their own: a status guard that rejects
     # the update (409) must not take the run's config with it.
+    # Only the typed summary of the config lands; free-form values such as the
+    # model string stay out of the metadata document.
     bodies = handler.bodies_for("/api/v1/evaluations/eval-abc")
     assert bodies == [
-        {"metadata": {"num_rollouts": 4, "model": "Qwen3-8B"}, "metrics": {"avg_reward": 0.1}},
+        {"metadata": {"num_rollouts": 4}, "metrics": {"avg_reward": 0.1}},
         {"status": "FAILED", "error_message": "boom"},
     ]
-    assert "prime_runs" not in bodies[0]["metadata"]

@@ -381,7 +381,7 @@ class _Env:
     def prime(self, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [PRIME_BIN, *args],
-            env=self.environ(PRIME_DISABLE_VERSION_CHECK="1", **extra_env),
+            env=self.environ(**{"PRIME_DISABLE_VERSION_CHECK": "1", **extra_env}),
             capture_output=True,
             text=True,
             timeout=60,
@@ -396,15 +396,22 @@ class _Env:
             timeout=60,
         )
 
-    def exec_plugin(self, context: str, **extra_env: str) -> subprocess.CompletedProcess:
-        """Run exactly what kubectl runs for `context`, from the written file."""
+    def _exec_block(self, context: str) -> dict:
         config = yaml.safe_load(self.kubeconfig.read_text())
         user = next(c["context"]["user"] for c in config["contexts"] if c["name"] == context)
-        exec_block = next(u["user"]["exec"] for u in config["users"] if u["name"] == user)
-        pinned = {item["name"]: item["value"] for item in exec_block["env"]}
+        return next(u["user"]["exec"] for u in config["users"] if u["name"] == user)
+
+    def pinned_env(self, context: str) -> dict[str, str]:
+        """The environment `context`'s exec block pins: the login's platform
+        URL and key fingerprint, which the plugin checks before any request."""
+        return {item["name"]: item["value"] for item in self._exec_block(context)["env"]}
+
+    def exec_plugin(self, context: str, **extra_env: str) -> subprocess.CompletedProcess:
+        """Run exactly what kubectl runs for `context`, from the written file."""
+        exec_block = self._exec_block(context)
         return subprocess.run(
             [shutil.which(exec_block["command"], path=self.environ()["PATH"]), *exec_block["args"]],
-            env=self.environ(**{**pinned, **extra_env}),
+            env=self.environ(**{**self.pinned_env(context), **extra_env}),
             capture_output=True,
             text=True,
             timeout=60,
@@ -691,7 +698,10 @@ def test_plugin_exit_codes_through_the_real_binary(e2e):
     assert credential["kind"] == "ExecCredential"
     assert credential["status"]["token"]
 
-    ambiguous = e2e.prime("auth", "k8s-token", "--cluster", CLUSTER)
+    # No --pool, with the login's binding, so the platform decides.
+    ambiguous = e2e.prime(
+        "auth", "k8s-token", "--cluster", CLUSTER, **e2e.pinned_env(f"{CLUSTER}-train")
+    )
     assert (ambiguous.returncode, ambiguous.stdout) == (5, "")
     assert "several pools" in ambiguous.stderr
 

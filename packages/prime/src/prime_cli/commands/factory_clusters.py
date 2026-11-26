@@ -11,6 +11,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
+from ..api.factory import FactoryClient
 from ..api.factory_metrics import (
     METRICS_WINDOWS,
     ClusterNodeMetrics,
@@ -18,7 +19,8 @@ from ..api.factory_metrics import (
     MetricPoint,
     NodeMetrics,
 )
-from ..client import APIClient, APIError
+from ..client import APIClient, APIError, ServerError
+from ..core import Config
 from ..core.client import NotFoundError, UnauthorizedError
 from ..utils import PlainTyper, get_console, is_plain_mode, json_output_help, output_data_as_json
 
@@ -27,21 +29,26 @@ console = get_console()
 
 METRICS_JSON_HELP = json_output_help(
     ". = {schema_version, cluster_id, cluster_display_name, window, step_seconds,",
-    "     as_of, available, unavailable_reason, nodes[]}",
-    ".nodes[] = {name, gpu_type, gpu_count, current, series, gpus[]}",
-    ".gpus[] = {index, uuid, current, series}",
-    ".current = {gpu_util_percent, gpu_memory_used_bytes, gpu_memory_total_bytes,",
-    "            gpu_temperature_celsius, gpu_power_watts, xid_errors, cpu_util_percent,",
-    "            memory_used_bytes, memory_total_bytes, network_rx_bytes_per_second,",
-    "            network_tx_bytes_per_second}",
-    ".series = {<metric>: [{timestamp, value}]} keyed by .current field names",
-    "--node: keep only that node in .nodes[]",
+    "     as_of, available, unavailable_reason, unavailable_code, nodes[]}",
+    ".nodes[] = {name, gpu_type, gpu_count, state, current, series, gpus[]}",
+    ".gpus[] = {index, current, series} — filled only with --node",
+    ".current = {gpu_util_percent, gpu_memory_used_bytes, gpu_temperature_celsius,",
+    "            gpu_power_watts, cpu_util_percent, memory_used_bytes, memory_total_bytes,",
+    "            network_rx_bytes_per_second, network_tx_bytes_per_second}",
+    ".series = {<metric>: [{timestamp, value}]} keyed by .current field names;",
+    "          a key is absent without data, value is null for a gap",
+    "--node: the server returns only that node in .nodes[]",
 )
 
 SPARK_CHARS = "▁▂▃▄▅▆▇█"
 BAR_WIDTH = 8
 WIDE_COLUMNS = 120
 MISSING = "[dim]—[/dim]"
+STATE_STYLES = {"ready": "green", "not_ready": "red", "cordoned": "yellow"}
+UNAVAILABLE_FALLBACK = {
+    "no_cluster_label": "the cluster has not reported its metrics label yet",
+    "no_data": "no metrics were reported for this cluster in this window",
+}
 
 
 def _wide() -> bool:
@@ -91,24 +98,28 @@ def sparkline(
     """Render a series as unicode blocks, bucket-averaged down to ``width``.
 
     ``lo``/``hi`` pin the scale (0–100 for percentages); otherwise the
-    series' own range is used so small swings stay visible.
+    series' own range is used so small swings stay visible. Gaps (``None``
+    values, or buckets with no values) render as spaces, never as zero.
     """
-    values = [p.value for p in points]
-    if not values:
-        return ""
+    values: List[Optional[float]] = [p.value for p in points]
     if len(values) > width:
         size = len(values) / width
+        buckets = (values[int(i * size) : int((i + 1) * size)] for i in range(width))
         values = [
-            sum(chunk) / len(chunk)
-            for chunk in (values[int(i * size) : int((i + 1) * size)] for i in range(width))
-            if chunk
+            sum(known) / len(known) if known else None
+            for known in ([v for v in chunk if v is not None] for chunk in buckets)
         ]
-    low = min(values) if lo is None else lo
-    high = max(values) if hi is None else hi
+    known = [v for v in values if v is not None]
+    if not known:
+        return ""
+    low = min(known) if lo is None else lo
+    high = max(known) if hi is None else hi
     span = high - low
     top = len(SPARK_CHARS) - 1
     return "".join(
-        SPARK_CHARS[0 if span <= 0 else max(0, min(top, round((v - low) / span * top)))]
+        " "
+        if v is None
+        else SPARK_CHARS[0 if span <= 0 else max(0, min(top, round((v - low) / span * top)))]
         for v in values
     )
 
@@ -118,7 +129,7 @@ def _bytes(value: Optional[float]) -> str:
         return "—"
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if abs(value) < 1024 or unit == "TiB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+            return f"{value:.0f} {unit}" if unit == "B" or value >= 100 else f"{value:.1f} {unit}"
         value /= 1024
     return "—"
 
@@ -137,6 +148,10 @@ def _used_of_total(used: Optional[float], total: Optional[float]) -> str:
     return f"{fmt(used)}/{fmt(total)} {unit}"
 
 
+def _amount(value: Optional[float]) -> str:
+    return MISSING if value is None else _bytes(value)
+
+
 def _rate(value: Optional[float]) -> str:
     return MISSING if value is None else f"{_bytes(value)}/s"
 
@@ -145,12 +160,10 @@ def _num(value: Optional[float], unit: str) -> str:
     return MISSING if value is None else f"{value:.0f}{unit}"
 
 
-def _xid(count: Optional[int]) -> str:
-    if count is None:
-        return MISSING
-    if count == 0:
-        return "[dim]0[/dim]"
-    return f"[bold white on red] {count} [/bold white on red]"
+def _state(state: str) -> str:
+    style = STATE_STYLES.get(state)
+    label = escape(state.replace("_", " "))
+    return f"[{style}]{label}[/{style}]" if style else label
 
 
 def _used_bar(used: Optional[float], total: Optional[float]) -> str:
@@ -172,13 +185,19 @@ def _trend(series: Dict[str, List[MetricPoint]], key: str, percent: bool = True)
 
 def _nodes_table(metrics: ClusterNodeMetrics) -> Table:
     show_trend = _wide()
-    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        box=None,
+        pad_edge=False,
+        collapse_padding=not show_trend,
+    )
     table.add_column("NODE", style="bold", no_wrap=True)
+    table.add_column("STATE", no_wrap=True)
     table.add_column("GPU UTIL", no_wrap=True)
-    table.add_column("GPU MEM", no_wrap=True)
+    table.add_column("GPU MEM", justify="right", no_wrap=True)
     table.add_column("TEMP", justify="right")
     table.add_column("POWER", justify="right")
-    table.add_column("XID", justify="right")
     table.add_column("CPU", no_wrap=True)
     table.add_column("MEM", no_wrap=True)
     table.add_column("NET RX", justify="right", no_wrap=True)
@@ -189,11 +208,11 @@ def _nodes_table(metrics: ClusterNodeMetrics) -> Table:
         cur = node.current
         row = [
             escape(node.name),
+            _state(node.state),
             _bar(cur.gpu_util_percent),
-            _bar(_pct(cur.gpu_memory_used_bytes, cur.gpu_memory_total_bytes)),
+            _amount(cur.gpu_memory_used_bytes),
             _num(cur.gpu_temperature_celsius, "°C"),
             _num(cur.gpu_power_watts, " W"),
-            _xid(cur.xid_errors),
             _bar(cur.cpu_util_percent),
             _bar(_pct(cur.memory_used_bytes, cur.memory_total_bytes)),
             _rate(cur.network_rx_bytes_per_second),
@@ -205,7 +224,7 @@ def _nodes_table(metrics: ClusterNodeMetrics) -> Table:
     return table
 
 
-def _node_summary(node: NodeMetrics, window: str) -> Table:
+def _node_summary(node: NodeMetrics) -> Table:
     show_trend = not is_plain_mode()
     table = Table(show_header=False, box=None, pad_edge=False)
     table.add_column(style="bold")
@@ -214,6 +233,7 @@ def _node_summary(node: NodeMetrics, window: str) -> Table:
         table.add_column(no_wrap=True)
     cur = node.current
     rows = [
+        ("STATE", _state(node.state), None, False),
         ("CPU", _bar(cur.cpu_util_percent), "cpu_util_percent", True),
         (
             "MEMORY",
@@ -223,7 +243,6 @@ def _node_summary(node: NodeMetrics, window: str) -> Table:
         ),
         ("NET RX", _rate(cur.network_rx_bytes_per_second), "network_rx_bytes_per_second", False),
         ("NET TX", _rate(cur.network_tx_bytes_per_second), "network_tx_bytes_per_second", False),
-        (f"XID ({window})", _xid(cur.xid_errors), None, False),
     ]
     for label, value, key, percent in rows:
         cells = [label, value]
@@ -238,10 +257,9 @@ def _gpus_table(node: NodeMetrics, window: str) -> Table:
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("GPU", justify="right")
     table.add_column("UTIL", no_wrap=True)
-    table.add_column("MEMORY", no_wrap=True)
+    table.add_column("MEMORY", justify="right", no_wrap=True)
     table.add_column("TEMP", justify="right")
     table.add_column("POWER", justify="right")
-    table.add_column("XID", justify="right")
     if show_trend:
         table.add_column(f"UTIL {window}", no_wrap=True)
         table.add_column(f"TEMP {window}", no_wrap=True)
@@ -250,10 +268,9 @@ def _gpus_table(node: NodeMetrics, window: str) -> Table:
         row = [
             str(gpu.index),
             _bar(cur.gpu_util_percent),
-            _used_bar(cur.gpu_memory_used_bytes, cur.gpu_memory_total_bytes),
+            _amount(cur.gpu_memory_used_bytes),
             _num(cur.gpu_temperature_celsius, "°C"),
             _num(cur.gpu_power_watts, " W"),
-            _xid(cur.xid_errors),
         ]
         if show_trend:
             row.append(_trend(gpu.series, "gpu_util_percent"))
@@ -263,7 +280,7 @@ def _gpus_table(node: NodeMetrics, window: str) -> Table:
 
 
 def _header(metrics: ClusterNodeMetrics, node: Optional[NodeMetrics]) -> str:
-    name = escape(metrics.cluster_display_name or metrics.cluster_id)
+    name = escape(metrics.cluster_display_name)
     parts = [f"[bold]{name}[/bold]"]
     if node is not None:
         gpus = f"{node.gpu_count}× {node.gpu_type}" if node.gpu_count and node.gpu_type else ""
@@ -282,7 +299,10 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
     node = next((n for n in metrics.nodes if n.name == node_name), None) if node_name else None
     out: List[RenderableType] = [Text.from_markup(_header(metrics, node))]
     if not metrics.available:
-        reason = escape(metrics.unavailable_reason or "no metrics have been reported for it yet")
+        reason = escape(
+            metrics.unavailable_reason
+            or UNAVAILABLE_FALLBACK.get(metrics.unavailable_code or "", "no metrics to show")
+        )
         out.append(Text.from_markup(f"[yellow]Metrics are unavailable: {reason}[/yellow]"))
         return out
     if not metrics.nodes:
@@ -295,7 +315,7 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
         missing = escape(node_name)
         out.append(Text.from_markup(f"[yellow]Node '{missing}' is not reporting metrics.[/yellow]"))
         return out
-    out.append(_node_summary(node, metrics.window))
+    out.append(_node_summary(node))
     if node.gpus:
         out.append(Text())
         out.append(_gpus_table(node, metrics.window))
@@ -304,35 +324,58 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
     return out
 
 
-def _error_message(error: APIError, cluster: str) -> str:
+def _error_message(error: APIError, cluster: str, node: Optional[str]) -> str:
     detail = str(error)
     if isinstance(error, UnauthorizedError):
-        return detail
+        return f"{escape(detail)} Cluster metrics need the factory read scope."
     if isinstance(error, NotFoundError):
+        if node is not None:
+            return (
+                f"Cluster '{escape(cluster)}' or its node '{escape(node)}' was not found, "
+                "or you are not a member of the cluster's team."
+            )
         return (
-            f"Cluster '{escape(cluster)}' was not found, or you don't have access to it. "
-            "Node metrics are visible to members of the cluster's team."
+            f"Cluster '{escape(cluster)}' was not found, or you are not a member of its team. "
+            "Run `prime factory status` to see your clusters."
         )
-    if detail.startswith("HTTP 403"):
-        return (
-            f"You don't have access to metrics for cluster '{escape(cluster)}'. "
-            "Ask a member of the cluster's team to add you."
-        )
-    if detail.startswith("HTTP 503"):
-        return "Node metrics are temporarily unavailable. Try again in a minute."
+    if isinstance(error, ServerError) and detail.startswith("HTTP 503"):
+        return "Node metrics are unavailable right now: the metrics store can't be reached."
     return escape(detail)
 
 
-def _check_node(metrics: ClusterNodeMetrics, node_name: Optional[str], err_console: Any) -> None:
-    if node_name is None or not metrics.available:
-        return
-    if any(n.name == node_name for n in metrics.nodes):
-        return
-    err_console.print(f"[red]Error:[/red] No node named '{escape(node_name)}' in this cluster.")
-    if metrics.nodes:
-        names = ", ".join(escape(n.name) for n in metrics.nodes)
-        err_console.print(f"[dim]Available nodes: {names}[/dim]")
-    raise typer.Exit(1)
+def _resolve_cluster_id(selector: str, team: Optional[str], err_console: Any) -> str:
+    """Map a display name or 1-based index from `prime factory status` to a cluster id.
+
+    Anything that doesn't match (or no team context) is passed through as an id.
+    """
+    team_id = team or Config().team_id
+    if not team_id:
+        return selector
+    try:
+        clusters = FactoryClient(APIClient()).get_status(team_id).clusters
+    except APIError:
+        return selector
+    if any(c.id == selector for c in clusters):
+        return selector
+    matches = [c for c in clusters if c.display_name == selector]
+    if not matches and selector.isascii() and selector.isdigit():
+        if 1 <= int(selector) <= len(clusters):
+            matches = [clusters[int(selector) - 1]]
+    if len(matches) > 1:
+        err_console.print(
+            f"[red]Error:[/red] '{escape(selector)}' matches multiple clusters. "
+            "Use its 1-based index from `prime factory status` or its id instead."
+        )
+        raise typer.Exit(1)
+    if not matches:
+        return selector
+    if matches[0].id is None:
+        err_console.print(
+            "[red]Error:[/red] This server does not report cluster ids yet; "
+            "pass the cluster id instead of its name."
+        )
+        raise typer.Exit(1)
+    return matches[0].id
 
 
 def _watch_footer(interval: int, error: Optional[str]) -> str:
@@ -343,17 +386,19 @@ def _watch_footer(interval: int, error: Optional[str]) -> str:
     return footer
 
 
-def _refresh(fetch: Any, previous: ClusterNodeMetrics, cluster: str):
+def _refresh(fetch: Any, previous: ClusterNodeMetrics, cluster: str, node: Optional[str]):
     """Keep the last good frame on a failed refresh instead of exiting."""
     try:
         return fetch(), None
     except APIError as e:
-        return previous, _error_message(e, cluster)
+        return previous, _error_message(e, cluster, node)
 
 
 @app.command(name="metrics", no_args_is_help=True, epilog=METRICS_JSON_HELP)
 def cluster_metrics(
-    cluster: str = typer.Argument(..., help="Cluster ID"),
+    cluster: str = typer.Argument(
+        ..., help="Cluster id, or display name / 1-based index from `prime factory status`"
+    ),
     window: str = typer.Option("1h", "--window", help=f"Time window: {', '.join(METRICS_WINDOWS)}"),
     node: Optional[str] = typer.Option(
         None, "--node", help="Show the per-GPU breakdown for one node"
@@ -365,6 +410,13 @@ def cluster_metrics(
     watch: bool = typer.Option(False, "--watch", help="Refresh until interrupted"),
     interval: int = typer.Option(
         10, "--interval", "-n", min=2, help="Seconds between refreshes with --watch"
+    ),
+    team: Optional[str] = typer.Option(
+        None,
+        "--team",
+        "-t",
+        hidden=True,
+        help="Team ID override for name/index lookup (defaults to the selected account context)",
     ),
 ) -> None:
     """Show per-node GPU, CPU, memory and network metrics for a dedicated cluster."""
@@ -384,26 +436,20 @@ def cluster_metrics(
         err_console.print("[red]Error:[/red] --watch cannot be combined with JSON output.")
         raise typer.Exit(1)
 
+    cluster_id = _resolve_cluster_id(cluster, team, err_console)
     client = FactoryMetricsClient(APIClient())
 
     def fetch() -> ClusterNodeMetrics:
-        return client.get_node_metrics(cluster, window)
+        return client.get_node_metrics(cluster_id, window, node)
 
     try:
         metrics = fetch()
     except APIError as e:
-        err_console.print(f"[red]Error:[/red] {_error_message(e, cluster)}")
+        err_console.print(f"[red]Error:[/red] {_error_message(e, cluster, node)}")
         raise typer.Exit(1)
-    _check_node(metrics, node, err_console)
 
     if output == "json":
-        payload = metrics.raw_response
-        if node is not None:
-            payload = {
-                **payload,
-                "nodes": [n for n in payload.get("nodes", []) if n.get("name") == node],
-            }
-        output_data_as_json(payload, console)
+        output_data_as_json(metrics.raw_response, console)
         return
 
     if not watch:
@@ -419,7 +465,7 @@ def cluster_metrics(
                     console.print(item)
                 console.print(_watch_footer(interval, error))
                 time.sleep(interval)
-                metrics, error = _refresh(fetch, metrics, cluster)
+                metrics, error = _refresh(fetch, metrics, cluster, node)
         else:
             with Live(console=console, auto_refresh=False) as live:
                 while True:
@@ -430,6 +476,6 @@ def cluster_metrics(
                     ]
                     live.update(Group(*frame), refresh=True)
                     time.sleep(interval)
-                    metrics, error = _refresh(fetch, metrics, cluster)
+                    metrics, error = _refresh(fetch, metrics, cluster, node)
     except KeyboardInterrupt:
         return

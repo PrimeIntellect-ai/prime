@@ -53,8 +53,13 @@ class FactorySource(BaseModel):
 
 
 class FactoryCluster(BaseModel):
-    """One dedicated cluster with its per-workload-group allocation summary."""
+    """One dedicated cluster with its per-workload-group allocation summary.
 
+    ``id`` is the cluster id the ``/model-factory/clusters/{id}`` routes
+    take; older servers omit it.
+    """
+
+    id: Optional[str] = None
     display_name: str
     gpu_type: Optional[str] = None
     total_gpus: Optional[int] = None

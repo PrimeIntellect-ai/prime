@@ -2,7 +2,8 @@
 
 Contract: ``GET /api/v1/model-factory/clusters/{cluster_id}/metrics/nodes``.
 Every metric name below is used verbatim as both the ``current`` field and
-the ``series`` key, so a backend rename is a one-line change here.
+the ``series`` key. A series key is absent when the metric has no data;
+when present it covers the whole window, with ``value: None`` for a gap.
 """
 
 from typing import Any, Dict, List, Optional
@@ -19,29 +20,27 @@ SUPPORTED_METRICS_SCHEMA_VERSION = 1
 
 
 class MetricPoint(BaseModel):
-    """One sample of a time series: unix seconds and value."""
+    """One sample of a time series: unix seconds and value (``None`` is a gap)."""
 
-    timestamp: float
-    value: float
+    timestamp: int
+    value: Optional[float] = None
 
 
 class MetricValues(BaseModel):
     """Latest values for a node or a single GPU. ``None`` means unobserved.
 
     Node-level GPU values aggregate over the node's GPUs: utilization is the
-    mean, memory and power are summed, temperature is the hottest GPU and
-    XID errors are counted over the requested window.
+    mean, memory and power are summed, temperature is the hottest GPU.
+    Host fields (cpu, memory, network) are always ``None`` on a GPU.
     """
 
     gpu_util_percent: Optional[float] = None
-    gpu_memory_used_bytes: Optional[float] = None
-    gpu_memory_total_bytes: Optional[float] = None
+    gpu_memory_used_bytes: Optional[int] = None
     gpu_temperature_celsius: Optional[float] = None
     gpu_power_watts: Optional[float] = None
-    xid_errors: Optional[int] = None
     cpu_util_percent: Optional[float] = None
-    memory_used_bytes: Optional[float] = None
-    memory_total_bytes: Optional[float] = None
+    memory_used_bytes: Optional[int] = None
+    memory_total_bytes: Optional[int] = None
     network_rx_bytes_per_second: Optional[float] = None
     network_tx_bytes_per_second: Optional[float] = None
 
@@ -50,17 +49,20 @@ class GpuMetrics(BaseModel):
     """One GPU on a node; ``series`` is keyed by ``MetricValues`` field names."""
 
     index: int
-    uuid: Optional[str] = None
     current: MetricValues = MetricValues()
     series: Dict[str, List[MetricPoint]] = {}
 
 
 class NodeMetrics(BaseModel):
-    """One node's current values, compact series and optional GPU breakdown."""
+    """One node's current values and series.
+
+    ``gpus`` is filled only when the request names this node (``?node=``).
+    """
 
     name: str
     gpu_type: Optional[str] = None
     gpu_count: Optional[int] = None
+    state: str
     current: MetricValues = MetricValues()
     series: Dict[str, List[MetricPoint]] = {}
     gpus: List[GpuMetrics] = []
@@ -71,17 +73,20 @@ class ClusterNodeMetrics(BaseModel):
 
     ``available`` is False when the cluster exists and the caller may see it
     but no metrics can be served (no exporter data, store unreachable);
-    ``unavailable_reason`` then carries a short user-facing explanation.
+    ``unavailable_reason`` then carries a short user-facing sentence and
+    ``unavailable_code`` one of ``no_cluster_label`` / ``no_data``. An
+    unreachable metrics store is a 503, not ``available=False``.
     """
 
     schema_version: int
     cluster_id: str
-    cluster_display_name: Optional[str] = None
+    cluster_display_name: str
     window: str
-    step_seconds: Optional[int] = None
+    step_seconds: int
     as_of: AwareUTCDatetime = None
-    available: bool = True
+    available: bool
     unavailable_reason: Optional[str] = None
+    unavailable_code: Optional[str] = None
     nodes: List[NodeMetrics]
 
     _raw_response: Dict[str, Any] = PrivateAttr(default_factory=dict)
@@ -97,17 +102,23 @@ class FactoryMetricsClient:
     def __init__(self, client: APIClient) -> None:
         self.client = client
 
-    def get_node_metrics(self, cluster_id: str, window: str = "1h") -> ClusterNodeMetrics:
+    def get_node_metrics(
+        self, cluster_id: str, window: str = "1h", node: Optional[str] = None
+    ) -> ClusterNodeMetrics:
         """Fetch per-node metrics for one dedicated cluster.
 
-        Access is enforced by the backend: only members of the cluster's
-        team can read its metrics.
+        With ``node``, the response holds only that node, with its per-GPU
+        breakdown. Only members of the cluster's team can read its metrics;
+        any other cluster id, or a node outside the cluster, is a 404.
         """
         if window not in METRICS_WINDOWS:
             raise ValueError(f"window must be one of {', '.join(METRICS_WINDOWS)}")
         endpoint = f"/model-factory/clusters/{quote(cluster_id, safe='')}/metrics/nodes"
         try:
-            response = self.client.get(endpoint, params={"window": window})
+            params: Dict[str, Any] = {"window": window}
+            if node is not None:
+                params["node"] = node
+            response = self.client.get(endpoint, params=params)
         except ValueError as exc:
             raise APIError("Cluster metrics API returned a malformed response body.") from exc
         try:

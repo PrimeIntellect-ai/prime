@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 import typer
 from prime_cli.commands.evals import (
@@ -9,11 +10,33 @@ from prime_cli.commands.evals import (
     _push_single_eval,
     _validate_eval_path,
 )
+from prime_cli.core import APIClient as PrimeCLIAPIClient
 from prime_cli.main import app
+from prime_evals import EvalsAPIError, EvalsClient
 from typer.testing import CliRunner
 from typing_extensions import cast
 
 runner = CliRunner()
+
+
+def test_eval_environment_lookup_wraps_cli_403_without_real_http():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            403,
+            json={"detail": "You are not a member of this team"},
+        )
+
+    api_client = PrimeCLIAPIClient(api_key="test-api-key")
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        api_client.client = http_client
+        with pytest.raises(EvalsAPIError, match="does not exist"):
+            EvalsClient(api_client)._lookup_environment_by_slug("gutchapa", "rtk-compression")
+
+    assert requests[0].method == "GET"
+    assert requests[0].url.path == "/api/v1/environmentshub/gutchapa/rtk-compression/@latest"
 
 
 class TestHasEvalFiles:

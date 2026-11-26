@@ -123,6 +123,13 @@ prime train rl.toml
 # arrays replace. prime-rl's `@ a.toml @ b.toml` form works as-is.
 prime train @ rl.toml @ gpu/h200.toml @ data/swe.toml
 
+# Launch a prime-rl recipe without downloading anything: recipe:<model>/<data>
+# pulls the model, H200 overlay and data configs from the prime-rl repo.
+# Local files after it override the recipe's settings.
+prime train recipes
+prime train recipe:muse-glimmer-30b/swe -e HF_TOKEN
+prime train recipe:qwen3.8-27b/math my-overrides.toml
+
 # Inspect and manage Hosted Training runs
 prime train list              # Your runs
 prime train list --all-users  # Include teammates' runs

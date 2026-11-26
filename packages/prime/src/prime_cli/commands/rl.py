@@ -49,6 +49,10 @@ from ..utils import (
 )
 from ..utils.env_vars import EnvParseError, collect_env_vars
 from ..utils.formatters import format_file_size, strip_ansi
+from ..utils.prime_rl_recipes import (
+    PrimeRLSource,
+    is_remote_config,
+)
 from ..utils.prompt import confirm_or_skip
 from .feedback import submit_feedback
 from .inference_deploy import DEPLOYMENT_JSON_HELP, deploy_checkpoint_command
@@ -388,6 +392,47 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return result
 
 
+# Keys prime-rl recipes carry for self-hosted (Slurm, local paths) runs that
+# have no meaning on Hosted Training; dropped from layers pulled from the repo.
+_SELF_HOSTED_ONLY_KEYS = ("slurm", "output_dir")
+
+
+def _strip_self_hosted_keys(cfg: Dict[str, Any]) -> None:
+    for key in _SELF_HOSTED_ONLY_KEYS:
+        cfg.pop(key, None)
+    env_vars = cfg.get("env_vars")
+    if isinstance(env_vars, dict):
+        env_vars.pop("HF_HOME", None)
+        if not env_vars:
+            cfg.pop("env_vars")
+
+
+def _config_layers(args: List[str]) -> List[tuple[str, Dict[str, Any], Optional[Path]]]:
+    """(label, table, directory for relative env files or None if remote) per
+    layer, in merge order. `recipe:` arguments are read from the prime-rl
+    repo at one commit; everything else is a local path."""
+    config_args = [arg.removeprefix("@") for arg in args if arg != "@"]
+    if not config_args:
+        raise ValueError("Pass at least one config file.")
+    source: Optional[PrimeRLSource] = None
+    layers: List[tuple[str, Dict[str, Any], Optional[Path]]] = []
+    for arg in config_args:
+        if not is_remote_config(arg):
+            layers.append((arg, _load_toml(arg), Path(arg).parent))
+            continue
+        if source is None:
+            source = PrimeRLSource()
+        for repo_path in source.expand(arg):
+            label = f"{source.label}:{repo_path}"
+            try:
+                cfg = tomllib.loads(source.read(repo_path))
+            except tomllib.TOMLDecodeError as e:
+                raise ValueError(f"Invalid TOML in {label}: {e}") from e
+            _strip_self_hosted_keys(cfg)
+            layers.append((label, cfg, None))
+    return layers
+
+
 def _load_config_stack(args: List[str]) -> tuple[Dict[str, Any], str]:
     """Merge layered run configs, later files winning, as prime-rl does.
 
@@ -395,24 +440,27 @@ def _load_config_stack(args: List[str]) -> tuple[Dict[str, Any], str]:
     dropped and an `@a.toml` prefix is stripped. Env files resolve against the
     directory of the file that lists them and accumulate across files rather
     than replacing each other, so a later file's secrets win on collision.
+    `recipe:<model>[/<data>]` layers come from prime-rl's main branch
+    (see `prime train recipes`).
     Returns the merged table and a label naming its files for messages."""
-    config_paths = [arg.removeprefix("@") for arg in args if arg != "@"]
-    if not config_paths:
-        raise ValueError("Pass at least one config file.")
     merged: Dict[str, Any] = {}
     env_files: List[str] = []
     modes: Dict[str, Any] = {}
-    for config_path in config_paths:
-        cfg = _load_toml(config_path)
-        config_dir = Path(config_path).parent
+    layers = _config_layers(args)
+    for config_path, cfg, config_dir in layers:
         # `env_file` (deprecated, singular) comes first so `env_files`
         # (canonical, plural) overrides it on key collision.
         for key in ("env_file", "env_files"):
             val = cfg.pop(key, None)
+            if val is not None and config_dir is None:
+                raise ValueError(
+                    f"{key} in {config_path}: env files can't come from the prime-rl repo; "
+                    "pass secrets with -e/--env-var or --env-file."
+                )
             if isinstance(val, str):
                 val = [val]
             if isinstance(val, list):
-                env_files.extend(str(config_dir / p) for p in val)
+                env_files.extend(str(config_dir / p) for p in val)  # type: ignore[operator]
             elif val is not None:
                 raise ValueError(
                     f"{key} in {config_path} must be a path or a list of paths, "
@@ -426,7 +474,7 @@ def _load_config_stack(args: List[str]) -> tuple[Dict[str, Any], str]:
         raise ValueError(f"Config files set conflicting modes:{files}")
     if env_files:
         merged["env_files"] = env_files
-    return merged, " + ".join(config_paths)
+    return merged, " + ".join(label for label, _, _ in layers)
 
 
 def _looks_like_lora(cfg: Dict[str, Any]) -> bool:
@@ -1257,7 +1305,8 @@ def validate_training_config(
         ...,
         metavar="CONFIG_PATH...",
         help="TOML config files, merged in order with later files winning, as in "
-        "prime-rl's `uv run rl @ a.toml @ b.toml`.",
+        "prime-rl's `uv run rl @ a.toml @ b.toml`. `recipe:<model>[/<data>]` reads a "
+        "recipe from the prime-rl repo (see `prime train recipes`).",
     ),
     schema_python: Optional[Path] = typer.Option(
         None,
@@ -1298,9 +1347,9 @@ def validate_training_config(
 
     validate_output_format(output, console)
     try:
-        raw, config_label = _load_config_stack(config_paths)
         if ref is not None and pr is not None:
             raise ValueError("--ref and --pr are mutually exclusive.")
+        raw, config_label = _load_config_stack(config_paths)
         source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_label)
         if pr is not None:
             source_ref = resolve_pull_request_head(pr)
@@ -1366,7 +1415,9 @@ def create_run(
         ...,
         metavar="CONFIG_PATH...",
         help="TOML config files to launch as a Hosted Training run, merged in order "
-        "with later files winning, as in prime-rl's `uv run rl @ a.toml @ b.toml`.",
+        "with later files winning, as in prime-rl's `uv run rl @ a.toml @ b.toml`. "
+        "`recipe:<model>[/<data>]` reads a recipe from the prime-rl repo "
+        "(see `prime train recipes`).",
     ),
     env: Optional[List[str]] = typer.Option(
         None,
@@ -1485,9 +1536,13 @@ def create_run(
         prime train sft.toml --volume research
         prime train pretrain.toml --volume research
         prime train rl.toml gpu/h200.toml data/swe.toml
+        prime train recipe:muse-glimmer-30b/swe -e HF_TOKEN
+        prime train recipe:qwen3.8-27b/math my-overrides.toml
 
     Several configs merge in order, later files winning, as in prime-rl's
     `uv run rl @ rl.toml @ gpu/h200.toml @ data/swe.toml` (which also works here).
+    `recipe:<model>[/<data>]` pulls a recipe stack (model, H200 overlay, data)
+    from the prime-rl repo.
     The config's top-level `mode` ("rl", "sft" or "pretrain") picks the run kind.
     """
     validate_output_format(output, console)
@@ -1546,6 +1601,56 @@ def create_run(
         source_ref=ref,
         source_pr=pr,
         resume_from=resume_from,
+    )
+
+
+@app.command("recipes", rich_help_panel="Commands")
+def list_recipes(
+    output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+) -> None:
+    """List the RL recipes in prime-rl that `prime train recipe:<model>/<data>` launches.
+
+    Example:
+
+        prime train recipes
+        prime train recipe:muse-glimmer-30b/swe -e HF_TOKEN
+    """
+    validate_output_format(output, console)
+    try:
+        source = PrimeRLSource()
+        recipes = [r for r in source.recipes() if r.launchable]
+        sha = source.sha
+    except ValueError as exc:
+        if output == "json":
+            output_data_as_json({"error": str(exc)}, console)
+        else:
+            console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    if output == "json":
+        output_data_as_json(
+            {
+                "ref": source.ref,
+                "commit": sha,
+                "recipes": [{"model": r.model, "gpu": r.gpu, "data": r.data} for r in recipes],
+            },
+            console,
+        )
+        return
+    if not recipes:
+        console.print(f"No recipes found in prime-rl at {rich_escape(source.ref)} ({sha[:7]}).")
+        return
+    table = Table(title=f"prime-rl recipes @ {rich_escape(source.ref)} ({sha[:7]})")
+    table.add_column("Recipe", style="cyan")
+    table.add_column("GPU")
+    table.add_column("Data overlays")
+    for r in recipes:
+        table.add_row(r.model, r.gpu or "-", ", ".join(r.data) or "-")
+    console.print(table)
+    example = recipes[0]
+    spec = f"{example.model}/{example.data[0]}" if example.data else example.model
+    console.print(
+        f"\nLaunch one: [bold]prime train recipe:{spec}[/bold] "
+        "(add your own TOML after it to override settings)."
     )
 
 

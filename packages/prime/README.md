@@ -124,7 +124,7 @@ prime train rl.toml
 prime train @ rl.toml @ gpu/h200.toml @ data/swe.toml
 
 # Launch a prime-rl recipe without downloading anything: recipe:<model>/<data>
-# pulls the model, H200 overlay and data configs from the prime-rl repo.
+# pulls the model, H200 overlay and data configs from prime-rl's latest release.
 # Local files after it override the recipe's settings.
 prime train recipes
 prime train recipe:muse-glimmer-30b/swe -e HF_TOKEN

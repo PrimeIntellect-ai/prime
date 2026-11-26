@@ -33,7 +33,9 @@ def github(monkeypatch: pytest.MonkeyPatch) -> list:
 
     def fake_get(url: str, **_: object) -> httpx.Response:
         calls.append(url)
-        if url.endswith("/commits/main"):
+        if url.endswith("/releases/latest"):
+            return httpx.Response(200, json={"tag_name": "v0.11.0"})
+        if url.endswith("/commits/v0.11.0"):
             return httpx.Response(200, text=SHA)
         if "/commits/" in url:
             return httpx.Response(404)
@@ -66,10 +68,11 @@ def test_recipe_expands_to_stack_and_drops_self_hosted_keys(github: list) -> Non
         "orchestrator": {"batch_size": 8},
     }
     assert label == (
-        "prime-rl@aaaaaaa:recipes/m/rl.toml + prime-rl@aaaaaaa:recipes/m/gpu/h200.toml"
-        " + prime-rl@aaaaaaa:recipes/data/swe.toml"
+        "prime-rl@v0.11.0:recipes/m/rl.toml + prime-rl@v0.11.0:recipes/m/gpu/h200.toml"
+        " + prime-rl@v0.11.0:recipes/data/swe.toml"
     )
-    # One commit lookup and one tree listing for the whole stack.
+    # One release, commit and tree lookup for the whole stack.
+    assert sum("/releases/latest" in c for c in github) == 1
     assert sum("/commits/" in c for c in github) == 1
     assert sum("/git/trees/" in c for c in github) == 1
 
@@ -105,6 +108,12 @@ def test_malformed_spec_fails_before_any_request(github: list, arg: str) -> None
     assert github == []
 
 
+def test_no_release(github: list, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prime_rl_recipes.httpx, "get", lambda url, **_: httpx.Response(404))
+    with pytest.raises(ValueError, match="has no published release"):
+        _load_config_stack(["recipe:m"])
+
+
 runner = CliRunner()
 TEST_ENV = {"PRIME_DISABLE_VERSION_CHECK": "1"}
 
@@ -128,7 +137,8 @@ def test_ref_flag_only_picks_runtime_code(github: list, dispatched: list) -> Non
         app, ["train", "recipe:m/swe", "--ref", "my-code", "-y", "-o", "json"], env=TEST_ENV
     )
     assert result.exit_code == 0, result.output
-    assert github[0].endswith("/commits/main")
+    assert github[0].endswith("/releases/latest")
+    assert github[1].endswith("/commits/v0.11.0")
     assert dispatched[0]["sourceRef"] == "my-code"
 
 
@@ -136,6 +146,7 @@ def test_recipes_command_lists_launchable_recipes(github: list) -> None:
     result = runner.invoke(app, ["train", "recipes", "-o", "json"], env=TEST_ENV)
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
+    assert data["version"] == "v0.11.0"
     assert data["commit"] == SHA
     assert [r["model"] for r in data["recipes"]] == ["bad", "m"]
     assert data["recipes"][1]["gpu"] == "h200"

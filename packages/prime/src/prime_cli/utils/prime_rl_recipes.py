@@ -5,8 +5,9 @@ recipe without the user downloading TOML files first.
 prime-rl's recipe stack `recipes/<model>/rl.toml`, its compute overlay under
 `recipes/<model>/gpu/` and, when given, `recipes/data/<data>.toml`.
 
-Recipes come from prime-rl's main branch, resolved to a commit once; every
-file is read at that commit, so one invocation never mixes files from two commits.
+Recipes come from prime-rl's latest release (GitHub's "Latest" release, so
+dev tags and prereleases are skipped), resolved to a commit once; every file is
+read at that commit, so one invocation never mixes files from two commits.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ import httpx
 from prime_cli.core import default_user_agent
 
 PRIME_RL_REPO = "PrimeIntellect-ai/prime-rl"
-DEFAULT_RECIPES_REF = "main"
 
 RECIPE_PREFIX = "recipe:"
 
@@ -36,6 +36,7 @@ _TIMEOUT = 15.0
 # `recipe:<model>` or `recipe:<model>/<data>`.
 _SPEC_RE = re.compile(r"\A([A-Za-z0-9][A-Za-z0-9._-]*)(?:/([A-Za-z0-9][A-Za-z0-9._-]*))?\Z")
 _SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+_TAG_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
 
 
 def is_remote_config(arg: str) -> bool:
@@ -96,18 +97,41 @@ def _get(url: str, accept: str, what: str) -> httpx.Response:
 
 @dataclass
 class PrimeRLSource:
-    """prime-rl at one commit. Network calls are lazy and cached."""
+    """prime-rl's latest release, at one commit. Network calls are lazy and cached."""
 
-    ref: str = DEFAULT_RECIPES_REF
+    _version: Optional[str] = None
     _sha: Optional[str] = None
     _paths: Optional[List[str]] = None
 
     @property
+    def version(self) -> str:
+        """Tag of prime-rl's latest release, e.g. v0.11.0."""
+        if self._version is None:
+            what = "prime-rl's latest release"
+            resp = _get(
+                f"{_GITHUB_API}/repos/{PRIME_RL_REPO}/releases/latest",
+                "application/vnd.github+json",
+                what,
+            )
+            if resp.status_code == 404:
+                raise ValueError(f"{PRIME_RL_REPO} has no published release.")
+            if resp.status_code != 200:
+                raise ValueError(f"GitHub returned HTTP {resp.status_code} for {what}.")
+            try:
+                tag = resp.json()["tag_name"]
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ValueError(f"Unexpected GitHub response for {what}.") from exc
+            if not isinstance(tag, str) or not _TAG_RE.match(tag):
+                raise ValueError(f"Unexpected release tag {tag!r} for {what}.")
+            self._version = tag
+        return self._version
+
+    @property
     def sha(self) -> str:
         if self._sha is None:
-            what = f"prime-rl ref {self.ref!r}"
+            what = f"prime-rl {self.version}"
             resp = _get(
-                f"{_GITHUB_API}/repos/{PRIME_RL_REPO}/commits/{self.ref}",
+                f"{_GITHUB_API}/repos/{PRIME_RL_REPO}/commits/{self.version}",
                 "application/vnd.github.sha",
                 what,
             )
@@ -123,12 +147,12 @@ class PrimeRLSource:
 
     @property
     def label(self) -> str:
-        return f"prime-rl@{self.sha[:7]}"
+        return f"prime-rl@{self.version}"
 
     @property
     def paths(self) -> List[str]:
         if self._paths is None:
-            what = f"the file list of prime-rl at {self.sha[:7]}"
+            what = f"the file list of prime-rl {self.version}"
             resp = _get(
                 f"{_GITHUB_API}/repos/{PRIME_RL_REPO}/git/trees/{self.sha}?recursive=1",
                 "application/vnd.github+json",
@@ -145,7 +169,7 @@ class PrimeRLSource:
 
     def read(self, path: str) -> str:
         if path not in self.paths:
-            raise ValueError(f"{path} not found in prime-rl at {self.ref} ({self.sha[:7]}).")
+            raise ValueError(f"{path} not found in prime-rl {self.version}.")
         what = f"{path} from prime-rl"
         url = f"{_GITHUB_RAW}/{PRIME_RL_REPO}/{self.sha}/{quote(path, safe='/')}"
         resp = _get(url, "text/plain", what)
@@ -185,7 +209,7 @@ class PrimeRLSource:
         if recipe is None:
             known = ", ".join(recipes) or "none"
             raise ValueError(
-                f"Unknown recipe {model!r} in prime-rl at {self.ref} ({self.sha[:7]}). "
+                f"Unknown recipe {model!r} in prime-rl {self.version}. "
                 f"Available: {known}. See `prime train recipes`."
             )
         paths = [f"{_RECIPES_DIR}/{model}/rl.toml"]

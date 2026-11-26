@@ -440,7 +440,7 @@ def _load_config_stack(args: List[str]) -> tuple[Dict[str, Any], str]:
     dropped and an `@a.toml` prefix is stripped. Env files resolve against the
     directory of the file that lists them and accumulate across files rather
     than replacing each other, so a later file's secrets win on collision.
-    `recipe:<model>[/<data>]` layers come from prime-rl's main branch
+    `recipe:<model>[/<data>]` layers come from prime-rl's latest release
     (see `prime train recipes`).
     Returns the merged table and a label naming its files for messages."""
     merged: Dict[str, Any] = {}
@@ -1306,7 +1306,7 @@ def validate_training_config(
         metavar="CONFIG_PATH...",
         help="TOML config files, merged in order with later files winning, as in "
         "prime-rl's `uv run rl @ a.toml @ b.toml`. `recipe:<model>[/<data>]` reads a "
-        "recipe from the prime-rl repo (see `prime train recipes`).",
+        "recipe from prime-rl's latest release (see `prime train recipes`).",
     ),
     schema_python: Optional[Path] = typer.Option(
         None,
@@ -1416,7 +1416,7 @@ def create_run(
         metavar="CONFIG_PATH...",
         help="TOML config files to launch as a Hosted Training run, merged in order "
         "with later files winning, as in prime-rl's `uv run rl @ a.toml @ b.toml`. "
-        "`recipe:<model>[/<data>]` reads a recipe from the prime-rl repo "
+        "`recipe:<model>[/<data>]` reads a recipe from prime-rl's latest release "
         "(see `prime train recipes`).",
     ),
     env: Optional[List[str]] = typer.Option(
@@ -1542,7 +1542,7 @@ def create_run(
     Several configs merge in order, later files winning, as in prime-rl's
     `uv run rl @ rl.toml @ gpu/h200.toml @ data/swe.toml` (which also works here).
     `recipe:<model>[/<data>]` pulls a recipe stack (model, H200 overlay, data)
-    from the prime-rl repo.
+    from prime-rl's latest release.
     The config's top-level `mode` ("rl", "sft" or "pretrain") picks the run kind.
     """
     validate_output_format(output, console)
@@ -1608,7 +1608,9 @@ def create_run(
 def list_recipes(
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """List the RL recipes in prime-rl that `prime train recipe:<model>/<data>` launches.
+    """List the RL recipes `prime train recipe:<model>/<data>` launches.
+
+    Recipes come from prime-rl's latest release.
 
     Example:
 
@@ -1629,7 +1631,7 @@ def list_recipes(
     if output == "json":
         output_data_as_json(
             {
-                "ref": source.ref,
+                "version": source.version,
                 "commit": sha,
                 "recipes": [{"model": r.model, "gpu": r.gpu, "data": r.data} for r in recipes],
             },
@@ -1637,9 +1639,9 @@ def list_recipes(
         )
         return
     if not recipes:
-        console.print(f"No recipes found in prime-rl at {rich_escape(source.ref)} ({sha[:7]}).")
+        console.print(f"No recipes found in prime-rl {rich_escape(source.version)} ({sha[:7]}).")
         return
-    table = Table(title=f"prime-rl recipes @ {rich_escape(source.ref)} ({sha[:7]})")
+    table = Table(title=f"prime-rl {rich_escape(source.version)} recipes ({sha[:7]})")
     table.add_column("Recipe", style="cyan")
     table.add_column("GPU")
     table.add_column("Data overlays")

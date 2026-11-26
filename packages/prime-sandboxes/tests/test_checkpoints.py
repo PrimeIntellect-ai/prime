@@ -376,6 +376,37 @@ async def test_wait_for_checkpoint_api_error(checkpoint_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wait_for_checkpoint_outlasts_rate_limited_lookups(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    from prime_sandboxes import APIError
+
+    script = iter([APIError("HTTP 429: Too Many Requests")] * 2 + ["PENDING", "DURABLE"])
+    calls = []
+
+    def get(checkpoint_id):
+        calls.append(checkpoint_id)
+        step = next(script)
+        if isinstance(step, Exception):
+            raise step
+        return SandboxCheckpoint.model_validate(checkpoint_response(step))
+
+    async def async_get(checkpoint_id):
+        return get(checkpoint_id)
+
+    monkeypatch.setattr(
+        checkpoint_client._checkpoint_batcher,
+        "get",
+        async_get if isinstance(checkpoint_client, AsyncSandboxClient) else get,
+    )
+    durable = await wait_for_checkpoint(checkpoint_client)
+    assert durable.state == "DURABLE"
+    assert len(calls) == 4
+    # After a 429 the wait drops the fast cadence for creation's backoff.
+    assert checkpoint_clock == [1.0, 1.5, 2.25]
+
+
+@pytest.mark.asyncio
 async def test_wait_for_checkpoint_cancellation(monkeypatch):
     import asyncio
 

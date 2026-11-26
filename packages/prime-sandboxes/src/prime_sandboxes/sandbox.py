@@ -3241,6 +3241,10 @@ class SandboxClient:
         DELETING, or a failed merge (merge_error in the message) and
         TimeoutError on expiry.
         In-flight requests follow the API client's timeout and retry policy.
+        A rate-limited lookup (HTTP 429) does not end the wait: it keeps
+        polling until timeout_seconds, with creation's slower backoff (up to
+        10 s) from then on, so thousands of concurrent waits do not fail when
+        they spend the token's checkpoint lookup budget.
         """
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
@@ -3250,33 +3254,45 @@ class SandboxClient:
         slow_index = 0
         merge_phase = False
         merge_pending = False
+        rate_limited = False
         while time.monotonic() < deadline:
-            checkpoint = self._checkpoint_batcher.get(checkpoint_id)
-            if checkpoint.state == "DURABLE":
-                if checkpoint.merge == "failed":
+            try:
+                checkpoint = self._checkpoint_batcher.get(checkpoint_id)
+            except APIError as error:
+                if not _is_rate_limited(error):
+                    raise
+                # The token's lookup budget is spent, not the checkpoint:
+                # keep waiting, at the slower creation backoff from here on.
+                rate_limited = True
+            else:
+                if checkpoint.state == "DURABLE":
+                    if checkpoint.merge == "failed":
+                        raise RuntimeError(
+                            f"Checkpoint {checkpoint_id}'s volume merge failed: "
+                            f"{checkpoint.merge_error or 'no error details'}"
+                        )
+                    if checkpoint.merge != "pending":
+                        return checkpoint
+                    if not merge_phase:
+                        # The volume merge is a fresh server phase with its own
+                        # short budget, so re-arm the fast cadence for it once.
+                        merge_phase = True
+                        phase_start = time.monotonic()
+                        slow_index = 0
+                    merge_pending = True
+                elif checkpoint.state in ("FAILED", "DELETING"):
                     raise RuntimeError(
-                        f"Checkpoint {checkpoint_id}'s volume merge failed: "
-                        f"{checkpoint.merge_error or 'no error details'}"
+                        f"Checkpoint {checkpoint_id} cannot become durable "
+                        f"(state={checkpoint.state}): "
+                        f"{checkpoint.error or 'no error details'}"
                     )
-                if checkpoint.merge != "pending":
-                    return checkpoint
-                if not merge_phase:
-                    # The volume merge is a fresh server phase with its own
-                    # short budget, so re-arm the fast cadence for it once.
-                    merge_phase = True
-                    phase_start = time.monotonic()
-                    slow_index = 0
-                merge_pending = True
-            elif checkpoint.state in ("FAILED", "DELETING"):
-                raise RuntimeError(
-                    f"Checkpoint {checkpoint_id} cannot become durable "
-                    f"(state={checkpoint.state}): "
-                    f"{checkpoint.error or 'no error details'}"
-                )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
+            if rate_limited:
+                time.sleep(min(_creation_poll_delay(slow_index), remaining))
+                slow_index += 1
+            elif time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
                 time.sleep(min(_checkpoint_poll_delay(slow_index), remaining))
                 slow_index += 1
             else:
@@ -5365,6 +5381,10 @@ class AsyncSandboxClient:
         the checkpoint first reports a pending volume merge. Raises
         RuntimeError on FAILED or DELETING and TimeoutError on expiry.
         In-flight requests follow the API client's timeout and retry policy.
+        A rate-limited lookup (HTTP 429) does not end the wait: it keeps
+        polling until timeout_seconds, with creation's slower backoff (up to
+        10 s) from then on, so thousands of concurrent waits do not fail when
+        they spend the token's checkpoint lookup budget.
         """
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
@@ -5374,33 +5394,45 @@ class AsyncSandboxClient:
         slow_index = 0
         merge_phase = False
         merge_pending = False
+        rate_limited = False
         while time.monotonic() < deadline:
-            checkpoint = await self._checkpoint_batcher.get(checkpoint_id)
-            if checkpoint.state == "DURABLE":
-                if checkpoint.merge == "failed":
+            try:
+                checkpoint = await self._checkpoint_batcher.get(checkpoint_id)
+            except APIError as error:
+                if not _is_rate_limited(error):
+                    raise
+                # The token's lookup budget is spent, not the checkpoint:
+                # keep waiting, at the slower creation backoff from here on.
+                rate_limited = True
+            else:
+                if checkpoint.state == "DURABLE":
+                    if checkpoint.merge == "failed":
+                        raise RuntimeError(
+                            f"Checkpoint {checkpoint_id}'s volume merge failed: "
+                            f"{checkpoint.merge_error or 'no error details'}"
+                        )
+                    if checkpoint.merge != "pending":
+                        return checkpoint
+                    if not merge_phase:
+                        # The volume merge is a fresh server phase with its own
+                        # short budget, so re-arm the fast cadence for it once.
+                        merge_phase = True
+                        phase_start = time.monotonic()
+                        slow_index = 0
+                    merge_pending = True
+                elif checkpoint.state in ("FAILED", "DELETING"):
                     raise RuntimeError(
-                        f"Checkpoint {checkpoint_id}'s volume merge failed: "
-                        f"{checkpoint.merge_error or 'no error details'}"
+                        f"Checkpoint {checkpoint_id} cannot become durable "
+                        f"(state={checkpoint.state}): "
+                        f"{checkpoint.error or 'no error details'}"
                     )
-                if checkpoint.merge != "pending":
-                    return checkpoint
-                if not merge_phase:
-                    # The volume merge is a fresh server phase with its own
-                    # short budget, so re-arm the fast cadence for it once.
-                    merge_phase = True
-                    phase_start = time.monotonic()
-                    slow_index = 0
-                merge_pending = True
-            elif checkpoint.state in ("FAILED", "DELETING"):
-                raise RuntimeError(
-                    f"Checkpoint {checkpoint_id} cannot become durable "
-                    f"(state={checkpoint.state}): "
-                    f"{checkpoint.error or 'no error details'}"
-                )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
+            if rate_limited:
+                await asyncio.sleep(min(_creation_poll_delay(slow_index), remaining))
+                slow_index += 1
+            elif time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
                 await asyncio.sleep(min(_checkpoint_poll_delay(slow_index), remaining))
                 slow_index += 1
             else:

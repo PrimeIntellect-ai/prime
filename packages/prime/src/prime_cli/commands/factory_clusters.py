@@ -44,7 +44,15 @@ SPARK_CHARS = "▁▂▃▄▅▆▇█"
 BAR_WIDTH = 8
 WIDE_COLUMNS = 120
 MISSING = "[dim]—[/dim]"
-STATE_STYLES = {"ready": "green", "not_ready": "red", "cordoned": "yellow"}
+# Same styles and "under inspection" wording as `prime factory nodes`.
+STATE_STYLES = {
+    "ready": "green",
+    "not_ready": "red",
+    "offline": "red",
+    "cordoned": "yellow",
+    "draining": "dim",
+    "unknown": "dim",
+}
 UNAVAILABLE_FALLBACK = {
     "no_cluster_label": "the cluster has not reported its metrics label yet",
     "no_data": "no metrics were reported for this cluster in this window",
@@ -162,7 +170,7 @@ def _num(value: Optional[float], unit: str) -> str:
 
 def _state(state: str) -> str:
     style = STATE_STYLES.get(state)
-    label = escape(state.replace("_", " "))
+    label = "under inspection" if state == "cordoned" else escape(state.replace("_", " "))
     return f"[{style}]{label}[/{style}]" if style else label
 
 
@@ -193,11 +201,11 @@ def _nodes_table(metrics: ClusterNodeMetrics) -> Table:
         collapse_padding=not show_trend,
     )
     table.add_column("NODE", style="bold", no_wrap=True)
-    table.add_column("STATE", no_wrap=True)
+    table.add_column("STATE")
     table.add_column("GPU UTIL", no_wrap=True)
     table.add_column("GPU MEM", justify="right", no_wrap=True)
-    table.add_column("TEMP", justify="right")
-    table.add_column("POWER", justify="right")
+    table.add_column("TEMP", justify="right", no_wrap=True)
+    table.add_column("POWER", justify="right", no_wrap=True)
     table.add_column("CPU", no_wrap=True)
     table.add_column("MEM", no_wrap=True)
     table.add_column("NET RX", justify="right", no_wrap=True)
@@ -294,6 +302,12 @@ def _header(metrics: ClusterNodeMetrics, node: Optional[NodeMetrics]) -> str:
     return " · ".join(parts)
 
 
+def _inspection_legend() -> Text:
+    from .factory import UNDER_INSPECTION_LEGEND
+
+    return Text.from_markup(f"[dim]{UNDER_INSPECTION_LEGEND}[/dim]")
+
+
 def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> List[RenderableType]:
     """Everything one refresh prints, as a list so plain mode can print it piecewise."""
     node = next((n for n in metrics.nodes if n.name == node_name), None) if node_name else None
@@ -310,12 +324,16 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
         return out
     if node_name is None:
         out.append(_nodes_table(metrics))
+        if any(n.state == "cordoned" for n in metrics.nodes):
+            out.append(_inspection_legend())
         return out
     if node is None:
         missing = escape(node_name)
         out.append(Text.from_markup(f"[yellow]Node '{missing}' is not reporting metrics.[/yellow]"))
         return out
     out.append(_node_summary(node))
+    if node.state == "cordoned":
+        out.append(_inspection_legend())
     if node.gpus:
         out.append(Text())
         out.append(_gpus_table(node, metrics.window))

@@ -206,7 +206,9 @@ def test_table_shows_every_node_with_state_and_bars(monkeypatch: pytest.MonkeyPa
     for header in ("NODE", "STATE", "GPU UTIL", "GPU MEM", "TEMP", "POWER", "CPU", "NET RX"):
         assert header in output
     assert "XID" not in output
-    assert "ready" in output and "cordoned" in output
+    assert "ready" in output and "under inspection" in output
+    assert "under inspection = pulled from scheduling by Prime" in output
+    assert "cordoned" not in output
     assert "█" in output and "░" in output
     assert " 92%" in output and " 41%" in output
     assert "488 GiB" in output

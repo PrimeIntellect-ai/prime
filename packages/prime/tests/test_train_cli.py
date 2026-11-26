@@ -876,6 +876,53 @@ def test_train_dispatches_a_merged_config_stack(monkeypatch, tmp_path: Path) -> 
     assert len(captured) == 1
 
 
+def test_train_ships_parsed_overrides_in_the_config(monkeypatch, tmp_path: Path) -> None:
+    captured = _capture_fft_dispatch(monkeypatch)
+    parsed_args = []
+
+    def parse(args, preparation):
+        parsed_args.append(args)
+        return {"deployment": {"num_infer_gpus": "2"}, "trainer": {"model": {"cp": "4"}}}
+
+    monkeypatch.setattr("prime_cli.utils.training_compiler.parse_overrides", parse)
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    result = runner.invoke(
+        app,
+        ["train", "@", str(cfg), "--deployment.num-infer-gpus", "2", "-y", "--trainer.model.cp=4"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    # Known options such as -y parse wherever they appear.
+    assert parsed_args == [["--deployment.num-infer-gpus", "2", "--trainer.model.cp=4"]]
+    assert captured[0]["config"] == {
+        "model": {"name": "Qwen/Qwen3-0.6B"},
+        "deployment": {"num_train_gpus": 1, "num_infer_gpus": "2"},
+        "trainer": {"model": {"cp": "4"}},
+    }
+
+
+def test_train_refuses_overrides_without_local_validation(monkeypatch, tmp_path: Path) -> None:
+    """Only the runtime's schema can type the flags, so they are never shipped
+    unparsed to a Platform that validates on submission."""
+    captured = _capture_fft_dispatch(monkeypatch)
+
+    def no_prepare(self, payload):
+        raise NotFoundError("no /prepare")
+
+    monkeypatch.setattr(
+        "prime_cli.api.training.HostedTrainingClient.prepare_local_validation", no_prepare
+    )
+    cfg = tmp_path / "rl.toml"
+    cfg.write_text(_FFT_BODY)
+    result = runner.invoke(app, ["train", str(cfg), "-y"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["train", str(cfg), "--trainer.model.cp", "4", "-y"], env=TEST_ENV)
+    assert result.exit_code == 1
+    assert "Command-line overrides need local validation" in result.output
+    assert len(captured) == 1
+
+
 def test_train_volume_flag_and_toml_key_reach_the_fft_payload(monkeypatch, tmp_path: Path) -> None:
     _mock_volumes(monkeypatch, [_vol("my-ckpts"), _vol("from-toml")])
     captured = _capture_fft_dispatch(monkeypatch)  # after _mock_volumes: last create_run patch wins

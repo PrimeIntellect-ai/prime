@@ -429,6 +429,50 @@ def _load_config_stack(args: List[str]) -> tuple[Dict[str, Any], str]:
     return merged, " + ".join(config_paths)
 
 
+def _split_overrides(args: List[str]) -> tuple[List[str], List[str]]:
+    """Separate config files from prime-rl-style `--a.b value` overrides.
+
+    Follows prime-rl's rule: `@ file` anywhere is a config file unless it
+    follows a `--flag`, which would load the file under that key. Bare paths
+    count only before the first flag, since a flag may take several values."""
+    config_args: List[str] = []
+    overrides: List[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "@" or (arg.startswith("@") and overrides):
+            if i and args[i - 1].startswith("--"):
+                raise ValueError(
+                    f"`{args[i - 1]} @ file` is not supported for hosted runs: "
+                    "pass the file with `@` on its own, nested under its key."
+                )
+            take = 2 if arg == "@" else 1
+            config_args.extend(args[i : i + take])
+            i += take
+        elif overrides or arg.startswith("-"):
+            overrides.append(arg)
+            i += 1
+        else:
+            config_args.append(arg)
+            i += 1
+    return config_args, overrides
+
+
+_HOSTED_MANAGED_OVERRIDES = {
+    "output_dir": "--output-dir",
+    "slurm": "--slurm.*",
+}
+
+
+def _warn_hosted_managed_overrides(overrides: Dict[str, Any], out: Any = console) -> None:
+    for key, flag in _HOSTED_MANAGED_OVERRIDES.items():
+        if key in overrides:
+            out.print(
+                f"[yellow]Warning:[/yellow] {flag} has no effect on hosted runs: "
+                "Platform sets the output directory and schedules the run."
+            )
+
+
 def _looks_like_lora(cfg: Dict[str, Any]) -> bool:
     """True iff the TOML is a retired shared-LoRA config: a top-level
     `model = "..."` string or a top-level `[[env]]` array. prime-rl's
@@ -672,6 +716,7 @@ def _dispatch_dedicated_run(
     *,
     raw_cfg: Dict[str, Any],
     config_label: str,
+    overrides: List[str],
     env: Optional[List[str]],
     env_file: Optional[List[str]],
     output: str,
@@ -696,6 +741,7 @@ def _dispatch_dedicated_run(
         CompilationError,
         SchemaEnvironmentUnavailable,
         compile_locally,
+        parse_overrides,
     )
 
     name = raw_cfg.get("name")
@@ -777,9 +823,8 @@ def _dispatch_dedicated_run(
         # round trip (and never burns anonymous API quota).
         resolved_source_ref = _resolve_pr_ref(source_pr)
 
-    config_payload = _hosted_config(
-        raw_cfg, get_console(stderr=True) if output == "json" else console
-    )
+    notices = get_console(stderr=True) if output == "json" else console
+    config_payload = _hosted_config(raw_cfg, notices)
     _warn_legacy_full_finetune_type(raw_cfg, config_label)
 
     payload = build_payload_from_toml(
@@ -821,13 +866,23 @@ def _dispatch_dedicated_run(
                 pass
             except (ServerError, APITimeoutError) as exc:
                 unavailable = exc
-            if (
-                preparation is not None
-                and preparation.get("submission_supported") is True
-                and _compiles_online_eval(mode, config_payload, preparation)
-            ):
-                if preparation.get("mode") != selection["mode"]:
-                    raise CompilationError("Preparation returned a different training mode.")
+            prepared = preparation is not None and preparation.get("submission_supported") is True
+            if prepared and preparation.get("mode") != selection["mode"]:
+                raise CompilationError("Preparation returned a different training mode.")
+            if overrides:
+                # Only the runtime's schema can type the flags, so they are
+                # never shipped unparsed.
+                if not prepared:
+                    reason = f": {unavailable}" if unavailable else ""
+                    raise CompilationError(
+                        "Command-line overrides need local validation, which is unavailable"
+                        f"{reason}. Put them in a TOML file instead."
+                    )
+                parsed = parse_overrides(overrides, preparation)
+                _warn_hosted_managed_overrides(parsed, notices)
+                config_payload = _deep_merge(config_payload, parsed)
+                payload["config"] = config_payload
+            if prepared and _compiles_online_eval(mode, config_payload, preparation):
                 try:
                     payload["normalizedConfig"] = compile_locally(
                         _schema_input(config_payload), preparation
@@ -1251,13 +1306,21 @@ app = PlainTyper(
 )
 
 
-@app.command("validate", rich_help_panel="Commands")
+# Unknown `--a.b value` flags land in CONFIG_PATH... as prime-rl overrides.
+_OVERRIDE_CONTEXT = {"ignore_unknown_options": True, "allow_extra_args": True}
+_OVERRIDE_HELP = (
+    " prime-rl-style overrides follow the files, e.g. `--trainer.model.cp 4`; "
+    "they win over the files."
+)
+
+
+@app.command("validate", rich_help_panel="Commands", context_settings=_OVERRIDE_CONTEXT)
 def validate_training_config(
     config_paths: List[str] = typer.Argument(
         ...,
         metavar="CONFIG_PATH...",
         help="TOML config files, merged in order with later files winning, as in "
-        "prime-rl's `uv run rl @ a.toml @ b.toml`.",
+        "prime-rl's `uv run rl @ a.toml @ b.toml`." + _OVERRIDE_HELP,
     ),
     schema_python: Optional[Path] = typer.Option(
         None,
@@ -1294,11 +1357,12 @@ def validate_training_config(
     dispatch policy are checked when submitting a run.
     """
     from ..api.training import HostedTrainingClient
-    from ..utils.training_compiler import CompilationError, compile_locally
+    from ..utils.training_compiler import CompilationError, compile_locally, parse_overrides
 
     validate_output_format(output, console)
     try:
-        raw, config_label = _load_config_stack(config_paths)
+        config_args, overrides = _split_overrides(config_paths)
+        raw, config_label = _load_config_stack(config_args)
         if ref is not None and pr is not None:
             raise ValueError("--ref and --pr are mutually exclusive.")
         source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_label)
@@ -1333,6 +1397,10 @@ def validate_training_config(
             preparation = client.prepare_local_validation(payload)
             if preparation.get("mode") != payload["mode"]:
                 raise CompilationError("Preparation returned a different training mode.")
+            if overrides:
+                parsed = parse_overrides(overrides, preparation, schema_python=schema_python)
+                _warn_hosted_managed_overrides(parsed, notices)
+                config = _deep_merge(config, parsed)
             artifact = compile_locally(config, preparation, schema_python=schema_python)
             if artifact_out:
                 artifact_out.write_text(json.dumps(artifact, indent=2) + "\n")
@@ -1360,13 +1428,20 @@ def validate_training_config(
         raise typer.Exit(1) from exc
 
 
-@app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_DISPATCH_JSON_HELP)
+@app.command(
+    "run",
+    rich_help_panel="Commands",
+    hidden=True,
+    epilog=RL_DISPATCH_JSON_HELP,
+    context_settings=_OVERRIDE_CONTEXT,
+)
 def create_run(
     config_paths: List[str] = typer.Argument(
         ...,
         metavar="CONFIG_PATH...",
         help="TOML config files to launch as a Hosted Training run, merged in order "
-        "with later files winning, as in prime-rl's `uv run rl @ a.toml @ b.toml`.",
+        "with later files winning, as in prime-rl's `uv run rl @ a.toml @ b.toml`."
+        + _OVERRIDE_HELP,
     ),
     env: Optional[List[str]] = typer.Option(
         None,
@@ -1485,9 +1560,12 @@ def create_run(
         prime train sft.toml --volume research
         prime train pretrain.toml --volume research
         prime train rl.toml gpu/h200.toml data/swe.toml
+        prime train rl.toml gpu/h200.toml fake.toml --trainer.model.debug.force-balanced-routing
 
     Several configs merge in order, later files winning, as in prime-rl's
     `uv run rl @ rl.toml @ gpu/h200.toml @ data/swe.toml` (which also works here).
+    prime-rl-style `--a.b value` flags after the files override them; the
+    selected runtime's schema parses them, so they need local validation.
     The config's top-level `mode` ("rl", "sft" or "pretrain") picks the run kind.
     """
     validate_output_format(output, console)
@@ -1500,7 +1578,8 @@ def create_run(
         raise typer.Exit(1)
 
     try:
-        raw_cfg, config_label = _load_config_stack(config_paths)
+        config_args, overrides = _split_overrides(config_paths)
+        raw_cfg, config_label = _load_config_stack(config_args)
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
         raise typer.Exit(1) from exc
@@ -1533,6 +1612,7 @@ def create_run(
     _dispatch_dedicated_run(
         raw_cfg=raw_cfg,
         config_label=config_label,
+        overrides=overrides,
         env=env,
         env_file=env_file,
         output=output,

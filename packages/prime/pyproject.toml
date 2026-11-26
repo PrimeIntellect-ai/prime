@@ -51,6 +51,8 @@ prime = "prime_cli.main:run"
 
 [project.optional-dependencies]
 dev = [
+    # The schema worker parses `--a.b` overrides with prime-rl's pydantic-config.
+    "prime-pydantic-config>=0.4.3",
     "pytest>=7.0.0",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.13.1",

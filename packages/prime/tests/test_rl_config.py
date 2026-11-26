@@ -5,6 +5,7 @@ from prime_cli.commands.rl import (
     _load_config_stack,
     _load_toml,
     _looks_like_lora,
+    _split_overrides,
     _warn_legacy_full_finetune_type,
 )
 
@@ -110,6 +111,39 @@ def test_config_stack_rejects_conflicting_modes(tmp_path: Path) -> None:
     assert _load_config_stack([rl, same])[0] == {"mode": "rl"}
     with pytest.raises(ValueError, match="conflicting modes"):
         _load_config_stack([rl, sft])
+
+
+@pytest.mark.parametrize(
+    ("args", "config_args", "overrides"),
+    [
+        (["a.toml", "b.toml"], ["a.toml", "b.toml"], []),
+        (
+            ["@", "a.toml", "@", "b.toml", "--trainer.model.debug.force-balanced-routing"],
+            ["@", "a.toml", "@", "b.toml"],
+            ["--trainer.model.debug.force-balanced-routing"],
+        ),
+        # A flag may take several values, so bare tokens after it are values.
+        (
+            ["a.toml", "--trainer.optim.lr", "-1e-3", "--items", "0.7", "b.toml"],
+            ["a.toml"],
+            ["--trainer.optim.lr", "-1e-3", "--items", "0.7", "b.toml"],
+        ),
+        # `@ file` after a flag's value is still a root config, as in prime-rl.
+        (
+            ["a.toml", "--deployment.num-infer-replicas=2", "--x", "1", "@", "b.toml", "@c.toml"],
+            ["a.toml", "@", "b.toml", "@c.toml"],
+            ["--deployment.num-infer-replicas=2", "--x", "1"],
+        ),
+    ],
+)
+def test_split_overrides(args, config_args, overrides) -> None:
+    assert _split_overrides(args) == (config_args, overrides)
+
+
+@pytest.mark.parametrize("args", [["a.toml", "--trainer", "@", "t.toml"], ["--trainer", "@t.toml"]])
+def test_split_overrides_rejects_nested_config_files(args) -> None:
+    with pytest.raises(ValueError, match="`--trainer @ file` is not supported"):
+        _split_overrides(args)
 
 
 def test_looks_like_lora_top_level_model_string() -> None:

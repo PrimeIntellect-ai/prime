@@ -400,6 +400,7 @@ class EvalsClient:
         *,
         name: Optional[str] = None,
         team_id: Optional[str] = None,
+        config_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Start a hosted evaluation on the platform.
 
@@ -411,6 +412,10 @@ class EvalsClient:
         eval_config is passed through verbatim, so inference credentials
         (api_base_url, api_key_var, custom_secrets, headers) stay caller-owned.
 
+        config_snapshot (``{"files": [{"path", "content"}], "command"}``) is
+        what the run was launched with, shown to the owner and team on each
+        evaluation's Config tab. Platforms that predate it ignore it.
+
         Returns the raw API response, containing ``evaluation_id`` and/or
         ``evaluation_ids`` for multi-environment runs.
         """
@@ -421,6 +426,8 @@ class EvalsClient:
         }
         if name is not None:
             payload["name"] = name
+        if config_snapshot is not None:
+            payload["config_snapshot"] = config_snapshot
         if team_id is None:
             team_id = self.client.config.team_id
         if team_id:
@@ -792,6 +799,7 @@ class AsyncEvalsClient:
         *,
         name: Optional[str] = None,
         team_id: Optional[str] = None,
+        config_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Start a hosted evaluation on the platform.
 
@@ -803,6 +811,10 @@ class AsyncEvalsClient:
         eval_config is passed through verbatim, so inference credentials
         (api_base_url, api_key_var, custom_secrets, headers) stay caller-owned.
 
+        config_snapshot (``{"files": [{"path", "content"}], "command"}``) is
+        what the run was launched with, shown to the owner and team on each
+        evaluation's Config tab. Platforms that predate it ignore it.
+
         Returns the raw API response, containing ``evaluation_id`` and/or
         ``evaluation_ids`` for multi-environment runs.
         """
@@ -813,6 +825,8 @@ class AsyncEvalsClient:
         }
         if name is not None:
             payload["name"] = name
+        if config_snapshot is not None:
+            payload["config_snapshot"] = config_snapshot
         if team_id is None:
             team_id = self.client.config.team_id
         if team_id:

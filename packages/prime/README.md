@@ -123,6 +123,10 @@ prime train rl.toml
 # arrays replace. prime-rl's `@ a.toml @ b.toml` form works as-is.
 prime train @ rl.toml @ gpu/h200.toml @ data/swe.toml
 
+# prime-rl-style overrides after the files win over them; the selected
+# runtime's schema parses them, so they need local validation
+prime train @ rl.toml @ gpu/h200.toml @ fake.toml --trainer.model.debug.force-balanced-routing
+
 # Inspect and manage Hosted Training runs
 prime train list              # Your runs
 prime train list --all-users  # Include teammates' runs

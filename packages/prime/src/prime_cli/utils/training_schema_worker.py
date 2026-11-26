@@ -1,3 +1,4 @@
+import importlib
 import json
 import re
 import sys
@@ -263,6 +264,54 @@ def config_class(mode):
     return PretrainConfig
 
 
+# The steps `pydantic_config.cli()` runs between loading `@` files and validating.
+# pydantic-config has no public entry point that returns the parsed table.
+OVERRIDE_PARSER_STEPS = (
+    "_deep_merge",
+    "_expand_short_flags",
+    "_find_short_flag_paths",
+    "_find_optional_model_paths",
+    "_expand_bare_optional_flags",
+    "_find_json_value_field_paths",
+    "_extract_json_value_args",
+    "_parse_cli_to_dict",
+    "_normalize_alias_keys",
+)
+
+
+def parse_overrides(request):
+    """prime-rl-style `--a.b value` flags as a sparse config table, parsed by this
+    runtime's pydantic-config against its schema, as `uv run rl` parses them."""
+    # The package exports a `cli` function that shadows the module.
+    parser = importlib.import_module("pydantic_config.cli")
+    if not all(hasattr(parser, step) for step in OVERRIDE_PARSER_STEPS):
+        raise ValueError(
+            "This prime-rl build cannot parse command-line overrides: move them into a TOML file."
+        )
+    model = config_class(request["mode"])
+    # pydantic-config 0.4.3 reads `--a.b=c` on union-typed paths such as
+    # `deployment` as a flag named `b=c`; `--a.b c` parses everywhere.
+    args = [
+        part
+        for arg in request["args"]
+        for part in (arg.split("=", 1) if arg.startswith("--") else [arg])
+    ]
+    args = parser._expand_short_flags(args, parser._find_short_flag_paths(model))
+    overrides = {}
+    optional_paths = parser._find_optional_model_paths(model)
+    if optional_paths:
+        args, bare = parser._expand_bare_optional_flags(args, optional_paths)
+        overrides = parser._deep_merge(overrides, bare)
+    json_paths = parser._find_json_value_field_paths(model)
+    if json_paths:
+        args, values = parser._extract_json_value_args(args, json_paths)
+        overrides = parser._deep_merge(overrides, values)
+    args, flags = parser._parse_cli_to_dict(args, model, optional_paths)
+    if args:
+        raise ValueError(f"Unrecognized arguments: {' '.join(args)}")
+    return parser._normalize_alias_keys(model, parser._deep_merge(overrides, flags))
+
+
 def normalize(request):
     data = deepcopy(request["config"])
     if data.pop("k8s", None):
@@ -336,7 +385,10 @@ def main():
         expected = request["schema_commit"]
         if actual != expected:
             raise ValueError(f"schema provenance mismatch: expected {expected}, installed {actual}")
-        result = {"artifact": normalize(request)}
+        if request.get("op") == "parse_overrides":
+            result = {"overrides": parse_overrides(request)}
+        else:
+            result = {"artifact": normalize(request)}
         print(json.dumps(result, allow_nan=False))
     except Exception as exc:
         from pydantic import ValidationError

@@ -2,29 +2,30 @@ from pathlib import Path
 
 import pytest
 from prime_cli.commands.rl import (
+    _load_config_file,
     _load_config_stack,
-    _load_toml,
     _looks_like_lora,
+    _split_overrides,
     _warn_legacy_full_finetune_type,
 )
 
 
 def test_load_toml_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Config file not found"):
-        _load_toml(str(tmp_path / "missing.toml"))
+        _load_config_file(str(tmp_path / "missing.toml"))
 
 
 def test_load_toml_rejects_invalid_toml(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text("[model\nname = ")
     with pytest.raises(ValueError, match="Invalid TOML"):
-        _load_toml(str(config_path))
+        _load_config_file(str(config_path))
 
 
 def test_load_toml_returns_raw_table(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text('[model]\nname = "Qwen/Qwen3-0.6B"\n')
-    assert _load_toml(str(config_path)) == {"model": {"name": "Qwen/Qwen3-0.6B"}}
+    assert _load_config_file(str(config_path)) == {"model": {"name": "Qwen/Qwen3-0.6B"}}
 
 
 def test_load_toml_keeps_dotted_key_with_multiline_string(tmp_path: Path) -> None:
@@ -33,7 +34,7 @@ def test_load_toml_keeps_dotted_key_with_multiline_string(tmp_path: Path) -> Non
     config_path.write_text(
         '[[train.env]]\nid = "x"\ntaskset.append_to_system_prompt = """\nline1\nline2"""\n'
     )
-    assert _load_toml(str(config_path)) == {
+    assert _load_config_file(str(config_path)) == {
         "train": {"env": [{"id": "x", "taskset": {"append_to_system_prompt": "line1\nline2"}}]}
     }
 
@@ -42,6 +43,53 @@ def _write(path: Path, body: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
     return str(path)
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        (
+            "rl.json",
+            '{"model": {"name": "Qwen/Qwen3-0.6B"}, "trainer": {"optim": {"max_norm": null}}}',
+        ),
+        ("rl.yaml", "model:\n  name: Qwen/Qwen3-0.6B\ntrainer:\n  optim:\n    max_norm: null\n"),
+        ("rl.yml", "model: {name: Qwen/Qwen3-0.6B}\ntrainer: {optim: {max_norm: null}}\n"),
+    ],
+)
+def test_load_config_file_reads_json_and_yaml(tmp_path: Path, name: str, body: str) -> None:
+    config_path = tmp_path / name
+    config_path.write_text(body)
+    # Unlike TOML, both keep an explicit null, as prime-rl's resolved configs rely on.
+    assert _load_config_file(str(config_path)) == {
+        "model": {"name": "Qwen/Qwen3-0.6B"},
+        "trainer": {"optim": {"max_norm": None}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "message"),
+    [
+        ("rl.json", "{", "Invalid JSON"),
+        ("rl.yaml", "model: [", "Invalid YAML"),
+        ("rl.json", "[1, 2]", "must hold a table of settings, got list"),
+        ("rl.yaml", "", "must hold a table of settings, got NoneType"),
+    ],
+)
+def test_load_config_file_rejects_bad_json_and_yaml(
+    tmp_path: Path, name: str, body: str, message: str
+) -> None:
+    config_path = tmp_path / name
+    config_path.write_text(body)
+    with pytest.raises(ValueError, match=message):
+        _load_config_file(str(config_path))
+
+
+def test_config_stack_mixes_formats(tmp_path: Path) -> None:
+    toml = _write(tmp_path / "rl.toml", "[trainer.optim]\nlr = 1e-6\nmax_norm = 1.0\n")
+    resolved = _write(tmp_path / "rl.json", '{"trainer": {"optim": {"max_norm": null}}}')
+    assert _load_config_stack(["@", toml, "@", resolved])[0] == {
+        "trainer": {"optim": {"lr": 1e-6, "max_norm": None}}
+    }
 
 
 def test_config_stack_merges_like_prime_rl(tmp_path: Path) -> None:
@@ -110,6 +158,39 @@ def test_config_stack_rejects_conflicting_modes(tmp_path: Path) -> None:
     assert _load_config_stack([rl, same])[0] == {"mode": "rl"}
     with pytest.raises(ValueError, match="conflicting modes"):
         _load_config_stack([rl, sft])
+
+
+@pytest.mark.parametrize(
+    ("args", "config_args", "overrides"),
+    [
+        (["a.toml", "b.toml"], ["a.toml", "b.toml"], []),
+        (
+            ["@", "a.toml", "@", "b.toml", "--trainer.model.debug.force-balanced-routing"],
+            ["@", "a.toml", "@", "b.toml"],
+            ["--trainer.model.debug.force-balanced-routing"],
+        ),
+        # A flag may take several values, so bare tokens after it are values.
+        (
+            ["a.toml", "--trainer.optim.lr", "-1e-3", "--items", "0.7", "b.toml"],
+            ["a.toml"],
+            ["--trainer.optim.lr", "-1e-3", "--items", "0.7", "b.toml"],
+        ),
+        # `@ file` after a flag's value is still a root config, as in prime-rl.
+        (
+            ["a.toml", "--deployment.num-infer-replicas=2", "--x", "1", "@", "b.toml", "@c.toml"],
+            ["a.toml", "@", "b.toml", "@c.toml"],
+            ["--deployment.num-infer-replicas=2", "--x", "1"],
+        ),
+    ],
+)
+def test_split_overrides(args, config_args, overrides) -> None:
+    assert _split_overrides(args) == (config_args, overrides)
+
+
+@pytest.mark.parametrize("args", [["a.toml", "--trainer", "@", "t.toml"], ["--trainer", "@t.toml"]])
+def test_split_overrides_rejects_nested_config_files(args) -> None:
+    with pytest.raises(ValueError, match="`--trainer @ file` is not supported"):
+        _split_overrides(args)
 
 
 def test_looks_like_lora_top_level_model_string() -> None:

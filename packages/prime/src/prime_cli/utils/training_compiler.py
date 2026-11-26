@@ -328,3 +328,14 @@ def compile_locally(
         schema_python,
     )
     return {**response["artifact"], "runtime": preparation["runtime"]}
+
+
+def parse_overrides(
+    overrides: list[str], preparation: dict[str, Any], *, schema_python: Path | None = None
+) -> dict[str, Any]:
+    """Parse prime-rl-style `--a.b value` flags into a sparse config table with
+    the selected runtime's own schema, so flags read as they do in `uv run rl`."""
+    response = _schema_request(
+        {"op": "parse_overrides", "args": overrides}, preparation, schema_python
+    )
+    return response["overrides"]

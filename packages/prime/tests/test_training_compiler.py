@@ -460,6 +460,76 @@ def test_pretrain_on_a_build_without_it_names_the_fix(fake_schema, monkeypatch):
         worker.normalize({"mode": "pretrain", "schema_commit": "a" * 40, "config": {}})
 
 
+def test_overrides_parse_with_the_runtime_pydantic_config(monkeypatch):
+    from typing import Literal
+
+    from prime_cli.utils import training_schema_worker as worker
+    from pydantic import BaseModel, Field
+
+    class Debug(BaseModel):
+        force_balanced_routing: bool = False
+
+    class Model(BaseModel):
+        debug: Debug = Field(default_factory=Debug)
+        cp: int = 1
+
+    class Trainer(BaseModel):
+        model: Model = Field(default_factory=Model)
+        enable_router_replay: bool = True
+
+    class SingleNode(BaseModel):
+        type: Literal["single_node"] = "single_node"
+        num_infer_replicas: int = 1
+
+    class MultiNode(BaseModel):
+        type: Literal["multi_node"] = "multi_node"
+        num_infer_replicas: int = 1
+
+    class Wandb(BaseModel):
+        project: str = "x"
+
+    class RL(BaseModel):
+        trainer: Trainer = Field(default_factory=Trainer)
+        deployment: SingleNode | MultiNode = Field(default_factory=SingleNode, discriminator="type")
+        wandb: Wandb | None = None
+        output_dir: str = "outputs"
+
+    monkeypatch.setattr(worker, "config_class", lambda mode: RL)
+
+    def parse(*args):
+        return worker.parse_overrides({"mode": "rl", "args": list(args)})
+
+    assert parse(
+        "--trainer.model.debug.force-balanced-routing",
+        "--no-trainer.enable-router-replay",
+        "--trainer.model.cp",
+        "8",
+    ) == {
+        "trainer": {
+            "model": {"debug": {"force_balanced_routing": True}, "cp": "8"},
+            "enable_router_replay": False,
+        }
+    }
+    # pydantic-config 0.4.3 misreads `=` on union-typed paths; it is split first.
+    assert parse("--deployment.num-infer-replicas=2") == {"deployment": {"num_infer_replicas": "2"}}
+    # A numeric value stays a string for a string field to validate.
+    assert parse("--wandb.project", "2026") == {"wandb": {"project": "2026"}}
+    assert parse("--output-dir", "/x") == {"output_dir": "/x"}
+    with pytest.raises(ValueError, match="Unrecognized arguments: stray"):
+        parse("stray")
+
+
+def test_overrides_on_a_build_without_the_parser_name_the_fix(monkeypatch):
+    import importlib
+
+    from prime_cli.utils import training_schema_worker as worker
+
+    parser = importlib.import_module("pydantic_config.cli")
+    monkeypatch.delattr(parser, "_parse_cli_to_dict")
+    with pytest.raises(ValueError, match="move them into a TOML file"):
+        worker.parse_overrides({"mode": "rl", "args": ["--x", "1"]})
+
+
 def test_worker_does_not_inherit_api_credentials_or_schema_path(monkeypatch):
     monkeypatch.setenv("PRIME_API_KEY", "secret")
     monkeypatch.setenv("HF_TOKEN", "secret")
@@ -1463,6 +1533,51 @@ def test_validate_json_output_stays_parseable(monkeypatch, tmp_path):
     )
     assert result.exit_code == 1
     assert json.loads(result.stdout) == {"error": "PR #42 is already merged"}
+
+
+def test_validate_applies_overrides_over_the_stack(monkeypatch, tmp_path):
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.commands import rl
+
+    base = tmp_path / "rl.toml"
+    base.write_text('mode = "rl"\n[orchestrator]\nbatch_size = 8\nseed = 1\n')
+    compiled, parsed_args = [], []
+    monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
+    monkeypatch.setattr(
+        HostedTrainingClient,
+        "prepare_local_validation",
+        lambda self, payload: {"mode": "rl", "runtime": {"schema_commit": "a" * 40}},
+    )
+
+    def parse(args, preparation, schema_python=None):
+        parsed_args.append(args)
+        return {"orchestrator": {"batch_size": "16"}, "output_dir": "/x"}
+
+    monkeypatch.setattr(training_compiler, "parse_overrides", parse)
+    monkeypatch.setattr(
+        training_compiler,
+        "compile_locally",
+        lambda config, *a, **kw: compiled.append(config) or {"schema_commit": "a" * 40},
+    )
+    env = {"PRIME_DISABLE_VERSION_CHECK": "1"}
+    result = CliRunner().invoke(
+        app,
+        [
+            "train",
+            "validate",
+            "@",
+            str(base),
+            "--orchestrator.batch-size",
+            "16",
+            "--output-dir",
+            "/x",
+        ],
+        env=env,
+    )
+    assert result.exit_code == 0, result.output
+    assert parsed_args == [["--orchestrator.batch-size", "16", "--output-dir", "/x"]]
+    assert compiled == [{"orchestrator": {"batch_size": "16", "seed": 1}, "output_dir": "/x"}]
+    assert "--output-dir has no effect on hosted runs" in result.output
 
 
 def test_validate_merges_a_config_stack(monkeypatch, tmp_path):

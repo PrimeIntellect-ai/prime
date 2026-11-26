@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import pytest
-import typer
 from prime_cli.commands.rl import (
+    _load_config_stack,
     _load_toml,
     _looks_like_lora,
     _warn_legacy_full_finetune_type,
@@ -10,17 +10,15 @@ from prime_cli.commands.rl import (
 
 
 def test_load_toml_rejects_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(typer.Exit) as exc_info:
+    with pytest.raises(ValueError, match="Config file not found"):
         _load_toml(str(tmp_path / "missing.toml"))
-    assert exc_info.value.exit_code == 1
 
 
 def test_load_toml_rejects_invalid_toml(tmp_path: Path) -> None:
     config_path = tmp_path / "rl.toml"
     config_path.write_text("[model\nname = ")
-    with pytest.raises(typer.Exit) as exc_info:
+    with pytest.raises(ValueError, match="Invalid TOML"):
         _load_toml(str(config_path))
-    assert exc_info.value.exit_code == 1
 
 
 def test_load_toml_returns_raw_table(tmp_path: Path) -> None:
@@ -38,6 +36,80 @@ def test_load_toml_keeps_dotted_key_with_multiline_string(tmp_path: Path) -> Non
     assert _load_toml(str(config_path)) == {
         "train": {"env": [{"id": "x", "taskset": {"append_to_system_prompt": "line1\nline2"}}]}
     }
+
+
+def _write(path: Path, body: str) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return str(path)
+
+
+def test_config_stack_merges_like_prime_rl(tmp_path: Path) -> None:
+    model = _write(
+        tmp_path / "model" / "rl.toml",
+        'seq_len = 8\n[slurm]\n[trainer.optim]\ntype = "muon"\nlr = 1e-6\n'
+        "[inference.vllm]\nmax_model_len = 8\n"
+        '[[orchestrator.train.source]]\nname = "a"\n[[orchestrator.train.source]]\nname = "b"\n',
+    )
+    gpu = _write(
+        tmp_path / "model" / "gpu" / "h200.toml",
+        "[trainer.optim]\nlr = 2e-6\n[inference.vllm]\ntensor_parallel_size = 2\n",
+    )
+    data = _write(
+        tmp_path / "data" / "swe.toml",
+        '[[orchestrator.train.source]]\nname = "swe"\nenv.taskset.id = "scaleswe"\n',
+    )
+    fake = _write(tmp_path / "fake.toml", 'inference = "None"\n')
+
+    merged, label = _load_config_stack([model, gpu, data])
+    assert merged == {
+        "seq_len": 8,
+        "slurm": {},
+        "trainer": {"optim": {"type": "muon", "lr": 2e-6}},
+        "inference": {"vllm": {"max_model_len": 8, "tensor_parallel_size": 2}},
+        # Arrays of tables replace rather than append, as in prime-rl.
+        "orchestrator": {
+            "train": {"source": [{"name": "swe", "env": {"taskset": {"id": "scaleswe"}}}]}
+        },
+    }
+    assert label == f"{model} + {gpu} + {data}"
+    # The "None" sentinel passes through for the schema to turn into null.
+    assert _load_config_stack([model, fake])[0]["inference"] == "None"
+
+
+def test_config_stack_accepts_prime_rl_at_syntax(tmp_path: Path) -> None:
+    a = _write(tmp_path / "a.toml", "x = 1\ny = 1\n")
+    b = _write(tmp_path / "b.toml", "y = 2\n")
+    expected = ({"x": 1, "y": 2}, f"{a} + {b}")
+    assert _load_config_stack(["@", a, "@", b]) == expected
+    assert _load_config_stack([f"@{a}", f"@{b}"]) == expected
+    with pytest.raises(ValueError, match="at least one config file"):
+        _load_config_stack(["@"])
+
+
+def test_config_stack_resolves_env_files_per_file(tmp_path: Path) -> None:
+    model = _write(tmp_path / "model" / "rl.toml", 'env_file = "model.env"\n')
+    data = _write(tmp_path / "data" / "swe.toml", 'env_files = ["a.env", "b.env"]\n')
+    merged, _ = _load_config_stack([model, data])
+    assert merged == {
+        "env_files": [
+            str(tmp_path / "model" / "model.env"),
+            str(tmp_path / "data" / "a.env"),
+            str(tmp_path / "data" / "b.env"),
+        ]
+    }
+    bad = _write(tmp_path / "bad.toml", "env_files = 1\n")
+    with pytest.raises(ValueError, match="env_files in .*bad.toml must be a path"):
+        _load_config_stack([bad])
+
+
+def test_config_stack_rejects_conflicting_modes(tmp_path: Path) -> None:
+    rl = _write(tmp_path / "rl.toml", 'mode = "rl"\n')
+    same = _write(tmp_path / "same.toml", 'mode = "rl"\n')
+    sft = _write(tmp_path / "sft.toml", 'mode = "sft"\n')
+    assert _load_config_stack([rl, same])[0] == {"mode": "rl"}
+    with pytest.raises(ValueError, match="conflicting modes"):
+        _load_config_stack([rl, sft])
 
 
 def test_looks_like_lora_top_level_model_string() -> None:

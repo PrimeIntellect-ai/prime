@@ -1465,6 +1465,40 @@ def test_validate_json_output_stays_parseable(monkeypatch, tmp_path):
     assert json.loads(result.stdout) == {"error": "PR #42 is already merged"}
 
 
+def test_validate_merges_a_config_stack(monkeypatch, tmp_path):
+    from prime_cli.api.training import HostedTrainingClient
+    from prime_cli.commands import rl
+
+    base = tmp_path / "rl.toml"
+    base.write_text('mode = "rl"\n[orchestrator]\nbatch_size = 8\nseed = 1\n')
+    overlay = tmp_path / "swe.toml"
+    overlay.write_text("[orchestrator]\nbatch_size = 16\n")
+    compiled = []
+    monkeypatch.setattr(rl, "Config", lambda: SimpleNamespace(team_id="team"))
+    monkeypatch.setattr(
+        HostedTrainingClient,
+        "prepare_local_validation",
+        lambda self, payload: {"mode": "rl", "runtime": {"schema_commit": "a" * 40}},
+    )
+    monkeypatch.setattr(
+        training_compiler,
+        "compile_locally",
+        lambda config, *a, **kw: compiled.append(config) or {"schema_commit": "a" * 40},
+    )
+    env = {"PRIME_DISABLE_VERSION_CHECK": "1"}
+    result = CliRunner().invoke(
+        app, ["train", "validate", "@", str(base), "@", str(overlay), "-o", "json"], env=env
+    )
+    assert result.exit_code == 0, result.output
+    assert compiled == [{"orchestrator": {"batch_size": 16, "seed": 1}}]
+
+    result = CliRunner().invoke(
+        app, ["train", "validate", str(tmp_path / "nope.toml"), "-o", "json"], env=env
+    )
+    assert result.exit_code == 1
+    assert "Config file not found" in json.loads(result.stdout)["error"]
+
+
 @pytest.mark.parametrize(
     ("toml_line", "message"),
     [

@@ -362,19 +362,71 @@ def _remove_deprecated_config_keys(data: Dict[str, Any], out: Any = console) -> 
 
 
 def _load_toml(config_path: str) -> Dict[str, Any]:
-    """Parse the run config. The raw table is shipped to the platform as-is
+    """Parse one run config. The raw table is shipped to the platform as-is
     (prime-rl's schema is validated server-side), so the CLI only checks
     that the file exists and is valid TOML."""
     p = Path(config_path)
-    if not p.exists():
-        console.print(f"[red]Error:[/red] Config file not found: {config_path}")
-        raise typer.Exit(1)
+    if not p.is_file():
+        raise ValueError(f"Config file not found: {config_path}")
     try:
         with p.open("rb") as f:
             return tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
-        console.print(f"[red]Error:[/red] Invalid TOML in {config_path}: {e}")
-        raise typer.Exit(1)
+        raise ValueError(f"Invalid TOML in {config_path}: {e}") from e
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """pydantic_config's merge for `uv run rl @ a.toml @ b.toml`, kept identical so
+    a stack resolves the same locally and hosted: tables merge key by key, and any
+    other value, arrays of tables included, replaces the earlier one."""
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def _load_config_stack(args: List[str]) -> tuple[Dict[str, Any], str]:
+    """Merge layered run configs, later files winning, as prime-rl does.
+
+    prime-rl's `@ a.toml @ b.toml` form pastes as-is: bare `@` separators are
+    dropped and an `@a.toml` prefix is stripped. Env files resolve against the
+    directory of the file that lists them and accumulate across files rather
+    than replacing each other, so a later file's secrets win on collision.
+    Returns the merged table and a label naming its files for messages."""
+    config_paths = [arg.removeprefix("@") for arg in args if arg != "@"]
+    if not config_paths:
+        raise ValueError("Pass at least one config file.")
+    merged: Dict[str, Any] = {}
+    env_files: List[str] = []
+    modes: Dict[str, Any] = {}
+    for config_path in config_paths:
+        cfg = _load_toml(config_path)
+        config_dir = Path(config_path).parent
+        # `env_file` (deprecated, singular) comes first so `env_files`
+        # (canonical, plural) overrides it on key collision.
+        for key in ("env_file", "env_files"):
+            val = cfg.pop(key, None)
+            if isinstance(val, str):
+                val = [val]
+            if isinstance(val, list):
+                env_files.extend(str(config_dir / p) for p in val)
+            elif val is not None:
+                raise ValueError(
+                    f"{key} in {config_path} must be a path or a list of paths, "
+                    f"got {type(val).__name__}."
+                )
+        if "mode" in cfg:
+            modes[config_path] = cfg["mode"]
+        merged = _deep_merge(merged, cfg)
+    if any(mode != next(iter(modes.values())) for mode in modes.values()):
+        files = "".join(f"\n  {path}: {mode}" for path, mode in modes.items())
+        raise ValueError(f"Config files set conflicting modes:{files}")
+    if env_files:
+        merged["env_files"] = env_files
+    return merged, " + ".join(config_paths)
 
 
 def _looks_like_lora(cfg: Dict[str, Any]) -> bool:
@@ -619,7 +671,7 @@ def _compiles_online_eval(
 def _dispatch_dedicated_run(
     *,
     raw_cfg: Dict[str, Any],
-    config_path: str,
+    config_label: str,
     env: Optional[List[str]],
     env_file: Optional[List[str]],
     output: str,
@@ -656,22 +708,11 @@ def _dispatch_dedicated_run(
     app_config = Config()
     team_id = app_config.team_id
 
-    # Resolve env files relative to the config dir. We don't validate
-    # WANDB presence here — the chart wires WANDB_API_KEY via secretKeyRef
-    # only if `[wandb]` is configured AND the user passed --wandb-api-key,
-    # mirroring the platform's existing admin-dialog UX.
-    #
-    # `env_file` (deprecated, singular) is loaded first so `env_files`
-    # (canonical, plural) overrides it on key collision.
-    config_dir = Path(config_path).parent
-    cfg_env_files: List[str] = []
-    for key in ("env_file", "env_files"):
-        val = raw_cfg.get(key)
-        if isinstance(val, list):
-            cfg_env_files.extend(str(config_dir / p) for p in val)
-        elif isinstance(val, str):
-            cfg_env_files.append(str(config_dir / val))
-    all_env_files = cfg_env_files + (env_file or [])
+    # Config env files were resolved per file by `_load_config_stack`. We
+    # don't validate WANDB presence here — the chart wires WANDB_API_KEY via
+    # secretKeyRef only if `[wandb]` is configured AND the user passed
+    # --wandb-api-key, mirroring the platform's existing admin-dialog UX.
+    all_env_files = raw_cfg.get("env_files", []) + (env_file or [])
 
     secrets = _collect_secrets(env, all_env_files)
 
@@ -684,14 +725,14 @@ def _dispatch_dedicated_run(
     # set, so falling through to None is the right "use platform default"
     # signal.
     try:
-        config_image_tag = _config_string(raw_cfg, "image_tag", config_path)
-        config_gpu_type = _config_string(raw_cfg, "gpu_type", config_path)
-        config_volume = _config_string(raw_cfg, "volume", config_path)
-        config_volume_size = _config_string(raw_cfg, "volume_size", config_path)
+        config_image_tag = _config_string(raw_cfg, "image_tag", config_label)
+        config_gpu_type = _config_string(raw_cfg, "gpu_type", config_label)
+        config_volume = _config_string(raw_cfg, "volume", config_label)
+        config_volume_size = _config_string(raw_cfg, "volume_size", config_label)
         # Request-level like gpu_type: `--cluster-id` or top-level
         # `cluster_id = "..."`, CLI flag wins.
         resolved_cluster_id = _selected_cluster_id(
-            cluster_id, _config_string(raw_cfg, "cluster_id", config_path), config_path
+            cluster_id, _config_string(raw_cfg, "cluster_id", config_label), config_label
         )
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
@@ -725,7 +766,7 @@ def _dispatch_dedicated_run(
     # on the run, so a branch name here never drifts mid-run.
     try:
         resolved_source_ref = _selected_source_ref(
-            source_ref, raw_cfg.get("source_ref"), config_path
+            source_ref, raw_cfg.get("source_ref"), config_label
         )
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {exc}")
@@ -739,7 +780,7 @@ def _dispatch_dedicated_run(
     config_payload = _hosted_config(
         raw_cfg, get_console(stderr=True) if output == "json" else console
     )
-    _warn_legacy_full_finetune_type(raw_cfg, config_path)
+    _warn_legacy_full_finetune_type(raw_cfg, config_label)
 
     payload = build_payload_from_toml(
         config_payload,
@@ -1170,7 +1211,7 @@ class DefaultGroup(DefaultCommandGroup):
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
             ctx.command_path,
-            "[OPTIONS] CONFIG_PATH [ARGS]... | COMMAND [ARGS]...",
+            "[OPTIONS] CONFIG_PATH... [ARGS]... | COMMAND [ARGS]...",
         )
 
     def get_params(self, ctx):
@@ -1212,7 +1253,12 @@ app = PlainTyper(
 
 @app.command("validate", rich_help_panel="Commands")
 def validate_training_config(
-    config_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    config_paths: List[str] = typer.Argument(
+        ...,
+        metavar="CONFIG_PATH...",
+        help="TOML config files, merged in order with later files winning, as in "
+        "prime-rl's `uv run rl @ a.toml @ b.toml`.",
+    ),
     schema_python: Optional[Path] = typer.Option(
         None,
         "--schema-python",
@@ -1252,18 +1298,17 @@ def validate_training_config(
 
     validate_output_format(output, console)
     try:
-        with config_path.open("rb") as stream:
-            raw = tomllib.load(stream)
+        raw, config_label = _load_config_stack(config_paths)
         if ref is not None and pr is not None:
             raise ValueError("--ref and --pr are mutually exclusive.")
-        source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_path)
+        source_ref = _selected_source_ref(ref, raw.get("source_ref"), config_label)
         if pr is not None:
             source_ref = resolve_pull_request_head(pr)
-        config_image_tag = _config_string(raw, "image_tag", config_path)
-        _config_string(raw, "gpu_type", config_path)
-        _selected_cluster_id(None, _config_string(raw, "cluster_id", config_path), config_path)
-        config_volume = _config_string(raw, "volume", config_path)
-        config_volume_size = _config_string(raw, "volume_size", config_path)
+        config_image_tag = _config_string(raw, "image_tag", config_label)
+        _config_string(raw, "gpu_type", config_label)
+        _selected_cluster_id(None, _config_string(raw, "cluster_id", config_label), config_label)
+        config_volume = _config_string(raw, "volume", config_label)
+        config_volume_size = _config_string(raw, "volume_size", config_label)
         selected_image = image_tag or config_image_tag
         notices = get_console(stderr=True) if output == "json" else console
         if config_volume_size and not config_volume:
@@ -1272,7 +1317,7 @@ def validate_training_config(
                 "submit with --volume (or set top-level `volume`)."
             )
         config = _schema_input(_hosted_config(raw, notices))
-        mode = _training_mode(raw, config_path, notices)
+        mode = _training_mode(raw, config_label, notices)
         payload: dict[str, Any] = {"mode": mode, "teamId": Config().team_id}
         if selected_image:
             payload["imageTag"] = selected_image
@@ -1317,9 +1362,11 @@ def validate_training_config(
 
 @app.command("run", rich_help_panel="Commands", hidden=True, epilog=RL_DISPATCH_JSON_HELP)
 def create_run(
-    config_path: str = typer.Argument(
+    config_paths: List[str] = typer.Argument(
         ...,
-        help="Path to a TOML config file to launch as a Hosted Training run.",
+        metavar="CONFIG_PATH...",
+        help="TOML config files to launch as a Hosted Training run, merged in order "
+        "with later files winning, as in prime-rl's `uv run rl @ a.toml @ b.toml`.",
     ),
     env: Optional[List[str]] = typer.Option(
         None,
@@ -1437,7 +1484,10 @@ def create_run(
         prime train rl.toml
         prime train sft.toml --volume research
         prime train pretrain.toml --volume research
+        prime train rl.toml gpu/h200.toml data/swe.toml
 
+    Several configs merge in order, later files winning, as in prime-rl's
+    `uv run rl @ rl.toml @ gpu/h200.toml @ data/swe.toml` (which also works here).
     The config's top-level `mode` ("rl", "sft" or "pretrain") picks the run kind.
     """
     validate_output_format(output, console)
@@ -1449,11 +1499,15 @@ def create_run(
         console.print("[red]Error:[/red] --resume-from needs the ID of a PAUSED run.")
         raise typer.Exit(1)
 
-    raw_cfg = _load_toml(config_path)
+    try:
+        raw_cfg, config_label = _load_config_stack(config_paths)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
+        raise typer.Exit(1) from exc
 
     if _looks_like_lora(raw_cfg):
         console.print(
-            f"[red]Error:[/red] {config_path} is a shared LoRA training config "
+            f"[red]Error:[/red] {config_label} is a shared LoRA training config "
             '(a top-level `model = "..."` or `\\[\\[env]]`). Shared LoRA training '
             "no longer accepts new runs; Hosted Training runs prime-rl configs "
             "on dedicated clusters. See prime-rl's examples/ for starter configs."
@@ -1464,7 +1518,7 @@ def create_run(
     # falls through to prime-rl's own default, same as a local run.
     try:
         mode: Optional[str] = _training_mode(
-            raw_cfg, config_path, get_console(stderr=True) if output == "json" else console
+            raw_cfg, config_label, get_console(stderr=True) if output == "json" else console
         )
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {rich_escape(str(exc))}")
@@ -1478,7 +1532,7 @@ def create_run(
 
     _dispatch_dedicated_run(
         raw_cfg=raw_cfg,
-        config_path=config_path,
+        config_label=config_label,
         env=env,
         env_file=env_file,
         output=output,

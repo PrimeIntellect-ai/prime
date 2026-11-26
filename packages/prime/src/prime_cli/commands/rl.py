@@ -52,6 +52,7 @@ from ..utils.formatters import format_file_size, strip_ansi
 from ..utils.prime_rl_recipes import (
     PrimeRLSource,
     is_remote_config,
+    overlay_gpu_type,
 )
 from ..utils.prompt import confirm_or_skip
 from .feedback import submit_feedback
@@ -429,6 +430,11 @@ def _config_layers(args: List[str]) -> List[tuple[str, Dict[str, Any], Optional[
             except tomllib.TOMLDecodeError as e:
                 raise ValueError(f"Invalid TOML in {label}: {e}") from e
             _strip_self_hosted_keys(cfg)
+            # Pin the run to the hardware the GPU overlay is sized for; a
+            # later file's `gpu_type` or `--gpu-type` still wins.
+            gpu_type = overlay_gpu_type(repo_path)
+            if gpu_type:
+                cfg.setdefault("gpu_type", gpu_type)
             layers.append((label, cfg, None))
     return layers
 

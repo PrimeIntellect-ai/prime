@@ -19,6 +19,8 @@ FILES: Dict[str, str] = {
     "recipes/multi/rl.toml": "seq_len = 1\n",
     "recipes/multi/gpu/b300.toml": "",
     "recipes/multi/gpu/gb200.toml": "",
+    "recipes/odd/rl.toml": "",
+    "recipes/odd/gpu/mi300.toml": "",
     "recipes/m/gpu/experimental/b300.toml": "",
     "recipes/data/swe.toml": '[orchestrator]\nbatch_size = 8\n[env_vars]\nHF_HOME = "/h"\n',
     "recipes/data/math.toml": "",
@@ -51,11 +53,14 @@ def github(monkeypatch: pytest.MonkeyPatch) -> list:
 
 def test_lists_recipes(github: list) -> None:
     recipes = {r.model: r for r in PrimeRLSource().recipes()}
-    assert set(recipes) == {"m", "multi", "bad"}
+    assert set(recipes) == {"m", "multi", "odd", "bad"}
     # Only direct children of gpu/ are overlays.
     assert recipes["m"].gpus == ["h200"]
     assert recipes["multi"].gpu is None
     assert not recipes["multi"].launchable
+    assert recipes["m"].gpu_type == "H200_141GB"
+    # An overlay with no known hosted GPU type can't be pinned, so it can't launch.
+    assert recipes["odd"].gpu == "mi300" and not recipes["odd"].launchable
     assert recipes["m"].data == ["math", "swe"]
 
 
@@ -66,6 +71,7 @@ def test_recipe_expands_to_stack_and_drops_self_hosted_keys(github: list) -> Non
         "model": {"name": "org/m"},
         "deployment": {"num_train_nodes": 1},
         "orchestrator": {"batch_size": 8},
+        "gpu_type": "H200_141GB",
     }
     assert label == (
         "prime-rl@v0.11.0:recipes/m/rl.toml + prime-rl@v0.11.0:recipes/m/gpu/h200.toml"
@@ -91,6 +97,7 @@ def test_local_file_overrides_recipe(github: list, tmp_path) -> None:
         ("recipe:nope", "Unknown recipe 'nope'"),
         ("recipe:m/nope", "Unknown data overlay 'nope'"),
         ("recipe:multi", "several GPU overlays"),
+        ("recipe:odd", "no known Hosted Training GPU type"),
         ("recipe:bad", "env files can't come from the prime-rl repo"),
     ],
 )
@@ -140,6 +147,28 @@ def test_ref_flag_only_picks_runtime_code(github: list, dispatched: list) -> Non
     assert github[0].endswith("/releases/latest")
     assert github[1].endswith("/commits/v0.11.0")
     assert dispatched[0]["sourceRef"] == "my-code"
+
+
+def test_recipe_pins_gpu_type_unless_overridden(github: list, dispatched: list, tmp_path) -> None:
+    result = runner.invoke(app, ["train", "recipe:m/swe", "-y", "-o", "json"], env=TEST_ENV)
+    assert result.exit_code == 0, result.output
+    assert dispatched[-1]["gpuType"] == "H200_141GB"
+
+    result = runner.invoke(
+        app,
+        ["train", "recipe:m/swe", "--gpu-type", "B200_180GB", "-y", "-o", "json"],
+        env=TEST_ENV,
+    )
+    assert result.exit_code == 0, result.output
+    assert dispatched[-1]["gpuType"] == "B200_180GB"
+
+    local = tmp_path / "override.toml"
+    local.write_text('gpu_type = "B300_288GB"\n')
+    result = runner.invoke(
+        app, ["train", "recipe:m/swe", str(local), "-y", "-o", "json"], env=TEST_ENV
+    )
+    assert result.exit_code == 0, result.output
+    assert dispatched[-1]["gpuType"] == "B300_288GB"
 
 
 def test_recipes_command_lists_launchable_recipes(github: list) -> None:

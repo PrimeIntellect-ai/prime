@@ -30,6 +30,9 @@ _GITHUB_API = "https://api.github.com"
 _GITHUB_RAW = "https://raw.githubusercontent.com"
 _RECIPES_DIR = "recipes"
 _DEFAULT_GPU = "h200"
+# Hosted Training GPU type each recipe GPU overlay is sized for. A launch is
+# pinned to it, so an overlay's node sizing never lands on other hardware.
+GPU_TYPES = {"h200": "H200_141GB", "b300": "B300_288GB"}
 # Recipe-folder entries that are not models.
 _NON_MODEL_DIRS = frozenset({"data"})
 _TIMEOUT = 15.0
@@ -71,8 +74,20 @@ class Recipe:
         return None
 
     @property
+    def gpu_type(self) -> Optional[str]:
+        return GPU_TYPES.get(self.gpu) if self.gpu else None
+
+    @property
     def launchable(self) -> bool:
-        return not self.gpus or self.gpu is not None
+        return not self.gpus or self.gpu_type is not None
+
+
+def overlay_gpu_type(repo_path: str) -> Optional[str]:
+    """Hosted GPU type for a recipe GPU overlay path, None for other layers."""
+    parts = repo_path.split("/")
+    if len(parts) == 4 and parts[0] == _RECIPES_DIR and parts[2] == "gpu":
+        return GPU_TYPES.get(parts[3].removesuffix(".toml"))
+    return None
 
 
 def _headers(accept: str) -> Dict[str, str]:
@@ -220,6 +235,12 @@ class PrimeRLSource:
                     f"Recipe {model!r} has several GPU overlays ({', '.join(recipe.gpus)}) "
                     f"and none is {_DEFAULT_GPU}; download the recipe from prime-rl's "
                     f"{_RECIPES_DIR}/{model}/ and pass the files directly."
+                )
+            if recipe.gpu_type is None:
+                raise ValueError(
+                    f"Recipe {model!r} uses the {gpu} GPU overlay, which has no known "
+                    f"Hosted Training GPU type; download the recipe from prime-rl's "
+                    f"{_RECIPES_DIR}/{model}/ and pass the files with --gpu-type."
                 )
             paths.append(f"{_RECIPES_DIR}/{model}/gpu/{gpu}.toml")
         if data:

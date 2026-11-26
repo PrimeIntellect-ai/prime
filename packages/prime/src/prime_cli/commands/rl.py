@@ -361,18 +361,35 @@ def _remove_deprecated_config_keys(data: Dict[str, Any], out: Any = console) -> 
             )
 
 
-def _load_toml(config_path: str) -> Dict[str, Any]:
+def _load_config_file(config_path: str) -> Dict[str, Any]:
     """Parse one run config. The raw table is shipped to the platform as-is
     (prime-rl's schema is validated server-side), so the CLI only checks
-    that the file exists and is valid TOML."""
+    that the file exists and parses. Like prime-rl's `@ file`, `.json`,
+    `.yaml` and `.yml` files are read too, e.g. the resolved JSON configs
+    its launchers write; any other file is read as TOML."""
+    import yaml
+
     p = Path(config_path)
     if not p.is_file():
         raise ValueError(f"Config file not found: {config_path}")
+    suffix = p.suffix.lower()
     try:
         with p.open("rb") as f:
-            return tomllib.load(f)
+            if suffix == ".json":
+                cfg = json.load(f)
+            elif suffix in (".yaml", ".yml"):
+                cfg = yaml.safe_load(f)
+            else:
+                cfg = tomllib.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in {config_path}: {e}") from e
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML in {config_path}: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"Invalid TOML in {config_path}: {e}") from e
+    if not isinstance(cfg, dict):
+        raise ValueError(f"{config_path} must hold a table of settings, got {type(cfg).__name__}.")
+    return cfg
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -403,7 +420,7 @@ def _load_config_stack(args: List[str]) -> tuple[Dict[str, Any], str]:
     env_files: List[str] = []
     modes: Dict[str, Any] = {}
     for config_path in config_paths:
-        cfg = _load_toml(config_path)
+        cfg = _load_config_file(config_path)
         config_dir = Path(config_path).parent
         # `env_file` (deprecated, singular) comes first so `env_files`
         # (canonical, plural) overrides it on key collision.

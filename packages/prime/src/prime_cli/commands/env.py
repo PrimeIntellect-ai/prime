@@ -1,6 +1,4 @@
-import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -8,18 +6,15 @@ import sys
 import tarfile
 import tempfile
 import tomllib
-import zipfile
 from datetime import datetime
 
 # Wheel METADATA files use RFC 822 format (PEP 566), same as email headers
-from email.parser import Parser as EmailParser
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
 import typer
-from gitignore_parser import parse_gitignore
 from rich.table import Table
 from rich.text import Text
 
@@ -33,11 +28,32 @@ from ..utils import (
 )
 from ..utils.env_metadata import find_environment_metadata
 from ..utils.environment_runtime import (
+    VERIFIERS_V0,
     VERIFIERS_V1,
     classify_runtime_from_metadata,
     parse_runtime_option,
 )
 from ..utils.formatters import format_file_size
+from ..utils.hub import HubAPIError, HubClient, ReleaseRequest, publish_release, sha256_of
+from ..utils.hub_components import detect_components
+from ..utils.package_archive import (  # noqa: F401 (re-exported for callers and tests)
+    _add_file_to_archive,
+    _collect_archive_files,
+    compute_content_hash,
+    should_include_directory_in_archive,
+    should_include_file_in_archive,
+)
+from ..utils.package_push import (
+    PushError,
+    build_wheel,
+    check_name_matches_distribution,
+    hub_names,
+    print_push_error,
+    requires_dist_of,
+    resolve_owner,
+    wheel_distribution,
+    write_source,
+)
 from ..utils.prompt import (
     any_provided,
     prompt_for_value,
@@ -46,7 +62,6 @@ from ..utils.prompt import (
 )
 from ..utils.time_utils import format_time_ago, iso_timestamp
 from ..utils.workspace_python import resolve_workspace_python
-from .config import TEAM_ID_PATTERN
 
 app = PlainTyper(help="Manage verifiers environments", no_args_is_help=True)
 console = get_console()
@@ -361,145 +376,6 @@ def _environment_push_metadata(
     return metadata
 
 
-def should_include_file_in_archive(file_path: Path, base_path: Path) -> bool:
-    """Determine if a file should be included in the archive based on filtering rules."""
-    if not file_path.is_file():
-        return False
-
-    # Skip symlinks - they cause extraction failures in _safe_tar_extract
-    if file_path.is_symlink():
-        return False
-
-    # Hardlinks are fine to include: _add_file_to_archive stores them as
-    # regular file content so pull/install safe-extract never sees LNKTYPE.
-
-    rel_path = file_path.relative_to(base_path)
-
-    # Skip hidden files
-    if file_path.name.startswith("."):
-        return False
-
-    # Skip files in __pycache__ directories
-    if "__pycache__" in rel_path.parts:
-        return False
-
-    return True
-
-
-def should_include_directory_in_archive(dir_path: Path) -> bool:
-    """Determine if a directory should be included in the archive based on filtering rules."""
-    if not dir_path.is_dir():
-        return False
-
-    # Skip hidden directories (includes .prime/, .git/, etc.)
-    if dir_path.name.startswith("."):
-        return False
-
-    # Skip build artifacts, cache directories, and outputs
-    if dir_path.name in ["dist", "__pycache__", "build", "outputs"]:
-        return False
-
-    # Skip egg-info directories
-    if dir_path.name.endswith(".egg-info"):
-        return False
-
-    return True
-
-
-def _build_gitignore_matcher(env_path: Path) -> Optional[Callable[[str], bool]]:
-    """Build a matcher for the root .gitignore file, if present."""
-    gitignore_path = env_path / ".gitignore"
-    if not gitignore_path.exists():
-        return None
-    return parse_gitignore(str(gitignore_path), base_dir=str(env_path))
-
-
-def _collect_archive_files(env_path: Path) -> List[Path]:
-    """Collect archive file paths in deterministic order, honoring .gitignore."""
-    ignore_matcher = _build_gitignore_matcher(env_path)
-    files_by_rel_path: Dict[str, Path] = {}
-
-    def maybe_add_file(file_path: Path) -> None:
-        if not should_include_file_in_archive(file_path, env_path):
-            return
-        if ignore_matcher is not None and ignore_matcher(str(file_path)):
-            return
-
-        rel_path = str(file_path.relative_to(env_path)).replace("\\", "/")
-        files_by_rel_path[rel_path] = file_path
-
-    for pattern in ["README.md", "pyproject.toml", "*.py"]:
-        for file_path in sorted(env_path.glob(pattern), key=lambda p: p.name):
-            maybe_add_file(file_path)
-
-    def is_nested_dir_ignored(dir_path: Path) -> bool:
-        """Check if a nested directory should be pruned from traversal."""
-        if not should_include_directory_in_archive(dir_path):
-            return True
-        if ignore_matcher is not None and ignore_matcher(str(dir_path)):
-            return True
-        return False
-
-    for subdir in sorted(env_path.iterdir(), key=lambda path: path.name):
-        if not should_include_directory_in_archive(subdir):
-            continue
-        if is_nested_dir_ignored(subdir):
-            continue
-
-        for root, dirnames, filenames in os.walk(subdir):
-            root_path = Path(root)
-            dirnames[:] = sorted(
-                dirname for dirname in dirnames if not is_nested_dir_ignored(root_path / dirname)
-            )
-            for filename in sorted(filenames):
-                maybe_add_file(root_path / filename)
-
-    return [files_by_rel_path[rel_path] for rel_path in sorted(files_by_rel_path)]
-
-
-def _add_file_to_archive(tar: tarfile.TarFile, file_path: Path, arcname: str) -> None:
-    """Add a file as REGTYPE content (never symlink/hardlink members).
-
-    ``tar.add()`` records a hardlink (``LNKTYPE``) when another file with the
-    same inode is already in the archive. ``_safe_tar_extract`` rejects
-    hardlinks, so push must always store byte content as a regular file —
-    same rationale as skipping symlinks at collect time.
-    """
-    if file_path.is_symlink():
-        return
-
-    info = tar.gettarinfo(str(file_path), arcname=arcname)
-    info.type = tarfile.REGTYPE
-    info.linkname = ""
-    info.size = file_path.stat().st_size
-    with open(file_path, "rb") as handle:
-        tar.addfile(info, handle)
-
-
-def compute_content_hash(env_path: Path) -> str:
-    """Compute deterministic, cross-platform content hash for environment files.
-
-    Args:
-        env_path: Path to the environment directory
-
-    Returns:
-        SHA256 hexdigest of the environment content
-    """
-    content_hasher = hashlib.sha256()
-
-    for file_path in _collect_archive_files(env_path):
-        normalized_path = str(file_path.relative_to(env_path)).replace("\\", "/")
-        content_hasher.update(f"file:{normalized_path}".encode("utf-8"))
-        try:
-            with open(file_path, "rb") as f:
-                content_hasher.update(f.read())
-        except IOError:
-            # Skip files that can't be read
-            pass
-
-    return content_hasher.hexdigest()
-
-
 def _print_env_inspect_examples(owner: str, name: str, version: str) -> None:
     """Print inspect commands for an environment version."""
     console.print("[bold yellow]Inspect[/bold yellow]")
@@ -755,31 +631,6 @@ def _resolve_push_environment_path(path: Optional[str], env_id: Optional[str]) -
     return Path(path or ".").resolve()
 
 
-def _environment_resolve_data(
-    env_name: str,
-    *,
-    visibility: Optional[str],
-    owner: Optional[str],
-    team: Optional[str],
-    configured_team: Optional[str],
-) -> Dict[str, str]:
-    """Build the /environmentshub/resolve payload for `prime env push`."""
-    resolve_data = {"name": env_name}
-    if visibility:
-        resolve_data["visibility"] = visibility
-    if owner:
-        resolve_data["owner_slug"] = owner
-    elif team:
-        resolve_data["team_slug"] = team
-    elif configured_team:
-        configured_team = configured_team.strip()
-        if TEAM_ID_PATTERN.match(configured_team):
-            resolve_data["team_id"] = configured_team
-        else:
-            resolve_data["team_slug"] = configured_team
-    return resolve_data
-
-
 def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path:
     """Resolve the local target directory for `prime env pull`."""
     if target:
@@ -789,6 +640,90 @@ def _resolve_pull_environment_path(target: Optional[str], env_name: str) -> Path
     cwd = Path.cwd()
     parent = cwd / "environments" if (cwd / "environments").is_dir() else cwd
     return parent / env_folder
+
+
+_FRAMEWORKS = {VERIFIERS_V0: "v0", VERIFIERS_V1: "v1"}
+
+
+def _declared_components(env_path: Path, distribution: str) -> List[Dict[str, str]]:
+    """Detect the v1 components the package exports, and say what was found."""
+    detected = detect_components(env_path, distribution)
+    for kind, names in detected.ambiguous.items():
+        console.print(
+            f"[yellow]Not declaring a {kind}: __all__ exports {len(names)} "
+            f"({', '.join(names)}), and a release declares one.[/yellow]"
+        )
+    if detected.components:
+        exports = ", ".join(f"{item['kind']} {item['name']}" for item in detected.components)
+        console.print(f"Exports: {exports}")
+    elif not detected.found_exports:
+        console.print(
+            "[dim]No __all__ found in the package's module, so no components are "
+            "declared; the Hub lists them once it indexes the release.[/dim]"
+        )
+    return detected.components
+
+
+def _save_push_metadata(
+    env_path: Path, *, package_id: str, owner: str, name: str, version: Any, wheel_sha256: str
+) -> None:
+    """Record where the package was pushed in .prime/.env-metadata.json."""
+    prime_dir = env_path / ".prime"
+    prime_dir.mkdir(exist_ok=True)
+    metadata_path = prime_dir / ".env-metadata.json"
+
+    # Environments pulled or pushed by older CLIs kept this file at the root.
+    old_metadata_path = env_path / ".env-metadata.json"
+    migration_failed = False
+    if old_metadata_path.exists() and not metadata_path.exists():
+        try:
+            old_metadata_path.rename(metadata_path)
+            console.print("[dim]Migrated environment metadata from root to .prime/ subfolder[/dim]")
+        except OSError as e:
+            migration_failed = True
+            console.print(
+                f"[yellow]Warning: Could not migrate old .env-metadata.json "
+                f"file to .prime/ subfolder: {e}[/yellow]"
+            )
+    elif old_metadata_path.exists() and metadata_path.exists():
+        try:
+            old_metadata_path.unlink()
+        except OSError:
+            console.print("[yellow]Warning: Could not remove old .env-metadata.json[/yellow]")
+
+    existing_metadata: Dict[str, Any] = {}
+    source = metadata_path if metadata_path.exists() else None
+    if source is None and migration_failed and old_metadata_path.exists():
+        source = old_metadata_path
+    if source is not None:
+        try:
+            existing_metadata = json.loads(source.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            console.print(f"[yellow]Warning: Could not read existing metadata: {e}[/yellow]")
+
+    env_metadata = _environment_push_metadata(
+        existing_metadata,
+        environment_id=package_id,
+        owner=owner,
+        name=name,
+        version=version,
+        pushed_at=datetime.now().isoformat(),
+        wheel_sha256=wheel_sha256,
+    )
+    metadata_path.write_text(json.dumps(env_metadata, indent=2))
+
+    verb = (
+        "Updated environment metadata in "
+        if existing_metadata
+        else "Saved environment metadata to "
+    )
+    message = Text(verb, style="dim")
+    message.append(str(metadata_path), style="dim")
+    console.print(message)
+    if env_metadata.get("forked_from"):
+        upstream_message = Text("Upstream set to ", style="dim")
+        upstream_message.append(f"{owner}/{name}", style="dim")
+        console.print(upstream_message)
 
 
 @app.command(rich_help_panel="Manage")
@@ -807,7 +742,13 @@ def push(
         ),
     ),
     name: Optional[str] = typer.Option(
-        None, "--name", "-n", help="Override environment name (defaults to pyproject.toml name)"
+        None,
+        "--name",
+        "-n",
+        help=(
+            "Override environment name (defaults to pyproject.toml name); it must be "
+            "the same name, up to case and '-' vs '_'"
+        ),
     ),
     owner: Optional[str] = typer.Option(
         None,
@@ -822,7 +763,10 @@ def push(
         help="Team slug for team ownership (uses config team_id if not provided)",
     ),
     visibility: Optional[str] = typer.Option(
-        None, "--visibility", "-v", help="Environment visibility (PUBLIC/PRIVATE)"
+        None,
+        "--visibility",
+        "-v",
+        help="Visibility of a new environment (PUBLIC/PRIVATE); defaults to the team's default",
     ),
     runtime: Optional[str] = typer.Option(
         None,
@@ -842,7 +786,13 @@ def push(
         help="Bump or create a .post release (post0 -> post1)",
     ),
 ) -> None:
-    """Push environment to registry"""
+    """Push environment to registry
+
+    Publishes a new release through the Hub: the wheel and a source archive of
+    the folder (honoring .gitignore). A version is published once. For a
+    verifiers v1 package, the components its __all__ exports (taskset, harness,
+    env, judges) are declared with the release.
+    """
 
     try:
         declared_runtime = parse_runtime_option(runtime)
@@ -850,597 +800,190 @@ def push(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
+    if visibility is not None and visibility.strip().lower() not in ("public", "private"):
+        console.print("[red]Error: --visibility must be PUBLIC or PRIVATE[/red]")
+        raise typer.Exit(1)
+
+    env_path = _resolve_push_environment_path(path, env_id)
+
+    # Display upstream environment info if metadata exists
+    display_upstream_environment_info(env_path)
+
+    pyproject_path = env_path / "pyproject.toml"
+    if not pyproject_path.exists():
+        console.print("[red]Error: pyproject.toml not found[/red]")
+        raise typer.Exit(1)
+
     try:
-        env_path = _resolve_push_environment_path(path, env_id)
-
-        # Display upstream environment info if metadata exists
-        display_upstream_environment_info(env_path)
-
-        # Validate basic structure
-        pyproject_path = env_path / "pyproject.toml"
-        if not pyproject_path.exists():
-            console.print("[red]Error: pyproject.toml not found[/red]")
-            raise typer.Exit(1)
-
-        try:
-            pyproject_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-            project_info = pyproject_data.get("project", {})
-
-            env_name = name or project_info.get("name")
-            if not env_name:
-                console.print(
-                    "[red]Error: No name found in pyproject.toml and no --name provided[/red]"
-                )
-                raise typer.Exit(1)
-
-            # Auto-bump version if requested
-            if auto_bump or rc or post:
-                flags_set = sum(bool(x) for x in (auto_bump, rc, post))
-                if flags_set > 1:
-                    console.print(
-                        "[red]Error: --auto-bump, --rc, and --post are mutually exclusive[/red]"
-                    )
-                    raise typer.Exit(1)
-                current_version = project_info.get("version")
-                if not current_version:
-                    console.print(
-                        "[red]Error: No version found in pyproject.toml for auto-bump[/red]"
-                    )
-                    raise typer.Exit(1)
-
-                if auto_bump:
-                    new_version = bump_version(current_version)
-                elif rc:
-                    new_version = bump_rc_version(current_version)
-                else:
-                    new_version = bump_post_version(current_version)
-
-                console.print(f"Auto-bumping version: {current_version} → {new_version}")
-
-                try:
-                    update_pyproject_version(pyproject_path, new_version)
-                    # Reload pyproject.toml with new version
-                    pyproject_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-                    project_info = pyproject_data.get("project", {})
-                    console.print("[green]✓ Updated version in pyproject.toml[/green]")
-                except Exception as e:
-                    console.print(f"[red]Failed to update version in pyproject.toml: {e}[/red]")
-                    raise typer.Exit(1)
-
-            console.print(f"Environment name: {env_name}")
-
-        except Exception as e:
-            console.print(f"[red]Failed to parse pyproject.toml: {e}[/red]")
-            raise typer.Exit(1)
-
-        # Find any Python file in the environment
-        has_env_file = False
-        py_files = list(env_path.glob("*.py"))
-
-        if py_files:
-            has_env_file = True
-        else:
-            # Check for package structure with __init__.py
-            for subdir in env_path.iterdir():
-                if subdir.is_dir():
-                    init_file = subdir / "__init__.py"
-                    if init_file.exists():
-                        has_env_file = True
-                        break
-
-        if not has_env_file:
-            console.print("[red]Error: No environment Python file found[/red]")
-            raise typer.Exit(1)
-
-        console.print(f"Building environment package at {env_path}...")
-
-        # Clean dist directory to ensure fresh build
-        dist_dir = env_path / "dist"
-        if dist_dir.exists():
-            console.print("[dim]Cleaning existing dist directory...[/dim]")
-            shutil.rmtree(dist_dir)
-
-        console.print("Building wheel distribution...")
-
-        try:
-            if shutil.which("uv"):
-                subprocess.run(
-                    ["uv", "build", "--wheel", "--out-dir", "dist"],
-                    cwd=env_path,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-            else:
-                subprocess.run(
-                    [sys.executable, "-m", "build", "--wheel", str(env_path)],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-        except subprocess.CalledProcessError as e:
-            console.print("[red]Build failed![/red]")
-            console.print(e.stderr)
-            raise typer.Exit(1)
-        except FileNotFoundError:
-            console.print("[red]Build tool not found. Please install 'uv' or 'build'.[/red]")
-            raise typer.Exit(1)
-
-        dist_dir = env_path / "dist"
-        wheels = list(dist_dir.glob("*.whl"))
-        if not wheels:
-            console.print("[red]Error: No wheel file found after build[/red]")
-            raise typer.Exit(1)
-
-        wheel_path = wheels[0]
-        wheel_size = wheel_path.stat().st_size
-        console.print(f"[green]✓ Built {wheel_path.name} ({wheel_size:,} bytes)[/green]")
-
-        console.print("\nUploading to Prime Intellect Hub...")
-
-        try:
-            client = APIClient()
-
-            console.print("Resolving environment...")
-            resolve_data = _environment_resolve_data(
-                env_name,
-                visibility=visibility,
-                owner=owner,
-                team=team,
-                configured_team=client.config.team_id,
-            )
-
-            try:
-                response = client.post("/environmentshub/resolve", json=resolve_data)
-
-                if "data" in response:
-                    resolve_response = response["data"]
-                else:
-                    resolve_response = response
-
-                env_id = resolve_response["id"]
-                owner_info = resolve_response["owner"]
-
-                if resolve_response["created"]:
-                    console.print(
-                        f"[green]✓ Created environment: {owner_info['name']}/{env_name}[/green]"
-                    )
-                else:
-                    console.print(
-                        f"[green]✓ Found existing environment: "
-                        f"{owner_info['name']}/{env_name}[/green]"
-                    )
-            except APIError as e:
-                # Handle missing username (slug) by prompting user to set it and retrying
-                err_msg = str(e)
-                if "missing a username" in err_msg.lower():
-                    console.print(
-                        "[yellow]Your user profile is missing a username.[/yellow] "
-                        "You must choose a username to publish environments."
-                    )
-                    console.print(
-                        "[dim]Note: This username can only be chosen once and will be public.[/dim]"
-                    )
-
-                    while True:
-                        try:
-                            chosen = (
-                                typer.prompt(
-                                    "Enter your desired username",
-                                )
-                                .strip()
-                                .lower()
-                            )
-                        except typer.Abort:
-                            console.print("[red]Cancelled by user[/red]")
-                            raise typer.Exit(1)
-
-                        if not chosen:
-                            console.print("[red]Username cannot be empty[/red]")
-                            continue
-
-                        if not re.match(r"^[a-z0-9-]{3,30}$", chosen):
-                            console.print(
-                                "[red]Invalid username.[/red] "
-                                "Use 3-30 chars with lowercase letters, numbers, and '-' only."
-                            )
-                            continue
-
-                        try:
-                            client.patch("/user/slug", json={"slug": chosen})
-                            console.print(f"[green]✓ Username set to {chosen}[/green]")
-                            break
-                        except APIError as se:
-                            se_msg = str(se)
-                            if "409" in se_msg or "already taken" in se_msg.lower():
-                                console.print(
-                                    "[red]That username is already taken.[/red] "
-                                    "Please choose another."
-                                )
-                                continue
-                            else:
-                                console.print(f"[red]Failed to set username: {se}[/red]")
-                                raise typer.Exit(1)
-
-                    # Retry resolve after setting username
-                    try:
-                        response = client.post("/environmentshub/resolve", json=resolve_data)
-
-                        if "data" in response:
-                            resolve_response = response["data"]
-                        else:
-                            resolve_response = response
-
-                        env_id = resolve_response["id"]
-                        owner_info = resolve_response["owner"]
-
-                        if resolve_response["created"]:
-                            console.print(
-                                f"[green]✓ Created environment: {owner_info['name']}/"
-                                f"{env_name}[/green]"
-                            )
-                        else:
-                            console.print(
-                                f"[green]✓ Found existing environment: "
-                                f"{owner_info['name']}/{env_name}[/green]"
-                            )
-                    except APIError as e2:
-                        console.print(
-                            f"[red]Failed to resolve environment after setting username: {e2}[/red]"
-                        )
-                        raise typer.Exit(1)
-                else:
-                    console.print(f"[red]Failed to resolve environment: {e}[/red]")
-                    raise typer.Exit(1)
-
-            console.print("Uploading wheel ...")
-
-            try:
-                with open(wheel_path, "rb") as f:
-                    wheel_sha256 = hashlib.sha256(f.read()).hexdigest()
-            except IOError as e:
-                console.print(f"[red]Failed to read wheel file: {e}[/red]")
-                raise typer.Exit(1)
-
-            project_metadata = project_info
-
-            # Compute deterministic content hash
-            content_hash = compute_content_hash(env_path)
-
-            unique_wheel_name = wheel_path.name
-
-            # Extract Requires-Dist from wheel METADATA (includes URL dependencies)
-            requires_dist = extract_requires_dist_from_wheel(wheel_path)
-
-            runtime_hint = declared_runtime or classify_runtime_from_metadata(
-                requires_dist or project_metadata.get("dependencies", [])
-            )
-            if runtime_hint is None:
-                console.print(
-                    "[yellow]No verifiers requirement found, so the Hub will list this "
-                    "package as Unclassified; pass --runtime v0|v1 to declare it.[/yellow]"
-                )
-            else:
-                label = "verifiers v1" if runtime_hint == VERIFIERS_V1 else "legacy verifiers v0"
-                source = "--runtime" if declared_runtime else "the verifiers requirement"
-                console.print(f"Publishing as {label} (from {source})")
-
-            wheel_data = {
-                "content_hash": content_hash,
-                "filename": unique_wheel_name,
-                "sha256": wheel_sha256,
-                "size": wheel_path.stat().st_size,
-                "semantic_version": project_metadata.get("version"),
-                "metadata": {
-                    "description": project_metadata.get("description", ""),
-                    "tags": project_metadata.get("tags", []),
-                    "license": project_metadata.get("license", ""),
-                    "dependencies": project_metadata.get("dependencies", []),
-                    "python_requires": project_metadata.get("requires-python", ">=3.8"),
-                    "original_filename": wheel_path.name,
-                    "requires_dist": requires_dist,  # Include full dependency specs from wheel
-                },
-            }
-            if runtime_hint is not None:
-                wheel_data["runtime_hint"] = runtime_hint
-
-            try:
-                response = client.post(f"/environmentshub/{env_id}/wheels", json=wheel_data)
-
-                wheel_response = response["data"]
-
-                wheel_id = wheel_response["wheel_id"]
-                wheel_upload_url = wheel_response["upload_url"]
-
-            except APIError as e:
-                if "content hash" in str(e).lower() and "already exists" in str(e):
-                    console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
-                    console.print(
-                        "[yellow]Tip: If you've made changes to your environment, "
-                        "ensure the content has actually changed.[/yellow]"
-                    )
-                    console.print(
-                        "[yellow]The content hash is based on your source files "
-                        "(*.py, pyproject.toml, README.md).[/yellow]"
-                    )
-                    console.print(
-                        "[dim]Alternatively, use the --auto-bump flag to push "
-                        "a new version without content changes[/dim]"
-                    )
-                else:
-                    console.print(f"[red]Failed to prepare wheel upload: {e}[/red]")
-                raise typer.Exit(1)
-
-            if wheel_upload_url:
-                try:
-                    with open(wheel_path, "rb") as f:
-                        upload_response = httpx.put(
-                            wheel_upload_url,
-                            content=f.read(),
-                            headers={"Content-Type": "application/octet-stream"},
-                            timeout=300.0,
-                        )
-                        upload_response.raise_for_status()
-                except httpx.RequestError as e:
-                    console.print(f"[red]Failed to upload wheel: {e}[/red]")
-                    raise typer.Exit(1)
-                except IOError as e:
-                    console.print(f"[red]Failed to read wheel file for upload: {e}[/red]")
-                    raise typer.Exit(1)
-
-                try:
-                    client.post(f"/environmentshub/{env_id}/wheels/{wheel_id}/finalize")
-                except APIError as e:
-                    console.print(f"[red]Failed to finalize wheel upload: {e}[/red]")
-                    raise typer.Exit(1)
-
-            console.print("Creating source archive...")
-            temp_file_path = None
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-                    temp_file_path = tmp.name
-                    with tarfile.open(tmp.name, "w:gz") as tar:
-                        for file_path in _collect_archive_files(env_path):
-                            arcname = file_path.relative_to(env_path)
-                            _add_file_to_archive(tar, file_path, str(arcname))
-
-                    # Check tarball size
-                    tarball_size = Path(tmp.name).stat().st_size
-                    tarball_size_formatted = format_file_size(tarball_size)
-                    console.print(f"Source archive size: {tarball_size_formatted}")
-
-                    if tarball_size > MAX_TARBALL_SIZE_LIMIT:
-                        max_size_formatted = format_file_size(MAX_TARBALL_SIZE_LIMIT)
-                        console.print(
-                            f"\n[yellow]⚠ Warning: Your tarball size ({tarball_size_formatted}) "
-                            f"exceeds the recommended limit of {max_size_formatted}.[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]Large environment uploads may cause issues. Consider:[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]  • Excluding large data files or model weights[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]  • Checking for accidentally included build "
-                            "artifacts[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]  • Using .gitignore patterns to exclude unnecessary "
-                            "files[/yellow]\n"
-                        )
-
-                    with open(tmp.name, "rb") as f:
-                        source_sha256 = hashlib.sha256(f.read()).hexdigest()
-
-                    version = project_metadata.get("version")
-                    unique_source_name = f"{env_name}-{version}-{content_hash[:8]}.tar.gz"
-
-                    source_data = {
-                        "content_hash": content_hash,
-                        "filename": unique_source_name,
-                        "sha256": source_sha256,
-                        "semantic_version": version,
-                        "metadata": {
-                            **wheel_data["metadata"],
-                            "original_filename": f"{env_name}-{version}.tar.gz",
-                        },
-                    }
-                    if runtime_hint is not None:
-                        source_data["runtime_hint"] = runtime_hint
-
-                    try:
-                        response = client.post(
-                            f"/environmentshub/{env_id}/versions", json=source_data
-                        )
-
-                        version_response = response["data"]
-
-                        version_id = version_response["version_id"]
-                        source_upload_url = version_response["upload_url"]
-
-                    except APIError as e:
-                        if "content hash" in str(e).lower() and "already exists" in str(e):
-                            console.print(f"[red]Failed to prepare source upload: {e}[/red]")
-                            console.print(
-                                "[yellow]Tip: If you've made changes to your environment, "
-                                "ensure the content has actually changed.[/yellow]"
-                            )
-                            console.print(
-                                "[yellow]The content hash is based on your source files "
-                                "(*.py, pyproject.toml, README.md).[/yellow]"
-                            )
-                            console.print(
-                                "[dim]Alternatively, use the --auto-bump flag to push "
-                                "a new version without content changes[/dim]"
-                            )
-                        else:
-                            console.print(f"[red]Failed to prepare source upload: {e}[/red]")
-                        raise typer.Exit(1)
-
-                    try:
-                        with open(tmp.name, "rb") as f:
-                            upload_response = httpx.put(
-                                source_upload_url,
-                                content=f.read(),
-                                headers={"Content-Type": "application/octet-stream"},
-                                timeout=300.0,
-                            )
-                            upload_response.raise_for_status()
-                    except httpx.RequestError as e:
-                        console.print(f"[red]Failed to upload source archive: {e}[/red]")
-                        raise typer.Exit(1)
-                    except IOError as e:
-                        console.print(f"[red]Failed to read source archive for upload: {e}[/red]")
-                        raise typer.Exit(1)
-
-                    # Finalize
-                    try:
-                        response = client.post(
-                            f"/environmentshub/{env_id}/versions/{version_id}/finalize"
-                        )
-
-                        finalize_response = response["data"]
-
-                    except APIError as e:
-                        console.print(f"[red]Failed to finalize source upload: {e}[/red]")
-                        raise typer.Exit(1)
-
-            except (tarfile.TarError, OSError) as e:
-                console.print(f"[red]Failed to create source archive: {e}[/red]")
-                raise typer.Exit(1)
-            finally:
-                # Clean up temporary file if it was created
-                if temp_file_path and Path(temp_file_path).exists():
-                    Path(temp_file_path).unlink()
-
-            if finalize_response.get("success"):
-                owner_name = owner_info["name"]
-                console.print(f"\n[green]✓ Successfully pushed {owner_name}/{env_name}[/green]")
-                console.print(f"Wheel: {wheel_path.name}")
-                console.print(f"SHA256: {wheel_sha256}")
-
-                # Save or update environment hub metadata for future reference
-                try:
-                    prime_dir = env_path / ".prime"
-                    prime_dir.mkdir(exist_ok=True)
-                    metadata_path = prime_dir / ".env-metadata.json"
-
-                    # Backwards compatibility: Migrate .env-metadata.json from root to .prime/
-                    # This handles environments that were pulled/pushed before we moved
-                    # to .prime/ subfolder
-                    old_metadata_path = env_path / ".env-metadata.json"
-                    migration_failed = False
-                    if old_metadata_path.exists() and not metadata_path.exists():
-                        try:
-                            # Move the old file to the new location
-                            old_metadata_path.rename(metadata_path)
-                            console.print(
-                                "[dim]Migrated environment metadata from root "
-                                "to .prime/ subfolder[/dim]"
-                            )
-                        except (OSError, IOError) as e:
-                            migration_failed = True
-                            console.print(
-                                f"[yellow]Warning: Could not migrate old .env-metadata.json "
-                                f"file to .prime/ subfolder: {e}[/yellow]"
-                            )
-                    elif old_metadata_path.exists() and metadata_path.exists():
-                        # Both exist - prefer the one in .prime/ and remove the old one
-                        try:
-                            old_metadata_path.unlink()
-                        except (OSError, IOError):
-                            console.print(
-                                "[yellow]Warning: Could not remove old .env-metadata.json[/yellow]"
-                            )
-
-                    # Read existing metadata if it exists
-                    existing_metadata = {}
-                    if metadata_path.exists():
-                        try:
-                            with open(metadata_path, "r") as f:
-                                existing_metadata = json.load(f)
-                        except (json.JSONDecodeError, IOError) as e:
-                            console.print(
-                                f"[yellow]Warning: Could not read existing metadata: {e}[/yellow]"
-                            )
-                            existing_metadata = {}
-                    elif migration_failed and old_metadata_path.exists():
-                        # If migration failed, read from old location to preserve metadata
-                        try:
-                            with open(old_metadata_path, "r") as f:
-                                existing_metadata = json.load(f)
-                        except (json.JSONDecodeError, IOError) as e:
-                            console.print(
-                                f"[yellow]Warning: Could not read existing metadata from "
-                                f"old location: {e}[/yellow]"
-                            )
-                            existing_metadata = {}
-
-                    env_metadata = _environment_push_metadata(
-                        existing_metadata,
-                        environment_id=env_id,
-                        owner=owner_name,
-                        name=env_name,
-                        version=project_metadata.get("version"),
-                        pushed_at=datetime.now().isoformat(),
-                        wheel_sha256=wheel_sha256,
-                    )
-
-                    with open(metadata_path, "w") as f:
-                        json.dump(env_metadata, f, indent=2)
-
-                    if existing_metadata:
-                        message = Text("Updated environment metadata in ", style="dim")
-                        message.append(str(metadata_path), style="dim")
-                        console.print(message)
-                    else:
-                        message = Text("Saved environment metadata to ", style="dim")
-                        message.append(str(metadata_path), style="dim")
-                        console.print(message)
-
-                    # Report upstream change if it occurred
-                    if env_metadata.get("forked_from"):
-                        upstream_message = Text("Upstream set to ", style="dim")
-                        upstream_message.append(f"{owner_name}/{env_name}", style="dim")
-                        console.print(upstream_message)
-                except Exception as e:
-                    console.print(
-                        f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]"
-                    )
-
-                # Show Hub page link for the environment
-                frontend_url = client.config.frontend_url.rstrip("/")
-                hub_url = f"{frontend_url}/dashboard/environments/{owner_name}/{env_name}"
-                console.print("\n[cyan]View on Environments Hub:[/cyan]")
-                console.print(f"  [link={hub_url}]{hub_url}[/link]")
-
-                # Show install command
-                console.print("\n[cyan]Install with:[/cyan]")
-                console.print(f"  prime env install {owner_name}/{env_name}")
-            else:
-                console.print(f"[red]Error finalizing: {finalize_response.get('message')}[/red]")
-                raise typer.Exit(1)
-
-        except APIError as e:
-            console.print(f"[red]API Error: {e}[/red]")
-            raise typer.Exit(1)
-        except Exception as e:
-            console.print(f"[red]Upload failed: {e}[/red]")
-            raise typer.Exit(1)
-
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Build error: {e}[/red]")
-        raise typer.Exit(1)
-    except FileNotFoundError as e:
-        console.print(f"[red]File not found: {e}[/red]")
-        raise typer.Exit(1)
-    except PermissionError as e:
-        console.print(f"[red]Permission error: {e}[/red]")
-        raise typer.Exit(1)
+        pyproject_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     except Exception as e:
-        console.print(f"[red]Unexpected error: {e}[/red]")
+        console.print(f"[red]Failed to parse pyproject.toml: {e}[/red]")
         raise typer.Exit(1)
+    project_info = pyproject_data.get("project", {})
+
+    env_name = name or project_info.get("name")
+    if not env_name:
+        console.print("[red]Error: No name found in pyproject.toml and no --name provided[/red]")
+        raise typer.Exit(1)
+
+    # Auto-bump version if requested
+    if auto_bump or rc or post:
+        if sum(bool(x) for x in (auto_bump, rc, post)) > 1:
+            console.print("[red]Error: --auto-bump, --rc, and --post are mutually exclusive[/red]")
+            raise typer.Exit(1)
+        current_version = project_info.get("version")
+        if not current_version:
+            console.print("[red]Error: No version found in pyproject.toml for auto-bump[/red]")
+            raise typer.Exit(1)
+        if auto_bump:
+            new_version = bump_version(current_version)
+        elif rc:
+            new_version = bump_rc_version(current_version)
+        else:
+            new_version = bump_post_version(current_version)
+        console.print(f"Auto-bumping version: {current_version} → {new_version}")
+        try:
+            update_pyproject_version(pyproject_path, new_version)
+            project_info = tomllib.loads(pyproject_path.read_text(encoding="utf-8")).get(
+                "project", {}
+            )
+            console.print("[green]✓ Updated version in pyproject.toml[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to update version in pyproject.toml: {e}[/red]")
+            raise typer.Exit(1)
+
+    console.print(f"Environment name: {env_name}")
+
+    version = project_info.get("version")
+    if not version:
+        console.print("[red]Error: No version found in pyproject.toml[/red]")
+        raise typer.Exit(1)
+
+    # Any Python file at the top, or a package folder.
+    has_env_file = any(env_path.glob("*.py")) or any(
+        (subdir / "__init__.py").exists() for subdir in env_path.iterdir() if subdir.is_dir()
+    )
+    if not has_env_file:
+        console.print("[red]Error: No environment Python file found[/red]")
+        raise typer.Exit(1)
+
+    try:
+        console.print(f"Building environment package at {env_path}...")
+        wheel_path = build_wheel(env_path)
+        distribution = wheel_distribution(wheel_path)
+        check_name_matches_distribution(env_name, distribution)
+        console.print(
+            f"[green]✓ Built {wheel_path.name} ({wheel_path.stat().st_size:,} bytes)[/green]"
+        )
+
+        requires_dist = requires_dist_of(wheel_path)
+        runtime_hint = declared_runtime or classify_runtime_from_metadata(
+            requires_dist or project_info.get("dependencies", [])
+        )
+        if runtime_hint is None:
+            console.print(
+                "[yellow]No verifiers requirement found, so the Hub will list this "
+                "package as Unclassified; pass --runtime v0|v1 to declare it.[/yellow]"
+            )
+        else:
+            label = "verifiers v1" if runtime_hint == VERIFIERS_V1 else "legacy verifiers v0"
+            source = "--runtime" if declared_runtime else "the verifiers requirement"
+            console.print(f"Publishing as {label} (from {source})")
+
+        components: List[Dict[str, str]] = []
+        if runtime_hint == VERIFIERS_V1:
+            components = _declared_components(env_path, distribution)
+
+        metadata = {
+            "description": project_info.get("description", ""),
+            "tags": project_info.get("tags", []),
+            "license": project_info.get("license", ""),
+            "dependencies": project_info.get("dependencies", []),
+            "python_requires": project_info.get("requires-python", ">=3.8"),
+            "requires_dist": requires_dist,
+        }
+
+        api = APIClient()
+        owner_slug = resolve_owner(api, owner=owner, team=team, configured_team=api.config.team_id)
+
+        with tempfile.TemporaryDirectory(prefix="prime-push-") as out_dir:
+            console.print("Creating source archive...")
+            source_path = write_source(env_path, Path(out_dir), distribution, str(version))
+            tarball_size = source_path.stat().st_size
+            console.print(f"Source archive size: {format_file_size(tarball_size)}")
+            if tarball_size > MAX_TARBALL_SIZE_LIMIT:
+                console.print(
+                    f"\n[yellow]⚠ Warning: Your tarball size "
+                    f"({format_file_size(tarball_size)}) exceeds the recommended limit of "
+                    f"{format_file_size(MAX_TARBALL_SIZE_LIMIT)}. Consider excluding large "
+                    "data files, model weights or build artifacts with .gitignore.[/yellow]\n"
+                )
+
+            console.print("\nUploading to Prime Intellect Hub...")
+            published = publish_release(
+                HubClient(api),
+                owner=owner_slug,
+                names=hub_names(env_name),
+                request=ReleaseRequest(
+                    version=str(version),
+                    source=source_path,
+                    wheel=wheel_path,
+                    metadata=metadata,
+                    framework=_FRAMEWORKS.get(declared_runtime or ""),
+                    components=components,
+                ),
+                visibility=visibility.strip().lower() if visibility else None,
+                on_step=lambda message: console.print(f"[dim]{message}[/dim]"),
+            )
+    except PushError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except HubAPIError as e:
+        print_push_error(console, e, bump_hint="Or pass --auto-bump, --rc or --post.")
+        raise typer.Exit(1)
+    except APIError as e:
+        console.print(f"[red]API Error: {e}[/red]")
+        raise typer.Exit(1)
+    except OSError as e:
+        console.print(f"[red]Push failed: {e}[/red]")
+        raise typer.Exit(1)
+
+    package = published.package
+    owner_name = (package.get("owner") or {}).get("slug") or published.owner
+    package_name = published.name
+    release_version = published.release.get("version") or version
+    if published.created_package:
+        console.print(f"[green]✓ Created environment: {owner_name}/{package_name}[/green]")
+    elif visibility and package.get("visibility") != visibility.strip().lower():
+        console.print(
+            f"[yellow]--visibility applies to new environments; {owner_name}/{package_name} "
+            f"stays {package.get('visibility')}.[/yellow]"
+        )
+    console.print(
+        f"\n[green]✓ Successfully pushed {owner_name}/{package_name}@{release_version}[/green]"
+    )
+    wheel_sha256 = sha256_of(wheel_path)
+    console.print(f"Wheel: {wheel_path.name}")
+    console.print(f"SHA256: {wheel_sha256}")
+
+    try:
+        _save_push_metadata(
+            env_path,
+            package_id=package["id"],
+            owner=owner_name,
+            name=package_name,
+            version=project_info.get("version"),
+            wheel_sha256=wheel_sha256,
+        )
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not save environment metadata: {e}[/yellow]")
+
+    frontend_url = api.config.frontend_url.rstrip("/")
+    hub_url = f"{frontend_url}/dashboard/environments/{owner_name}/{package_name}"
+    console.print("\n[cyan]View on Environments Hub:[/cyan]")
+    console.print(f"  [link={hub_url}]{hub_url}[/link]")
+    console.print("\n[cyan]Install with:[/cyan]")
+    console.print(f"  prime env install {owner_name}/{package_name}")
 
 
 @app.command(no_args_is_help=True, rich_help_panel="Manage")
@@ -1680,43 +1223,6 @@ def _environment_package_download_url(details: Dict[str, Any]) -> Optional[str]:
 def normalize_package_name(name: str) -> str:
     """Normalize package name according to Python packaging standards."""
     return name.replace("-", "_").lower()
-
-
-def extract_requires_dist_from_wheel(wheel_path: Path) -> List[str]:
-    """Extract Requires-Dist entries from a wheel's METADATA file.
-
-    A wheel is a zip file containing a .dist-info directory with a METADATA file.
-    This function extracts all Requires-Dist entries which include dependencies.
-
-    Args:
-        wheel_path: Path to the wheel file
-
-    Returns:
-        List of Requires-Dist entries (e.g., ["requests>=2.0", "tau2@ git+https://..."])
-    """
-    requires_dist = []
-    try:
-        with zipfile.ZipFile(wheel_path, "r") as whl:
-            # Find the METADATA file in the .dist-info directory
-            metadata_files = [
-                name for name in whl.namelist() if name.endswith(".dist-info/METADATA")
-            ]
-            if not metadata_files:
-                return requires_dist
-
-            metadata_content = whl.read(metadata_files[0]).decode("utf-8")
-
-            # Parse the METADATA file (RFC 822 format)
-            parser = EmailParser()
-            metadata = parser.parsestr(metadata_content)
-
-            # Get all Requires-Dist entries
-            requires_dist = metadata.get_all("Requires-Dist") or []
-
-    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError) as e:
-        console.print(f"[yellow]Warning: Could not extract metadata from wheel: {e}[/yellow]")
-
-    return requires_dist
 
 
 def bump_version(version: str) -> str:

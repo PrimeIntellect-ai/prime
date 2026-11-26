@@ -288,8 +288,12 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
     if not metrics.nodes:
         out.append(Text.from_markup("[dim]No node metrics reported in this window.[/dim]"))
         return out
-    if node is None:
+    if node_name is None:
         out.append(_nodes_table(metrics))
+        return out
+    if node is None:
+        missing = escape(node_name)
+        out.append(Text.from_markup(f"[yellow]Node '{missing}' is not reporting metrics.[/yellow]"))
         return out
     out.append(_node_summary(node, metrics.window))
     if node.gpus:

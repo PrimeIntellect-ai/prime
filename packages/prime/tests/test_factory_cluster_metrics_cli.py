@@ -324,6 +324,24 @@ def test_watch_live_mode_renders_latest_frame(monkeypatch: pytest.MonkeyPatch) -
     assert " 12%" in output and "refreshing every 10s" in output
 
 
+def test_watch_keeps_node_view_when_node_disappears(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, _payload(), _payload(nodes=[_node("gpu-01")]))
+    sleeps: List[int] = []
+
+    def fake_sleep(seconds: int) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(factory_clusters.time, "sleep", fake_sleep)
+
+    result, output = _run("pc_123", "--watch", "--node", "gpu-02", "--plain")
+
+    assert result.exit_code == 0, result.output
+    assert "Node 'gpu-02' is not reporting metrics." in output
+    assert "NODE" not in output
+
+
 def test_sparkline_scales_and_downsamples() -> None:
     points = [MetricPoint(timestamp=i, value=v) for i, v in enumerate([0, 50, 100])]
     assert sparkline(points, lo=0, hi=100) == "▁▅█"

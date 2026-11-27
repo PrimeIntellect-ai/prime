@@ -1,4 +1,4 @@
-"""Tests for `prime factory clusters metrics` (per-node cluster metrics)."""
+"""Tests for `prime factory metrics` (per-node cluster metrics)."""
 
 import json
 import math
@@ -198,7 +198,7 @@ def _install(
 
 
 def _run(*args: str):
-    result = runner.invoke(app, ["factory", "clusters", "metrics", *args], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "metrics", *args], env=TEST_ENV)
     return result, strip_ansi(result.output)
 
 
@@ -366,9 +366,7 @@ def test_json_is_raw_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     payload["future_field"] = {"kept": True}
     _install(monkeypatch, payload)
 
-    result = runner.invoke(
-        app, ["factory", "clusters", "metrics", "pc_123", "--json"], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["factory", "metrics", "pc_123", "--json"], env=TEST_ENV)
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == payload
@@ -388,7 +386,7 @@ def test_json_current_only_drops_every_series(monkeypatch: pytest.MonkeyPatch) -
     _install(monkeypatch, payload)
 
     result = runner.invoke(
-        app, ["factory", "clusters", "metrics", "pc_123", "--json", "--current-only"], env=TEST_ENV
+        app, ["factory", "metrics", "pc_123", "--json", "--current-only"], env=TEST_ENV
     )
 
     assert result.exit_code == 0, result.output
@@ -428,9 +426,7 @@ def test_json_errors_are_structured_on_stderr(
 ) -> None:
     _install(monkeypatch, error)
 
-    result = runner.invoke(
-        app, ["factory", "clusters", "metrics", "pc_123", "--json"], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["factory", "metrics", "pc_123", "--json"], env=TEST_ENV)
 
     assert result.exit_code == exit_code
     assert result.stdout == ""
@@ -444,7 +440,7 @@ def test_json_usage_errors_are_structured(monkeypatch: pytest.MonkeyPatch) -> No
 
     result = runner.invoke(
         app,
-        ["factory", "clusters", "metrics", "pc_123", "-o", "json", "--window", "2h"],
+        ["factory", "metrics", "pc_123", "-o", "json", "--window", "2h"],
         env=TEST_ENV,
     )
 
@@ -467,9 +463,7 @@ def test_failed_status_lookup_does_not_send_a_name_as_id(
 ) -> None:
     dummy = _install(monkeypatch, _payload(), status=error, team_id="team-1")
 
-    result = runner.invoke(
-        app, ["factory", "clusters", "metrics", selector, "--json"], env=TEST_ENV
-    )
+    result = runner.invoke(app, ["factory", "metrics", selector, "--json"], env=TEST_ENV)
 
     assert result.exit_code == exit_code
     error_body = json.loads(result.stderr)["error"]
@@ -479,7 +473,7 @@ def test_failed_status_lookup_does_not_send_a_name_as_id(
 
 
 def test_help_documents_current_only_errors_and_exit_codes() -> None:
-    result = runner.invoke(app, ["factory", "clusters", "metrics", "--help"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "metrics", "--help"], env=TEST_ENV)
 
     output = strip_ansi(result.output)
     assert result.exit_code == 0
@@ -531,7 +525,7 @@ def test_unavailable_metrics_say_why(
 def test_api_errors_are_friendly(
     monkeypatch: pytest.MonkeyPatch, error: APIError, expected: str, exit_code: int
 ) -> None:
-    _install(monkeypatch, error)
+    _install(monkeypatch, error, team_id="team-1")
 
     result, output = _run("pc_123")
 
@@ -539,6 +533,17 @@ def test_api_errors_are_friendly(
     assert result.stdout.startswith("Error:")
     assert expected in output
     assert "Traceback" not in output
+
+
+def test_not_found_without_a_team_points_at_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A teamless 404 is usually an unresolved display name, not a missing cluster."""
+    _install(monkeypatch, NotFoundError("HTTP 404: Not Found"))
+
+    result, output = _run("dell-h100-nj")
+
+    assert result.exit_code == 3
+    assert "No team is selected" in output
+    assert "prime switch" in output
 
 
 @pytest.mark.parametrize("selector", ["research-h100", "2", "pc_123"])
@@ -571,7 +576,7 @@ def test_ambiguous_or_id_less_name_is_an_error(monkeypatch: pytest.MonkeyPatch) 
     _install(monkeypatch, _payload(), status=status, team_id="team-1")
     result, output = _run("dup")
     assert result.exit_code == 2 and "matches multiple clusters" in output
-    result = runner.invoke(app, ["factory", "clusters", "metrics", "dup", "--json"], env=TEST_ENV)
+    result = runner.invoke(app, ["factory", "metrics", "dup", "--json"], env=TEST_ENV)
     assert result.exit_code == 2
     assert json.loads(result.stderr)["error"]["code"] == "ambiguous_cluster"
 

@@ -25,9 +25,11 @@ from ..api.factory_metrics import (
 from ..client import APIClient, APIError, ServerError
 from ..core import Config
 from ..core.client import NotFoundError, UnauthorizedError
-from ..utils import PlainTyper, get_console, is_plain_mode, json_output_help, output_data_as_json
+from ..utils import get_console, is_plain_mode, json_output_help, output_data_as_json
 
-app = PlainTyper(help="Dedicated Model Factory clusters", no_args_is_help=True)
+# `cluster_metrics` is registered on the factory app itself (factory.py), not
+# on a sub-app of its own: it sits alongside `status`, `nodes` and `workloads`
+# as one more view of the same clusters.
 console = get_console()
 
 METRICS_JSON_HELP = json_output_help(
@@ -515,7 +517,9 @@ def _error_code(error: APIError) -> str:
     return "server_error"
 
 
-def _error_message(error: APIError, cluster: str, node: Optional[str]) -> Tuple[str, str]:
+def _error_message(
+    error: APIError, cluster: str, node: Optional[str], has_team: bool = True
+) -> Tuple[str, str]:
     """``(code, message)`` for a failed metrics request; the message is plain text."""
     code = _error_code(error)
     if code == "unauthorized":
@@ -525,6 +529,15 @@ def _error_message(error: APIError, cluster: str, node: Optional[str]) -> Tuple[
             return code, (
                 f"Cluster '{cluster}' or its node '{node}' was not found, "
                 "or you are not a member of the cluster's team."
+            )
+        if not has_team:
+            # Without a team the selector went to the server as an id, because
+            # display names and indexes only exist in `prime factory status`.
+            # Say that, rather than leaving it reading as a permissions problem.
+            return code, (
+                f"Cluster '{cluster}' was not found. No team is selected, so a display "
+                "name or index can't be resolved — run `prime switch` to select a team, "
+                "or pass --team <team_id>."
             )
         return code, (
             f"Cluster '{cluster}' was not found, or you are not a member of its team. "
@@ -609,7 +622,6 @@ def _refresh(fetch: Any, previous: ClusterNodeMetrics, cluster: str, node: Optio
         return previous, _error_message(e, cluster, node)[1]
 
 
-@app.command(name="metrics", no_args_is_help=True, epilog=METRICS_JSON_HELP)
 def cluster_metrics(
     cluster: str = typer.Argument(
         ..., help="Cluster id, or display name / 1-based index from `prime factory status`"
@@ -659,6 +671,7 @@ def cluster_metrics(
     if watch and json_mode:
         _fail(json_mode, "invalid_argument", "--watch cannot be combined with JSON output.")
 
+    has_team = bool(team or Config().team_id)
     cluster_id = _resolve_cluster_id(cluster, team, json_mode)
     client = FactoryMetricsClient(APIClient())
     trends = not current_only
@@ -669,7 +682,7 @@ def cluster_metrics(
     try:
         metrics = fetch()
     except APIError as e:
-        _fail(json_mode, *_error_message(e, cluster, node))
+        _fail(json_mode, *_error_message(e, cluster, node, has_team))
 
     if json_mode:
         raw = metrics.raw_response

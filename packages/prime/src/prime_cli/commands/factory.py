@@ -1682,9 +1682,9 @@ from .factory_slurm import app as slurm_app  # noqa: E402
 
 app.add_typer(slurm_app, name="slurm", rich_help_panel="Model Factory")
 
-from .factory_clusters import app as clusters_app  # noqa: E402
+from .factory_clusters import METRICS_JSON_HELP, cluster_metrics  # noqa: E402
 
-app.add_typer(clusters_app, name="clusters", rich_help_panel="Model Factory")
+app.command(name="metrics", no_args_is_help=True, epilog=METRICS_JSON_HELP)(cluster_metrics)
 
 # Researcher kubeconfig setup for the team's Kubernetes reservations.
 from .factory_k8s import app as k8s_app  # noqa: E402

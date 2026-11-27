@@ -41,6 +41,7 @@ def _gpu(index: int, util: float) -> Dict[str, Any]:
         "current": {
             "gpu_util_percent": util,
             "gpu_memory_used_bytes": 61 * GIB,
+            "gpu_memory_total_bytes": 80 * GIB,
             "gpu_temperature_celsius": 58 + index,
             "gpu_power_watts": 610,
         },
@@ -51,8 +52,33 @@ def _gpu(index: int, util: float) -> Dict[str, Any]:
     }
 
 
+def _ib_port(device: str, receive_errors: int = 0, detail: bool = False) -> Dict[str, Any]:
+    port: Dict[str, Any] = {
+        "device": device,
+        "port": "1",
+        "state": "active",
+        "physical_state": "link_up",
+        "rate_bytes_per_second": 50e9,
+        "symbol_errors": 0,
+        "link_downed": 0,
+        "receive_errors": receive_errors,
+    }
+    if detail:
+        port["current"] = {
+            "ib_rx_bytes_per_second": 10.5 * GIB,
+            "ib_tx_bytes_per_second": 10.2 * GIB,
+            "ib_errors_per_second": 0.0,
+        }
+        port["series"] = {"ib_rx_bytes_per_second": _series(10.5 * GIB, GIB)}
+    return port
+
+
 def _node(
-    name: str, util: float = 92.0, state: str = "ready", with_gpus: bool = False
+    name: str,
+    util: float = 92.0,
+    state: str = "ready",
+    with_gpus: bool = False,
+    receive_errors: int = 0,
 ) -> Dict[str, Any]:
     return {
         "name": name,
@@ -62,6 +88,7 @@ def _node(
         "current": {
             "gpu_util_percent": util,
             "gpu_memory_used_bytes": 488 * GIB,
+            "gpu_memory_total_bytes": 640 * GIB,
             "gpu_temperature_celsius": 66,
             "gpu_power_watts": 4880,
             "cpu_util_percent": 37.5,
@@ -69,6 +96,9 @@ def _node(
             "memory_total_bytes": 2048 * GIB,
             "network_rx_bytes_per_second": 1.8 * GIB,
             "network_tx_bytes_per_second": 1.2 * GIB,
+            "ib_rx_bytes_per_second": 42 * GIB,
+            "ib_tx_bytes_per_second": 41 * GIB,
+            "ib_errors_per_second": 0.05 if receive_errors else 0.0,
         },
         "series": {
             "gpu_util_percent": _series(util, 10),
@@ -76,8 +106,14 @@ def _node(
             "memory_used_bytes": _series(1210 * GIB, 40 * GIB),
             "network_rx_bytes_per_second": _series(1.8 * GIB, 0.4 * GIB),
             "network_tx_bytes_per_second": _series(1.2 * GIB, 0.3 * GIB),
+            "ib_rx_bytes_per_second": _series(42 * GIB, 4 * GIB),
+            "ib_tx_bytes_per_second": _series(41 * GIB, 4 * GIB),
         },
         "gpus": [_gpu(i, util - i * 3) for i in range(8)] if with_gpus else [],
+        "ib_ports": [
+            _ib_port(f"mlx5_{i}", receive_errors if i == 2 else 0, detail=with_gpus)
+            for i in range(4)
+        ],
     }
 
 
@@ -202,8 +238,17 @@ def test_table_shows_every_node_with_state_and_bars(monkeypatch: pytest.MonkeyPa
     result, output = _run("pc_123")
 
     assert result.exit_code == 0, result.output
-    assert "research-h100 · 2 nodes, 16 GPUs · window 1h" in output
-    for header in ("NODE", "STATE", "GPU UTIL", "GPU MEM", "TEMP", "POWER", "CPU", "NET RX"):
+    assert "research-h100 · 2 nodes, 16 GPUs · Last hour, 1min steps" in output
+    for header in (
+        "NODE",
+        "STATE",
+        "GPU UTIL",
+        "GPU MEM",
+        "TEMP",
+        "CPU",
+        "NET IN/OUT",
+        "IB IN/OUT",
+    ):
         assert header in output
     assert "XID" not in output
     assert "ready" in output and "under inspection" in output
@@ -211,8 +256,9 @@ def test_table_shows_every_node_with_state_and_bars(monkeypatch: pytest.MonkeyPa
     assert "cordoned" not in output
     assert "█" in output and "░" in output
     assert " 92%" in output and " 41%" in output
-    assert "488 GiB" in output
-    assert "1.8 GiB/s" in output
+    assert "488/640 GiB" in output
+    assert "1.8/1.2 GiB/s" in output
+    assert "42/41 GiB/s" in output
     assert any(c in output for c in "▁▂▃▄▅▆▇")
 
 
@@ -223,6 +269,7 @@ def test_plain_mode_drops_bars_and_sparklines(monkeypatch: pytest.MonkeyPatch) -
 
     assert result.exit_code == 0, result.output
     assert "gpu-01" in output and "92%" in output
+    assert "488/640 GiB" in output and "42/41 GiB/s" in output
     assert not any(c in output for c in "█░▁▂▃▄▅▆▇")
 
 
@@ -235,10 +282,13 @@ def test_narrow_terminal_drops_bars_but_keeps_node_sparklines(
     result, output = _run("pc_123")
     assert result.exit_code == 0, result.output
     assert " 92%" in output and "█" not in output and "…" not in output
+    assert max(len(line) for line in output.splitlines()) <= 80
+    assert " 76%" in output
 
     result, output = _run("pc_123", "--node", "gpu-01")
     assert result.exit_code == 0, result.output
     assert any(c in output for c in "▁▂▃▄▅▆▇") and "…" not in output
+    assert max(len(line) for line in output.splitlines()) <= 80
 
 
 def test_node_asks_the_server_and_shows_per_gpu_breakdown(
@@ -251,10 +301,53 @@ def test_node_asks_the_server_and_shows_per_gpu_breakdown(
     assert result.exit_code == 0, result.output
     assert dummy.metrics_calls[0]["params"] == {"window": "1h", "node": "gpu-02"}
     assert "gpu-02 8× H100_80GB" in output
-    assert "UTIL 1h" in output and "TEMP 1h" in output
-    assert "61.0 GiB" in output and "1.2/2.0 TiB" in output
+    assert "UTIL TREND" in output and "TEMP TREND" in output
+    assert "61/80 GiB" in output and "1.2/2.0 TiB" in output and "488/640 GiB" in output
+    assert "IB IN" in output and "42.0 GiB/s" in output
     gpu_rows = [line for line in output.splitlines() if line.strip().split(" ")[0] in "01234567"]
     assert len([r for r in gpu_rows if "°C" in r]) == 8
+
+
+def test_node_lists_ib_ports_and_highlights_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(
+        monkeypatch,
+        _payload(nodes=[_node("gpu-02", with_gpus=True, receive_errors=3)]),
+    )
+
+    result, output = _run("pc_123", "--node", "gpu-02")
+
+    assert result.exit_code == 0, result.output
+    assert "IB PORT" in output and "ERRORS (WINDOW)" in output
+    port_rows = [line for line in output.splitlines() if line.startswith("mlx5_")]
+    assert len(port_rows) == 4
+    assert all("active link up" in r and "400 Gb/s" in r and "10.5 GiB/s" in r for r in port_rows)
+    assert "receive 3" in port_rows[2]
+    assert "IB ERRORS" in output and "0.05/s" in output
+
+
+def test_ib_errors_are_styled_red(monkeypatch: pytest.MonkeyPatch) -> None:
+    from prime_cli.api.factory_metrics import IbPortMetrics
+
+    clean = IbPortMetrics(device="mlx5_0", port="1", symbol_errors=0, receive_errors=0)
+    bad = IbPortMetrics(device="mlx5_0", port="1", link_downed=2, receive_errors=1)
+    assert factory_clusters._ib_errors(clean) == "[dim]0[/dim]"
+    assert factory_clusters._ib_errors(bad) == "[bold red]link down 2, receive 1[/bold red]"
+
+
+def test_unknown_keys_are_tolerated_and_not_rendered(monkeypatch: pytest.MonkeyPatch) -> None:
+    node = _node("gpu-01", with_gpus=True)
+    node["current"]["load_1m"] = 12.5
+    node["series"]["disk_read_bytes_per_second"] = _series(5, 1)
+    node["nfs_mounts"] = [{"path": "/data"}]
+    node["gpus"][0]["sm_clock_hz"] = 1.9e9
+    node["ib_ports"][0]["lid"] = 7
+    payload = _payload(nodes=[node], storage={"nfs": True})
+    _install(monkeypatch, payload)
+
+    result, output = _run("pc_123", "--node", "gpu-01")
+
+    assert result.exit_code == 0, result.output
+    assert "load" not in output.lower() and "disk" not in output.lower()
 
 
 def test_unknown_node_is_a_friendly_404(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -436,3 +529,9 @@ def test_sparkline_scales_downsamples_and_keeps_gaps() -> None:
     assert sparkline(_points(None, None)) == ""
     assert sparkline(_points(100, None, 0), lo=0, hi=100) == "█ ▁"
     assert sparkline(_points(100, 100, None, None), width=2, lo=0, hi=100) == "█ "
+
+
+def test_sparkline_uses_the_step_grid_for_missing_timestamps() -> None:
+    points = [MetricPoint(timestamp=t, value=100) for t in (0, 300, 1200)]
+    assert sparkline(points, lo=0, hi=100, step_seconds=300) == "██  █"
+    assert sparkline(points, lo=0, hi=100) == "███"

@@ -16,6 +16,7 @@ from ..api.factory_metrics import (
     METRICS_WINDOWS,
     ClusterNodeMetrics,
     FactoryMetricsClient,
+    IbPortMetrics,
     MetricPoint,
     NodeMetrics,
 )
@@ -30,13 +31,19 @@ console = get_console()
 METRICS_JSON_HELP = json_output_help(
     ". = {schema_version, cluster_id, cluster_display_name, window, step_seconds,",
     "     as_of, available, unavailable_reason, unavailable_code, nodes[]}",
-    ".nodes[] = {name, gpu_type, gpu_count, state, current, series, gpus[]}",
+    ".nodes[] = {name, gpu_type, gpu_count, state, current, series, gpus[], ib_ports[]}",
     ".gpus[] = {index, current, series} — filled only with --node",
-    ".current = {gpu_util_percent, gpu_memory_used_bytes, gpu_temperature_celsius,",
-    "            gpu_power_watts, cpu_util_percent, memory_used_bytes, memory_total_bytes,",
-    "            network_rx_bytes_per_second, network_tx_bytes_per_second}",
-    ".series = {<metric>: [{timestamp, value}]} keyed by .current field names;",
-    "          a key is absent without data, value is null for a gap",
+    ".ib_ports[] = {device, port, state, physical_state, rate_bytes_per_second,",
+    "               symbol_errors, link_downed, receive_errors, current, series}",
+    "              (current/series only with --node)",
+    ".current = {gpu_util_percent, gpu_memory_used_bytes, gpu_memory_total_bytes,",
+    "            gpu_temperature_celsius, gpu_power_watts, cpu_util_percent,",
+    "            memory_used_bytes, memory_total_bytes, network_rx_bytes_per_second,",
+    "            network_tx_bytes_per_second, ib_rx_bytes_per_second,",
+    "            ib_tx_bytes_per_second, ib_errors_per_second}",
+    ".series = {<metric>: [{timestamp, value}]} keyed by .current field names, on the",
+    "          step_seconds grid; a key is absent without data, value is null for a gap",
+    "Newer servers may add keys; they are passed through here and not rendered.",
     "--node: the server returns only that node in .nodes[]",
 )
 
@@ -52,6 +59,20 @@ STATE_STYLES = {
     "cordoned": "yellow",
     "draining": "dim",
     "unknown": "dim",
+}
+IB_STATE_STYLES = {
+    "active": "green",
+    "active_defer": "green",
+    "armed": "yellow",
+    "init": "yellow",
+    "down": "red",
+}
+# Same labels as the dashboard's time range picker.
+WINDOW_LABELS = {
+    "1h": "Last hour",
+    "6h": "Last 6 hours",
+    "24h": "Last 24 hours",
+    "7d": "Last 7 days",
 }
 UNAVAILABLE_FALLBACK = {
     "no_cluster_label": "the cluster has not reported its metrics label yet",
@@ -97,19 +118,34 @@ def _bar(percent: Optional[float], label: Optional[str] = None) -> str:
     return f"[{style}]{'█' * filled}[/{style}][dim]{'░' * (BAR_WIDTH - filled)}[/dim] {text}"
 
 
+def _on_grid(points: Sequence[MetricPoint], step_seconds: Optional[int]) -> List[Optional[float]]:
+    """Lay points on the ``step_seconds`` grid so missing timestamps become gaps."""
+    if not points or not step_seconds or step_seconds <= 0:
+        return [p.value for p in points]
+    start = min(p.timestamp for p in points)
+    values: List[Optional[float]] = [None] * (
+        (max(p.timestamp for p in points) - start) // step_seconds + 1
+    )
+    for p in points:
+        values[min(len(values) - 1, round((p.timestamp - start) / step_seconds))] = p.value
+    return values
+
+
 def sparkline(
     points: Sequence[MetricPoint],
     width: int = 20,
     lo: Optional[float] = None,
     hi: Optional[float] = None,
+    step_seconds: Optional[int] = None,
 ) -> str:
     """Render a series as unicode blocks, bucket-averaged down to ``width``.
 
     ``lo``/``hi`` pin the scale (0–100 for percentages); otherwise the
     series' own range is used so small swings stay visible. Gaps (``None``
-    values, or buckets with no values) render as spaces, never as zero.
+    values, timestamps missing from the ``step_seconds`` grid, or buckets
+    with no values) render as spaces, never as zero.
     """
-    values: List[Optional[float]] = [p.value for p in points]
+    values = _on_grid(points, step_seconds)
     if len(values) > width:
         size = len(values) / width
         buckets = (values[int(i * size) : int((i + 1) * size)] for i in range(width))
@@ -132,28 +168,31 @@ def sparkline(
     )
 
 
-def _bytes(value: Optional[float]) -> str:
-    if value is None:
-        return "—"
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(value) < 1024 or unit == "TiB":
-            return f"{value:.0f} {unit}" if unit == "B" or value >= 100 else f"{value:.1f} {unit}"
-        value /= 1024
-    return "—"
+_BINARY_UNITS = ((4, "TiB"), (3, "GiB"), (2, "MiB"), (1, "KiB"))
 
 
-def _used_of_total(used: Optional[float], total: Optional[float]) -> str:
-    """`61/80 GiB` — both values in the unit that suits the total."""
-    if used is None or not total:
-        return "—"
-    scale, unit = next(
-        (1024**p, u) for p, u in ((4, "TiB"), (3, "GiB"), (2, "MiB"), (0, "B")) if total >= 1024**p
-    )
+def _bytes(value: float) -> str:
+    for power, unit in _BINARY_UNITS:
+        if abs(value) >= 1024**power:
+            scaled = value / 1024**power
+            return f"{scaled:.0f} {unit}" if scaled >= 100 else f"{scaled:.1f} {unit}"
+    return f"{value:.0f} B"
 
-    def fmt(v: float) -> str:
-        return f"{v / scale:.1f}" if total / scale < 10 else f"{v / scale:.0f}"
 
-    return f"{fmt(used)}/{fmt(total)} {unit}"
+def _pair(first: Optional[float], second: Optional[float], suffix: str = "") -> str:
+    """`61/80 GiB`, `1.8/1.2 GiB/s` — both values in the unit that suits the larger."""
+    known = [v for v in (first, second) if v is not None]
+    if not known:
+        return MISSING
+    ref = max(known)
+    scale, unit = next(((1024**p, u) for p, u in _BINARY_UNITS if ref >= 1024**p), (1, "B"))
+
+    def fmt(v: Optional[float]) -> str:
+        if v is None:
+            return "—"
+        return f"{v / scale:.1f}" if ref / scale < 10 else f"{v / scale:.0f}"
+
+    return f"{fmt(first)}/{fmt(second)} {unit}{suffix}"
 
 
 def _amount(value: Optional[float]) -> str:
@@ -174,19 +213,34 @@ def _state(state: str) -> str:
     return f"[{style}]{label}[/{style}]" if style else label
 
 
-def _used_bar(used: Optional[float], total: Optional[float]) -> str:
+def _used_of_total(used: Optional[float], total: Optional[float], bar: bool = True) -> str:
+    """Used/total with a level bar; used alone when the total is unknown."""
     percent = _pct(used, total)
     if percent is None:
+        return _amount(used)
+    label = _pair(used, total)
+    if not bar:
+        style = _level_style(percent)
+        return label if is_plain_mode() else f"[{style}]{label}[/{style}]"
+    return _bar(percent, label)
+
+
+def _errors(value: Optional[float], label: str) -> str:
+    if value is None:
         return MISSING
-    return _bar(percent, _used_of_total(used, total))
+    if value == 0:
+        return f"[dim]0{label}[/dim]"
+    shown = f"{value:g}{label}"
+    return f"[bold red]{shown}[/bold red]"
 
 
-def _trend(series: Dict[str, List[MetricPoint]], key: str, percent: bool = True) -> str:
+def _trend(series: Dict[str, List[MetricPoint]], key: str, step: int, percent: bool = True) -> str:
     line = sparkline(
         series.get(key, []),
         width=_spark_width(),
         lo=0 if percent else None,
         hi=100 if percent else None,
+        step_seconds=step,
     )
     return f"[cyan]{line}[/cyan]" if line else MISSING
 
@@ -201,38 +255,40 @@ def _nodes_table(metrics: ClusterNodeMetrics) -> Table:
         collapse_padding=not show_trend,
     )
     table.add_column("NODE", style="bold", no_wrap=True)
-    table.add_column("STATE")
+    table.add_column("STATE", min_width=10)
     table.add_column("GPU UTIL", no_wrap=True)
     table.add_column("GPU MEM", justify="right", no_wrap=True)
     table.add_column("TEMP", justify="right", no_wrap=True)
     table.add_column("POWER", justify="right", no_wrap=True)
     table.add_column("CPU", no_wrap=True)
     table.add_column("MEM", no_wrap=True)
-    table.add_column("NET RX", justify="right", no_wrap=True)
-    table.add_column("NET TX", justify="right", no_wrap=True)
+    table.add_column("NET IN/OUT", justify="right")
+    table.add_column("IB IN/OUT", justify="right")
     if show_trend:
-        table.add_column(f"GPU UTIL {metrics.window}", no_wrap=True)
+        table.add_column("GPU UTIL TREND", no_wrap=True)
     for node in metrics.nodes:
         cur = node.current
         row = [
             escape(node.name),
             _state(node.state),
             _bar(cur.gpu_util_percent),
-            _amount(cur.gpu_memory_used_bytes),
+            _used_of_total(cur.gpu_memory_used_bytes, cur.gpu_memory_total_bytes, bar=False)
+            if show_trend or is_plain_mode()
+            else _bar(_pct(cur.gpu_memory_used_bytes, cur.gpu_memory_total_bytes)),
             _num(cur.gpu_temperature_celsius, "°C"),
             _num(cur.gpu_power_watts, " W"),
             _bar(cur.cpu_util_percent),
             _bar(_pct(cur.memory_used_bytes, cur.memory_total_bytes)),
-            _rate(cur.network_rx_bytes_per_second),
-            _rate(cur.network_tx_bytes_per_second),
+            _pair(cur.network_rx_bytes_per_second, cur.network_tx_bytes_per_second, "/s"),
+            _pair(cur.ib_rx_bytes_per_second, cur.ib_tx_bytes_per_second, "/s"),
         ]
         if show_trend:
-            row.append(_trend(node.series, "gpu_util_percent"))
+            row.append(_trend(node.series, "gpu_util_percent", metrics.step_seconds))
         table.add_row(*row)
     return table
 
 
-def _node_summary(node: NodeMetrics) -> Table:
+def _node_summary(node: NodeMetrics, step: int) -> Table:
     show_trend = not is_plain_mode()
     table = Table(show_header=False, box=None, pad_edge=False)
     table.add_column(style="bold")
@@ -245,46 +301,115 @@ def _node_summary(node: NodeMetrics) -> Table:
         ("CPU", _bar(cur.cpu_util_percent), "cpu_util_percent", True),
         (
             "MEMORY",
-            _used_bar(cur.memory_used_bytes, cur.memory_total_bytes),
+            _used_of_total(cur.memory_used_bytes, cur.memory_total_bytes),
             "memory_used_bytes",
             False,
         ),
-        ("NET RX", _rate(cur.network_rx_bytes_per_second), "network_rx_bytes_per_second", False),
-        ("NET TX", _rate(cur.network_tx_bytes_per_second), "network_tx_bytes_per_second", False),
+        (
+            "GPU MEMORY",
+            _used_of_total(cur.gpu_memory_used_bytes, cur.gpu_memory_total_bytes),
+            "gpu_memory_used_bytes",
+            False,
+        ),
+        ("NET IN", _rate(cur.network_rx_bytes_per_second), "network_rx_bytes_per_second", False),
+        ("NET OUT", _rate(cur.network_tx_bytes_per_second), "network_tx_bytes_per_second", False),
     ]
+    if node.ib_ports or cur.ib_rx_bytes_per_second is not None:
+        rows += [
+            ("IB IN", _rate(cur.ib_rx_bytes_per_second), "ib_rx_bytes_per_second", False),
+            ("IB OUT", _rate(cur.ib_tx_bytes_per_second), "ib_tx_bytes_per_second", False),
+            ("IB ERRORS", _errors(cur.ib_errors_per_second, "/s"), "ib_errors_per_second", False),
+        ]
     for label, value, key, percent in rows:
         cells = [label, value]
         if show_trend:
-            cells.append(_trend(node.series, key, percent) if key else "")
+            cells.append(_trend(node.series, key, step, percent) if key else "")
         table.add_row(*cells)
     return table
 
 
-def _gpus_table(node: NodeMetrics, window: str) -> Table:
+def _gpus_table(node: NodeMetrics, step: int) -> Table:
     show_trend = not is_plain_mode()
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("GPU", justify="right")
     table.add_column("UTIL", no_wrap=True)
-    table.add_column("MEMORY", justify="right", no_wrap=True)
+    table.add_column("MEMORY", no_wrap=True)
     table.add_column("TEMP", justify="right")
     table.add_column("POWER", justify="right")
     if show_trend:
-        table.add_column(f"UTIL {window}", no_wrap=True)
-        table.add_column(f"TEMP {window}", no_wrap=True)
+        table.add_column("UTIL TREND", no_wrap=True)
+        table.add_column("TEMP TREND", no_wrap=True)
     for gpu in sorted(node.gpus, key=lambda g: g.index):
         cur = gpu.current
         row = [
             str(gpu.index),
             _bar(cur.gpu_util_percent),
-            _amount(cur.gpu_memory_used_bytes),
+            _used_of_total(cur.gpu_memory_used_bytes, cur.gpu_memory_total_bytes),
             _num(cur.gpu_temperature_celsius, "°C"),
             _num(cur.gpu_power_watts, " W"),
         ]
         if show_trend:
-            row.append(_trend(gpu.series, "gpu_util_percent"))
-            row.append(_trend(gpu.series, "gpu_temperature_celsius", percent=False))
+            row.append(_trend(gpu.series, "gpu_util_percent", step))
+            row.append(_trend(gpu.series, "gpu_temperature_celsius", step, percent=False))
         table.add_row(*row)
     return table
+
+
+def _ib_state(port: IbPortMetrics) -> str:
+    if port.state is None:
+        return MISSING
+    style = IB_STATE_STYLES.get(port.state)
+    label = escape(port.state.replace("_", " "))
+    text = f"[{style}]{label}[/{style}]" if style else label
+    if port.physical_state:
+        text += f" [dim]{escape(port.physical_state.replace('_', ' '))}[/dim]"
+    return text
+
+
+def _link_rate(value: Optional[float]) -> str:
+    return MISSING if value is None else f"{value * 8 / 1e9:.0f} Gb/s"
+
+
+def _ib_errors(port: IbPortMetrics) -> str:
+    counts = [
+        ("symbol", port.symbol_errors),
+        ("link down", port.link_downed),
+        ("receive", port.receive_errors),
+    ]
+    if all(count is None for _, count in counts):
+        return MISSING
+    raised = [f"{name} {count}" for name, count in counts if count]
+    if not raised:
+        return "[dim]0[/dim]"
+    return f"[bold red]{', '.join(raised)}[/bold red]"
+
+
+def _ib_ports_table(node: NodeMetrics) -> Table:
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("IB PORT", no_wrap=True)
+    table.add_column("STATE", no_wrap=True)
+    table.add_column("RATE", justify="right", no_wrap=True)
+    table.add_column("IN", justify="right", no_wrap=True)
+    table.add_column("OUT", justify="right", no_wrap=True)
+    table.add_column("ERRORS (WINDOW)")
+    for port in node.ib_ports:
+        table.add_row(
+            escape(f"{port.device}/{port.port}"),
+            _ib_state(port),
+            _link_rate(port.rate_bytes_per_second),
+            _rate(port.current.ib_rx_bytes_per_second),
+            _rate(port.current.ib_tx_bytes_per_second),
+            _ib_errors(port),
+        )
+    return table
+
+
+def _duration(seconds: int) -> str:
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    if seconds % 60 == 0:
+        return f"{seconds // 60}min"
+    return f"{seconds}s"
 
 
 def _header(metrics: ClusterNodeMetrics, node: Optional[NodeMetrics]) -> str:
@@ -298,7 +423,8 @@ def _header(metrics: ClusterNodeMetrics, node: Optional[NodeMetrics]) -> str:
         gpus = sum(n.gpu_count or 0 for n in metrics.nodes)
         summary = f"{count} node{'s' if count != 1 else ''}"
         parts.append(f"{summary}, {gpus} GPUs" if gpus else summary)
-    parts.append(f"window {metrics.window}")
+    window = WINDOW_LABELS.get(metrics.window, escape(metrics.window))
+    parts.append(f"{window}, {_duration(metrics.step_seconds)} steps")
     return " · ".join(parts)
 
 
@@ -331,14 +457,17 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
         missing = escape(node_name)
         out.append(Text.from_markup(f"[yellow]Node '{missing}' is not reporting metrics.[/yellow]"))
         return out
-    out.append(_node_summary(node))
+    out.append(_node_summary(node, metrics.step_seconds))
     if node.state == "cordoned":
         out.append(_inspection_legend())
     if node.gpus:
         out.append(Text())
-        out.append(_gpus_table(node, metrics.window))
+        out.append(_gpus_table(node, metrics.step_seconds))
     else:
         out.append(Text.from_markup("[dim]No per-GPU breakdown reported for this node.[/dim]"))
+    if node.ib_ports:
+        out.append(Text())
+        out.append(_ib_ports_table(node))
     return out
 
 
@@ -417,7 +546,12 @@ def cluster_metrics(
     cluster: str = typer.Argument(
         ..., help="Cluster id, or display name / 1-based index from `prime factory status`"
     ),
-    window: str = typer.Option("1h", "--window", help=f"Time window: {', '.join(METRICS_WINDOWS)}"),
+    window: str = typer.Option(
+        "1h",
+        "--window",
+        help="Time window: "
+        + ", ".join(f"{w} ({WINDOW_LABELS[w].lower()})" for w in METRICS_WINDOWS),
+    ),
     node: Optional[str] = typer.Option(
         None, "--node", help="Show the per-GPU breakdown for one node"
     ),

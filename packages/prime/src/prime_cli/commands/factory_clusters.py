@@ -1,8 +1,10 @@
 """`prime factory clusters` — per-node metrics for dedicated clusters."""
 
+import json
+import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, NoReturn, Optional, Sequence, Tuple
 
 import typer
 from rich.console import Group, RenderableType
@@ -45,7 +47,24 @@ METRICS_JSON_HELP = json_output_help(
     "          step_seconds grid; a key is absent without data, value is null for a gap",
     "Newer servers may add keys; they are passed through here and not rendered.",
     "--node: the server returns only that node in .nodes[]",
+    "--current-only: series is dropped from nodes[], gpus[] and ib_ports[]",
+    "Errors go to stderr as {error: {code, message}}; code: invalid_argument,",
+    "  ambiguous_cluster, not_found, unauthorized, metrics_unavailable, server_error",
+    "Exit codes (all output modes): 0 ok, 1 other error, 2 invalid usage,",
+    "  3 cluster/node not found or no access, 4 unauthorized,",
+    "  5 metrics store unavailable (HTTP 503)",
 )
+
+ERROR_EXIT_CODES = {
+    "invalid_argument": 2,
+    "ambiguous_cluster": 2,
+    "not_found": 3,
+    "unauthorized": 4,
+    "metrics_unavailable": 5,
+    "server_error": 1,
+}
+# A selector outside this shape (spaces, punctuation) or all digits can't be a cluster id.
+ID_LIKE = re.compile(r"[A-Za-z0-9_-]+")
 
 SPARK_CHARS = "▁▂▃▄▅▆▇█"
 BAR_WIDTH = 8
@@ -245,8 +264,8 @@ def _trend(series: Dict[str, List[MetricPoint]], key: str, step: int, percent: b
     return f"[cyan]{line}[/cyan]" if line else MISSING
 
 
-def _nodes_table(metrics: ClusterNodeMetrics) -> Table:
-    show_trend = _wide()
+def _nodes_table(metrics: ClusterNodeMetrics, trends: bool) -> Table:
+    show_trend = trends and _wide()
     table = Table(
         show_header=True,
         header_style="bold",
@@ -273,7 +292,7 @@ def _nodes_table(metrics: ClusterNodeMetrics) -> Table:
             _state(node.state),
             _bar(cur.gpu_util_percent),
             _used_of_total(cur.gpu_memory_used_bytes, cur.gpu_memory_total_bytes, bar=False)
-            if show_trend or is_plain_mode()
+            if _wide() or is_plain_mode()
             else _bar(_pct(cur.gpu_memory_used_bytes, cur.gpu_memory_total_bytes)),
             _num(cur.gpu_temperature_celsius, "°C"),
             _num(cur.gpu_power_watts, " W"),
@@ -288,8 +307,8 @@ def _nodes_table(metrics: ClusterNodeMetrics) -> Table:
     return table
 
 
-def _node_summary(node: NodeMetrics, step: int) -> Table:
-    show_trend = not is_plain_mode()
+def _node_summary(node: NodeMetrics, step: int, trends: bool) -> Table:
+    show_trend = trends and not is_plain_mode()
     table = Table(show_header=False, box=None, pad_edge=False)
     table.add_column(style="bold")
     table.add_column(no_wrap=True)
@@ -328,8 +347,8 @@ def _node_summary(node: NodeMetrics, step: int) -> Table:
     return table
 
 
-def _gpus_table(node: NodeMetrics, step: int) -> Table:
-    show_trend = not is_plain_mode()
+def _gpus_table(node: NodeMetrics, step: int, trends: bool) -> Table:
+    show_trend = trends and not is_plain_mode()
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("GPU", justify="right")
     table.add_column("UTIL", no_wrap=True)
@@ -438,7 +457,9 @@ def _inspection_legend() -> Text:
     return Text.from_markup(f"[dim]{UNDER_INSPECTION_LEGEND}[/dim]")
 
 
-def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> List[RenderableType]:
+def render_metrics(
+    metrics: ClusterNodeMetrics, node_name: Optional[str], trends: bool = True
+) -> List[RenderableType]:
     """Everything one refresh prints, as a list so plain mode can print it piecewise."""
     node = next((n for n in metrics.nodes if n.name == node_name), None) if node_name else None
     out: List[RenderableType] = [Text.from_markup(_header(metrics, node, node_name))]
@@ -453,7 +474,7 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
         out.append(Text.from_markup("[dim]No node metrics reported in this window.[/dim]"))
         return out
     if node_name is None:
-        out.append(_nodes_table(metrics))
+        out.append(_nodes_table(metrics, trends))
         if any(n.state == "cordoned" for n in metrics.nodes):
             out.append(_inspection_legend())
         return out
@@ -461,12 +482,12 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
         missing = escape(node_name)
         out.append(Text.from_markup(f"[yellow]Node '{missing}' is not reporting metrics.[/yellow]"))
         return out
-    out.append(_node_summary(node, metrics.step_seconds))
+    out.append(_node_summary(node, metrics.step_seconds, trends))
     if node.state == "cordoned":
         out.append(_inspection_legend())
     if node.gpus:
         out.append(Text())
-        out.append(_gpus_table(node, metrics.step_seconds))
+        out.append(_gpus_table(node, metrics.step_seconds, trends))
     else:
         out.append(Text.from_markup("[dim]No per-GPU breakdown reported for this node.[/dim]"))
     if node.ib_ports:
@@ -475,37 +496,66 @@ def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> Lis
     return out
 
 
-def _error_message(error: APIError, cluster: str, node: Optional[str]) -> str:
-    detail = str(error)
+def _fail(json_mode: bool, code: str, message: str) -> NoReturn:
+    """JSON mode: one ``{"error": {code, message}}`` object on stderr; else the human line."""
+    if json_mode:
+        typer.echo(json.dumps({"error": {"code": code, "message": message}}), err=True)
+    else:
+        console.print(f"[red]Error:[/red] {escape(message)}")
+    raise typer.Exit(ERROR_EXIT_CODES[code])
+
+
+def _error_code(error: APIError) -> str:
     if isinstance(error, UnauthorizedError):
-        return f"{escape(detail)} Cluster metrics need the factory read scope."
+        return "unauthorized"
     if isinstance(error, NotFoundError):
+        return "not_found"
+    if isinstance(error, ServerError) and str(error).startswith("HTTP 503"):
+        return "metrics_unavailable"
+    return "server_error"
+
+
+def _error_message(error: APIError, cluster: str, node: Optional[str]) -> Tuple[str, str]:
+    """``(code, message)`` for a failed metrics request; the message is plain text."""
+    code = _error_code(error)
+    if code == "unauthorized":
+        return code, f"{error} Cluster metrics need the factory read scope."
+    if code == "not_found":
         if node is not None:
-            return (
-                f"Cluster '{escape(cluster)}' or its node '{escape(node)}' was not found, "
+            return code, (
+                f"Cluster '{cluster}' or its node '{node}' was not found, "
                 "or you are not a member of the cluster's team."
             )
-        return (
-            f"Cluster '{escape(cluster)}' was not found, or you are not a member of its team. "
+        return code, (
+            f"Cluster '{cluster}' was not found, or you are not a member of its team. "
             "Run `prime factory status` to see your clusters."
         )
-    if isinstance(error, ServerError) and detail.startswith("HTTP 503"):
-        return "Node metrics are unavailable right now: the metrics store can't be reached."
-    return escape(detail)
+    if code == "metrics_unavailable":
+        return code, "Node metrics are unavailable right now: the metrics store can't be reached."
+    return code, str(error)
 
 
-def _resolve_cluster_id(selector: str, team: Optional[str], err_console: Any) -> str:
+def _resolve_cluster_id(selector: str, team: Optional[str], json_mode: bool) -> str:
     """Map a display name or 1-based index from `prime factory status` to a cluster id.
 
     Anything that doesn't match (or no team context) is passed through as an id.
+    If the status lookup fails, only a selector that could be an id is passed through.
     """
     team_id = team or Config().team_id
     if not team_id:
         return selector
     try:
         clusters = FactoryClient(APIClient()).get_status(team_id).clusters
-    except APIError:
-        return selector
+    except APIError as e:
+        if ID_LIKE.fullmatch(selector) and not selector.isdigit():
+            return selector
+        code = _error_code(e)
+        _fail(
+            json_mode,
+            "server_error" if code == "metrics_unavailable" else code,
+            f"Could not resolve cluster '{selector}' by name or index: "
+            f"`prime factory status` failed ({e}). Pass the cluster id instead.",
+        )
     if any(c.id == selector for c in clusters):
         return selector
     matches = [c for c in clusters if c.display_name == selector]
@@ -513,27 +563,41 @@ def _resolve_cluster_id(selector: str, team: Optional[str], err_console: Any) ->
         if 1 <= int(selector) <= len(clusters):
             matches = [clusters[int(selector) - 1]]
     if len(matches) > 1:
-        err_console.print(
-            f"[red]Error:[/red] '{escape(selector)}' matches multiple clusters. "
-            "Use its 1-based index from `prime factory status` or its id instead."
+        _fail(
+            json_mode,
+            "ambiguous_cluster",
+            f"'{selector}' matches multiple clusters. "
+            "Use its 1-based index from `prime factory status` or its id instead.",
         )
-        raise typer.Exit(1)
     if not matches:
         return selector
     if matches[0].id is None:
-        err_console.print(
-            "[red]Error:[/red] This server does not report cluster ids yet; "
-            "pass the cluster id instead of its name."
+        _fail(
+            json_mode,
+            "invalid_argument",
+            "This server does not report cluster ids yet; pass the cluster id instead of its name.",
         )
-        raise typer.Exit(1)
     return matches[0].id
+
+
+def _strip_series(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """The raw response without ``series`` on nodes, GPUs and IB ports."""
+
+    def drop(item: Dict[str, Any]) -> Dict[str, Any]:
+        out = {k: v for k, v in item.items() if k != "series"}
+        for key in ("gpus", "ib_ports"):
+            if key in out:
+                out[key] = [drop(child) for child in out[key]]
+        return out
+
+    return {**raw, "nodes": [drop(node) for node in raw["nodes"]]}
 
 
 def _watch_footer(interval: int, error: Optional[str]) -> str:
     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     footer = f"[dim]Updated {stamp} · refreshing every {interval}s · Ctrl+C to exit[/dim]"
     if error:
-        footer = f"[yellow]Refresh failed: {error}[/yellow]\n" + footer
+        footer = f"[yellow]Refresh failed: {escape(error)}[/yellow]\n" + footer
     return footer
 
 
@@ -542,7 +606,7 @@ def _refresh(fetch: Any, previous: ClusterNodeMetrics, cluster: str, node: Optio
     try:
         return fetch(), None
     except APIError as e:
-        return previous, _error_message(e, cluster, node)
+        return previous, _error_message(e, cluster, node)[1]
 
 
 @app.command(name="metrics", no_args_is_help=True, epilog=METRICS_JSON_HELP)
@@ -563,6 +627,11 @@ def cluster_metrics(
         False, "--json", help="Print the API response as JSON (same as --output json)"
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    current_only: bool = typer.Option(
+        False,
+        "--current-only",
+        help="Latest values only: drop series from JSON and trend columns from tables",
+    ),
     watch: bool = typer.Option(False, "--watch", help="Refresh until interrupted"),
     interval: int = typer.Option(
         10, "--interval", "-n", min=2, help="Seconds between refreshes with --watch"
@@ -579,21 +648,20 @@ def cluster_metrics(
     if json_output:
         output = "json"
     if output not in ("table", "json"):
-        console.print(f"[red]Error:[/red] Invalid output format: {escape(output)}")
-        raise typer.Exit(1)
-    err_console = get_console(stderr=True) if output == "json" else console
+        _fail(False, "invalid_argument", f"Invalid output format: {output}")
+    json_mode = output == "json"
     if window not in METRICS_WINDOWS:
-        err_console.print(
-            f"[red]Error:[/red] Invalid --window '{escape(window)}'. "
-            f"Choose one of: {', '.join(METRICS_WINDOWS)}."
+        _fail(
+            json_mode,
+            "invalid_argument",
+            f"Invalid --window '{window}'. Choose one of: {', '.join(METRICS_WINDOWS)}.",
         )
-        raise typer.Exit(1)
-    if watch and output == "json":
-        err_console.print("[red]Error:[/red] --watch cannot be combined with JSON output.")
-        raise typer.Exit(1)
+    if watch and json_mode:
+        _fail(json_mode, "invalid_argument", "--watch cannot be combined with JSON output.")
 
-    cluster_id = _resolve_cluster_id(cluster, team, err_console)
+    cluster_id = _resolve_cluster_id(cluster, team, json_mode)
     client = FactoryMetricsClient(APIClient())
+    trends = not current_only
 
     def fetch() -> ClusterNodeMetrics:
         return client.get_node_metrics(cluster_id, window, node)
@@ -601,15 +669,15 @@ def cluster_metrics(
     try:
         metrics = fetch()
     except APIError as e:
-        err_console.print(f"[red]Error:[/red] {_error_message(e, cluster, node)}")
-        raise typer.Exit(1)
+        _fail(json_mode, *_error_message(e, cluster, node))
 
-    if output == "json":
-        output_data_as_json(metrics.raw_response, console)
+    if json_mode:
+        raw = metrics.raw_response
+        output_data_as_json(_strip_series(raw) if current_only else raw, console)
         return
 
     if not watch:
-        for item in render_metrics(metrics, node):
+        for item in render_metrics(metrics, node, trends):
             console.print(item)
         return
 
@@ -617,7 +685,7 @@ def cluster_metrics(
     try:
         if is_plain_mode():
             while True:
-                for item in render_metrics(metrics, node):
+                for item in render_metrics(metrics, node, trends):
                     console.print(item)
                 console.print(_watch_footer(interval, error))
                 time.sleep(interval)
@@ -626,7 +694,7 @@ def cluster_metrics(
             with Live(console=console, auto_refresh=False) as live:
                 while True:
                     frame = [
-                        *render_metrics(metrics, node),
+                        *render_metrics(metrics, node, trends),
                         Text(),
                         Text.from_markup(_watch_footer(interval, error)),
                     ]

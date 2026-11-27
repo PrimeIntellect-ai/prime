@@ -152,7 +152,7 @@ class _StubConfig:
 class _DummyAPIClient:
     """Serves `/factory/status` from ``status`` and metrics from ``responses`` in order."""
 
-    def __init__(self, responses: List[Any], status: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, responses: List[Any], status: Optional[Any] = None) -> None:
         self._responses = responses
         self._status = status
         self.calls: List[Dict[str, Any]] = []
@@ -164,6 +164,8 @@ class _DummyAPIClient:
         if endpoint == STATUS_ENDPOINT:
             if self._status is None:
                 raise NotFoundError("HTTP 404: Not Found")
+            if isinstance(self._status, Exception):
+                raise self._status
             return self._status
         served = sum(1 for c in self.calls if c["endpoint"] != STATUS_ENDPOINT)
         response = self._responses[min(served, len(self._responses)) - 1]
@@ -185,7 +187,7 @@ def _console_width(monkeypatch: pytest.MonkeyPatch) -> None:
 def _install(
     monkeypatch: pytest.MonkeyPatch,
     *responses: Any,
-    status: Optional[Dict[str, Any]] = None,
+    status: Optional[Any] = None,
     team_id: Optional[str] = None,
 ) -> _DummyAPIClient:
     dummy = _DummyAPIClient(list(responses), status)
@@ -355,7 +357,7 @@ def test_unknown_node_is_a_friendly_404(monkeypatch: pytest.MonkeyPatch) -> None
 
     result, output = _run("pc_123", "--node", "gpu-99")
 
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert "Cluster 'pc_123' or its node 'gpu-99' was not found" in output
 
 
@@ -370,6 +372,130 @@ def test_json_is_raw_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == payload
+
+
+def _without_series(item: Dict[str, Any]) -> Dict[str, Any]:
+    out = {k: v for k, v in item.items() if k != "series"}
+    for key in ("gpus", "ib_ports"):
+        if key in out:
+            out[key] = [_without_series(child) for child in out[key]]
+    return out
+
+
+def test_json_current_only_drops_every_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _payload(nodes=[_node("gpu-01", with_gpus=True), _node("gpu-02")])
+    payload["nodes"][0]["future_field"] = 1
+    _install(monkeypatch, payload)
+
+    result = runner.invoke(
+        app, ["factory", "clusters", "metrics", "pc_123", "--json", "--current-only"], env=TEST_ENV
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    assert '"series"' not in result.stdout
+    assert data == {**payload, "nodes": [_without_series(n) for n in payload["nodes"]]}
+    assert data["nodes"][0]["future_field"] == 1
+    assert data["nodes"][0]["gpus"][0]["current"]["gpu_util_percent"] == 92.0
+    assert "series" in payload["nodes"][0]
+
+
+def test_table_current_only_hides_trends(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, _payload(), _payload(nodes=[_node("gpu-01", with_gpus=True)]))
+
+    result, output = _run("pc_123", "--current-only")
+    assert result.exit_code == 0, result.output
+    assert "TREND" not in output and not any(c in output for c in "▁▂▃▄▅▆▇")
+    assert "488/640 GiB" in output and "█" in output
+
+    result, output = _run("pc_123", "--node", "gpu-01", "--current-only")
+    assert result.exit_code == 0, result.output
+    assert "TREND" not in output and not any(c in output for c in "▁▂▃▄▅▆▇")
+    assert "61/80 GiB" in output and "IB PORT" in output
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "exit_code"),
+    [
+        (NotFoundError("HTTP 404: Not Found"), "not_found", 3),
+        (UnauthorizedError("API key unauthorized."), "unauthorized", 4),
+        (ServerError("HTTP 503: unavailable"), "metrics_unavailable", 5),
+        (ServerError("HTTP 500: boom"), "server_error", 1),
+    ],
+)
+def test_json_errors_are_structured_on_stderr(
+    monkeypatch: pytest.MonkeyPatch, error: APIError, code: str, exit_code: int
+) -> None:
+    _install(monkeypatch, error)
+
+    result = runner.invoke(
+        app, ["factory", "clusters", "metrics", "pc_123", "--json"], env=TEST_ENV
+    )
+
+    assert result.exit_code == exit_code
+    assert result.stdout == ""
+    body = json.loads(result.stderr)
+    assert list(body) == ["error"] and body["error"]["code"] == code
+    assert body["error"]["message"] and "[" not in body["error"]["message"]
+
+
+def test_json_usage_errors_are_structured(monkeypatch: pytest.MonkeyPatch) -> None:
+    dummy = _install(monkeypatch, _payload())
+
+    result = runner.invoke(
+        app,
+        ["factory", "clusters", "metrics", "pc_123", "-o", "json", "--window", "2h"],
+        env=TEST_ENV,
+    )
+
+    assert result.exit_code == 2 and result.stdout == ""
+    error = json.loads(result.stderr)["error"]
+    assert error == {
+        "code": "invalid_argument",
+        "message": "Invalid --window '2h'. Choose one of: 1h, 6h, 24h, 7d.",
+    }
+    assert dummy.calls == []
+
+
+@pytest.mark.parametrize(
+    ("error", "exit_code"),
+    [(NotFoundError("HTTP 404: Not Found"), 3), (ServerError("HTTP 503: unavailable"), 1)],
+)
+@pytest.mark.parametrize("selector", ["research h100", "2"])
+def test_failed_status_lookup_does_not_send_a_name_as_id(
+    monkeypatch: pytest.MonkeyPatch, selector: str, error: APIError, exit_code: int
+) -> None:
+    dummy = _install(monkeypatch, _payload(), status=error, team_id="team-1")
+
+    result = runner.invoke(
+        app, ["factory", "clusters", "metrics", selector, "--json"], env=TEST_ENV
+    )
+
+    assert result.exit_code == exit_code
+    error_body = json.loads(result.stderr)["error"]
+    assert f"Could not resolve cluster '{selector}'" in error_body["message"]
+    assert "Pass the cluster id instead" in error_body["message"]
+    assert dummy.metrics_calls == []
+
+
+def test_help_documents_current_only_errors_and_exit_codes() -> None:
+    result = runner.invoke(app, ["factory", "clusters", "metrics", "--help"], env=TEST_ENV)
+
+    output = strip_ansi(result.output)
+    assert result.exit_code == 0
+    assert "--current-only: series is dropped" in output
+    assert "metrics_unavailable" in output and "ambiguous_cluster" in output
+    assert "5 metrics store unavailable (HTTP 503)" in output
+
+
+def test_failed_status_lookup_still_passes_an_id_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    status = ServerError("HTTP 503: unavailable")
+    dummy = _install(monkeypatch, _payload(), status=status, team_id="team-1")
+
+    result, _ = _run("pc_123")
+
+    assert result.exit_code == 0, result.output
+    assert dummy.metrics_calls[0]["endpoint"] == METRICS_ENDPOINT
 
 
 @pytest.mark.parametrize(
@@ -394,21 +520,23 @@ def test_unavailable_metrics_say_why(
 
 
 @pytest.mark.parametrize(
-    ("error", "expected"),
+    ("error", "expected", "exit_code"),
     [
-        (NotFoundError("HTTP 404: Not Found"), "was not found, or you are not a member"),
-        (ServerError("HTTP 503: unavailable"), "the metrics store can't be reached"),
-        (UnauthorizedError("API key unauthorized."), "need the factory read scope"),
+        (NotFoundError("HTTP 404: Not Found"), "was not found, or you are not a member", 3),
+        (ServerError("HTTP 503: unavailable"), "the metrics store can't be reached", 5),
+        (UnauthorizedError("API key unauthorized."), "need the factory read scope", 4),
+        (ServerError("HTTP 500: boom"), "HTTP 500: boom", 1),
     ],
 )
 def test_api_errors_are_friendly(
-    monkeypatch: pytest.MonkeyPatch, error: APIError, expected: str
+    monkeypatch: pytest.MonkeyPatch, error: APIError, expected: str, exit_code: int
 ) -> None:
     _install(monkeypatch, error)
 
     result, output = _run("pc_123")
 
-    assert result.exit_code == 1
+    assert result.exit_code == exit_code
+    assert result.stdout.startswith("Error:")
     assert expected in output
     assert "Traceback" not in output
 
@@ -442,21 +570,24 @@ def test_ambiguous_or_id_less_name_is_an_error(monkeypatch: pytest.MonkeyPatch) 
     status = _status({"id": "a", "display_name": "dup"}, {"id": "b", "display_name": "dup"})
     _install(monkeypatch, _payload(), status=status, team_id="team-1")
     result, output = _run("dup")
-    assert result.exit_code == 1 and "matches multiple clusters" in output
+    assert result.exit_code == 2 and "matches multiple clusters" in output
+    result = runner.invoke(app, ["factory", "clusters", "metrics", "dup", "--json"], env=TEST_ENV)
+    assert result.exit_code == 2
+    assert json.loads(result.stderr)["error"]["code"] == "ambiguous_cluster"
 
     _install(monkeypatch, _payload(), status=_status({"display_name": "old"}), team_id="team-1")
     result, output = _run("old")
-    assert result.exit_code == 1 and "does not report cluster ids" in output
+    assert result.exit_code == 2 and "does not report cluster ids" in output
 
 
 def test_invalid_window_and_watch_json_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     dummy = _install(monkeypatch, _payload())
 
     result, output = _run("pc_123", "--window", "2h")
-    assert result.exit_code == 1 and "Invalid --window '2h'" in output
+    assert result.exit_code == 2 and "Invalid --window '2h'" in output
 
     result, output = _run("pc_123", "--watch", "--json")
-    assert result.exit_code == 1 and "--watch cannot be combined" in output
+    assert result.exit_code == 2 and "--watch cannot be combined" in output
     assert dummy.calls == []
 
 

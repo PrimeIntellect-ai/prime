@@ -248,17 +248,19 @@ prime sandbox volumes create data --from ~/datasets/my-data
 prime sandbox delete <sandbox-id>
 ```
 
-`prime sandbox snapshot` pauses the source, waits until the memory snapshot is
-restorable, then resumes the same source asynchronously; `--wait-timeout` bounds
-only that pause-ready wait. It prints the captured checkpoint, which is not
+`prime sandbox snapshot` captures the source's memory and disk while it keeps
+running: the VM is paused for a few seconds, then resumes in place.
+`--wait-timeout` bounds the wait for the snapshot to be captured. On a platform
+without direct snapshots it pauses the source, waits until the snapshot is
+restorable, then resumes the same source asynchronously. It prints the captured checkpoint, which is not
 necessarily `DURABLE`; `prime sandbox checkpoint get` shows the upload. A
 non-durable snapshot is usable on the pausing node while the source exists.
 Restore with `prime sandbox checkpoint restore <checkpoint-id> --memory`, which
 creates a new sandbox. GPU sandboxes and sandboxes with volumes cannot be paused,
 and a memory restore needs the source sandbox record to exist. A memory snapshot
 copies userspace random state and keys or tokens already in memory, so rekey or
-regenerate them in the workload. If the pause request fails or its response is
-lost, `prime sandbox get <sandbox-id>` shows whether the source became PAUSED;
+regenerate them in the workload. If a fallback pause request fails or its response
+is lost, `prime sandbox get <sandbox-id>` shows whether the source became PAUSED;
 `prime sandbox resume <sandbox-id>` continues it.
 
 `prime sandbox fork` checkpoints the source's filesystem and restores it into a

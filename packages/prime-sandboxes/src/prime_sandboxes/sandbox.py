@@ -2070,6 +2070,15 @@ def _raise_local_forwards_error(sandbox_id: str, error: httpx.HTTPStatusError) -
     raise APIError(f"Localhost forwards failed (HTTP {status}): {error.response.text}") from error
 
 
+# A platform without POST /sandbox/{id}/snapshot answers FastAPI's bare route error.
+_SNAPSHOT_ROUTE_MISSING = ("HTTP 404: Not Found", "HTTP 405: Method Not Allowed")
+
+
+def _snapshot_route_missing(error: BaseException) -> bool:
+    """Whether a snapshot request failed only because the platform lacks the endpoint."""
+    return isinstance(error, APIError) and str(error) in _SNAPSHOT_ROUTE_MISSING
+
+
 def _error_with_hint(error: BaseException, hint: str) -> BaseException:
     """Return ``error`` with ``hint`` appended to its message, keeping its type.
 
@@ -3062,27 +3071,70 @@ class SandboxClient:
         return SandboxCheckpoint.model_validate(response)
 
     def snapshot(self, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
-        """Capture a memory snapshot of a running sandbox, then resume it.
+        """Capture a memory snapshot of a running sandbox; the sandbox keeps running.
 
-        The source is paused, the wait runs until its pause checkpoint is FROZEN
-        or DURABLE and the source is PAUSED, then the source is resumed (accepted
-        asynchronously; it reaches RUNNING when the platform reports it). The
-        returned checkpoint is the one observed then, so it is not necessarily
-        DURABLE: a non-durable snapshot is restorable on the pausing node while
-        the source exists, and ``wait_for_checkpoint`` waits for disk durability,
-        not proof that the memory snapshot was stored. ``timeout_seconds`` bounds
-        the pause-ready wait.
+        The platform pauses the VM for a few seconds while it captures memory and
+        disk into a checkpoint, then resumes the same VM, so the sandbox stays
+        RUNNING throughout. The wait runs until that checkpoint is FROZEN or
+        DURABLE. On a platform without the snapshot endpoint, the source is
+        instead paused, the wait also runs until it is PAUSED, and it is resumed
+        (accepted asynchronously; it reaches RUNNING when the platform reports
+        it). The returned checkpoint is the one observed then, so it is not
+        necessarily DURABLE: a non-durable snapshot is restorable on the
+        snapshotted node while the source exists, and ``wait_for_checkpoint``
+        waits for disk durability, not proof that the memory snapshot was
+        stored. ``timeout_seconds`` bounds the wait.
 
         No sandbox is created. Restore the checkpoint with ``create`` and
         ``restore_memory=True``, which creates a new sandbox and needs the source
         sandbox record to exist. A pause checkpoint has no TTL. GPU sandboxes and
-        sandboxes with volumes cannot be paused. A memory snapshot copies
+        sandboxes with volumes cannot be snapshotted. A memory snapshot copies
         userspace random state and any keys or tokens already in the guest's
         memory, so rekey or regenerate them in the workload. If the source does
         not resume after the capture, the raised error names the checkpoint and
         the source.
         """
         _validate_timeout(timeout_seconds)
+        try:
+            response = self.client.request("POST", f"/sandbox/{sandbox_id}/snapshot")
+        except APIError as error:
+            if not _snapshot_route_missing(error):
+                raise
+            return self._snapshot_by_pause(sandbox_id, timeout_seconds)
+        checkpoint = SandboxCheckpoint.model_validate(response)
+        return self._wait_for_snapshot_checkpoint(checkpoint.id, timeout_seconds)
+
+    def _wait_for_snapshot_checkpoint(
+        self, checkpoint_id: str, timeout_seconds: float
+    ) -> SandboxCheckpoint:
+        """Wait until a snapshot checkpoint holds its memory (FROZEN or DURABLE)."""
+        deadline = time.monotonic() + timeout_seconds
+        phase_start = time.monotonic()
+        slow_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = self._checkpoint_batcher.get(checkpoint_id)
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Snapshot checkpoint {checkpoint_id} cannot be restored "
+                    f"(state={checkpoint.state}): {checkpoint.error or 'no error details'}"
+                )
+            if checkpoint.state in _PAUSE_RESTORABLE_STATES:
+                return checkpoint
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
+                time.sleep(min(_creation_poll_delay(slow_index), remaining))
+                slow_index += 1
+            else:
+                time.sleep(min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining))
+        raise TimeoutError(
+            f"Snapshot checkpoint {checkpoint_id} was not captured within "
+            f"{timeout_seconds:g}s; it may still complete, and the sandbox keeps running"
+        )
+
+    def _snapshot_by_pause(self, sandbox_id: str, timeout_seconds: float) -> SandboxCheckpoint:
+        """Snapshot through pause and resume, for a platform without the snapshot endpoint."""
         _, checkpoint = self._pause_and_wait(sandbox_id, timeout_seconds)
         try:
             self.resume(sandbox_id)
@@ -5214,27 +5266,74 @@ class AsyncSandboxClient:
         return SandboxCheckpoint.model_validate(response)
 
     async def snapshot(self, sandbox_id: str, *, timeout_seconds: float = 300) -> SandboxCheckpoint:
-        """Capture a memory snapshot of a running sandbox, then resume it.
+        """Capture a memory snapshot of a running sandbox; the sandbox keeps running.
 
-        The source is paused, the wait runs until its pause checkpoint is FROZEN
-        or DURABLE and the source is PAUSED, then the source is resumed (accepted
-        asynchronously; it reaches RUNNING when the platform reports it). The
-        returned checkpoint is the one observed then, so it is not necessarily
-        DURABLE: a non-durable snapshot is restorable on the pausing node while
-        the source exists, and ``wait_for_checkpoint`` waits for disk durability,
-        not proof that the memory snapshot was stored. ``timeout_seconds`` bounds
-        the pause-ready wait.
+        The platform pauses the VM for a few seconds while it captures memory and
+        disk into a checkpoint, then resumes the same VM, so the sandbox stays
+        RUNNING throughout. The wait runs until that checkpoint is FROZEN or
+        DURABLE. On a platform without the snapshot endpoint, the source is
+        instead paused, the wait also runs until it is PAUSED, and it is resumed
+        (accepted asynchronously; it reaches RUNNING when the platform reports
+        it). The returned checkpoint is the one observed then, so it is not
+        necessarily DURABLE: a non-durable snapshot is restorable on the
+        snapshotted node while the source exists, and ``wait_for_checkpoint``
+        waits for disk durability, not proof that the memory snapshot was
+        stored. ``timeout_seconds`` bounds the wait.
 
         No sandbox is created. Restore the checkpoint with ``create`` and
         ``restore_memory=True``, which creates a new sandbox and needs the source
         sandbox record to exist. A pause checkpoint has no TTL. GPU sandboxes and
-        sandboxes with volumes cannot be paused. A memory snapshot copies
+        sandboxes with volumes cannot be snapshotted. A memory snapshot copies
         userspace random state and any keys or tokens already in the guest's
         memory, so rekey or regenerate them in the workload. If the source does
         not resume after the capture, the raised error names the checkpoint and
         the source.
         """
         _validate_timeout(timeout_seconds)
+        try:
+            response = await self.client.request("POST", f"/sandbox/{sandbox_id}/snapshot")
+        except APIError as error:
+            if not _snapshot_route_missing(error):
+                raise
+            return await self._snapshot_by_pause(sandbox_id, timeout_seconds)
+        checkpoint = SandboxCheckpoint.model_validate(response)
+        return await self._wait_for_snapshot_checkpoint(checkpoint.id, timeout_seconds)
+
+    async def _wait_for_snapshot_checkpoint(
+        self, checkpoint_id: str, timeout_seconds: float
+    ) -> SandboxCheckpoint:
+        """Wait until a snapshot checkpoint holds its memory (FROZEN or DURABLE)."""
+        deadline = time.monotonic() + timeout_seconds
+        phase_start = time.monotonic()
+        slow_index = 0
+        while time.monotonic() < deadline:
+            checkpoint = await self._checkpoint_batcher.get(checkpoint_id)
+            if checkpoint.state in ("FAILED", "DELETING"):
+                raise RuntimeError(
+                    f"Snapshot checkpoint {checkpoint_id} cannot be restored "
+                    f"(state={checkpoint.state}): {checkpoint.error or 'no error details'}"
+                )
+            if checkpoint.state in _PAUSE_RESTORABLE_STATES:
+                return checkpoint
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if time.monotonic() - phase_start >= CHECKPOINT_POLL_FAST_WINDOW:
+                await asyncio.sleep(min(_creation_poll_delay(slow_index), remaining))
+                slow_index += 1
+            else:
+                await asyncio.sleep(
+                    min(_jittered_poll_delay(CHECKPOINT_POLL_FAST_DELAY), remaining)
+                )
+        raise TimeoutError(
+            f"Snapshot checkpoint {checkpoint_id} was not captured within "
+            f"{timeout_seconds:g}s; it may still complete, and the sandbox keeps running"
+        )
+
+    async def _snapshot_by_pause(
+        self, sandbox_id: str, timeout_seconds: float
+    ) -> SandboxCheckpoint:
+        """Snapshot through pause and resume, for a platform without the snapshot endpoint."""
         _, checkpoint = await self._pause_and_wait(sandbox_id, timeout_seconds)
         try:
             await self.resume(sandbox_id)

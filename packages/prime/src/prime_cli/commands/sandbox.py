@@ -1249,14 +1249,16 @@ def snapshot(
     wait_timeout: float = typer.Option(
         300,
         "--wait-timeout",
-        help="Seconds to wait for the pause-ready wait (source PAUSED)",
+        help="Seconds to wait for the memory snapshot to be captured",
     ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
-    """Capture a memory snapshot of a running sandbox, then resume it.
+    """Capture a memory snapshot of a running sandbox; it keeps running.
 
-    The source is paused for the capture and resumed asynchronously. The returned
-    checkpoint restores with 'prime sandbox checkpoint restore <id> --memory'."""
+    The VM is paused for a few seconds while its memory and disk are captured, then
+    resumes; on a platform without direct snapshots the source is paused and
+    resumed instead. The returned checkpoint restores with
+    'prime sandbox checkpoint restore <id> --memory'."""
     validate_output_format(output, console)
     client = SandboxClient(APIClient())
     try:

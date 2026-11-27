@@ -379,7 +379,7 @@ another sandbox. `checkpoint()` stays filesystem-only:
 
 ```python
 snapshot = sandbox_client.snapshot(sandbox.id)
-# The source is resuming asynchronously; the snapshot may still be uploading.
+# The source keeps running; the snapshot may still be uploading.
 restored = sandbox_client.create(CreateSandboxRequest(
     name="restored-sandbox",
     checkpoint_id=snapshot.id,
@@ -387,11 +387,15 @@ restored = sandbox_client.create(CreateSandboxRequest(
 ))
 ```
 
-`AsyncSandboxClient.snapshot()` is the same, awaited. The call pauses the source,
-waits until the pause checkpoint is `FROZEN` or `DURABLE` and the source is
-`PAUSED`, then requests a resume of the same source and returns the checkpoint it
-observed. The resume is accepted asynchronously: the source reports `RUNNING`
-later, and `timeout_seconds` (default 300) bounds only the pause-ready wait. The
+`AsyncSandboxClient.snapshot()` is the same, awaited. The call asks the platform
+to snapshot the source (`POST /sandbox/{id}/snapshot`): the VM is paused for a
+few seconds while its memory and disk are captured, then the same VM resumes, so
+the source stays `RUNNING`. It waits until the checkpoint is `FROZEN` or
+`DURABLE` and returns it; `timeout_seconds` (default 300) bounds that wait. On a
+platform without that endpoint it falls back to pausing the source, waiting until
+the pause checkpoint is `FROZEN` or `DURABLE` and the source is `PAUSED`, and
+requesting a resume, which is accepted asynchronously (the source reports
+`RUNNING` later). The
 returned checkpoint is not necessarily `DURABLE`; `wait_for_checkpoint` waits for
 disk durability, not proof that the memory snapshot was stored. A non-durable
 snapshot is usable only on the pausing node and is discarded if the source is
@@ -403,8 +407,8 @@ platform's pause window (currently 6 hours) becomes `FAILED`. A `DURABLE` pause
 whose memory misses that same window stays `DURABLE` and loses its memory claim.
 If the source does not resume after the capture, the raised error names the
 checkpoint id and the source id. If the pause request fails or its response is
-lost, the source may still become PAUSED; check `get()` and continue it with
-`resume()` (`prime sandbox resume <id>`). The result is a `SandboxCheckpoint`,
+lost on the fallback path, the source may still become PAUSED; check `get()` and
+continue it with `resume()` (`prime sandbox resume <id>`). The result is a `SandboxCheckpoint`,
 so `checkpoint restore --memory` and other memory restores take its id.
 
 To drive the pause and resume yourself, `wait_for_pause()` and `wait_for_resume()`

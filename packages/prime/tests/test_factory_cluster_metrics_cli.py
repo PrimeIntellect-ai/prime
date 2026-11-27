@@ -216,6 +216,18 @@ def test_client_sends_window_and_node() -> None:
     assert metrics.nodes[1].state == "cordoned"
 
 
+def test_client_sends_current_only() -> None:
+    """The server skips the range queries on this flag, so it has to reach it."""
+    dummy = _DummyAPIClient([_payload(), _payload()])
+    client = FactoryMetricsClient(dummy)  # type: ignore[arg-type]
+
+    client.get_node_metrics("pc_123", current_only=True)
+    client.get_node_metrics("pc_123")
+
+    assert dummy.calls[0]["params"] == {"window": "1h", "current_only": "true"}
+    assert "current_only" not in dummy.calls[1]["params"]
+
+
 def test_client_accepts_null_points_and_missing_series() -> None:
     node = _node("gpu-01")
     node["series"] = {"gpu_util_percent": [{"timestamp": 1, "value": None}]}

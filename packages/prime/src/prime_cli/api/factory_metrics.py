@@ -138,13 +138,19 @@ class FactoryMetricsClient:
         self.client = client
 
     def get_node_metrics(
-        self, cluster_id: str, window: str = "1h", node: Optional[str] = None
+        self,
+        cluster_id: str,
+        window: str = "1h",
+        node: Optional[str] = None,
+        current_only: bool = False,
     ) -> ClusterNodeMetrics:
         """Fetch per-node metrics for one dedicated cluster.
 
         With ``node``, the response holds only that node, with its per-GPU
-        breakdown. Only members of the cluster's team can read its metrics;
-        any other cluster id, or a node outside the cluster, is a 404.
+        breakdown. ``current_only`` tells the server to skip the range queries
+        the series are built from, which is most of the work. Only members of
+        the cluster's team can read its metrics; any other cluster id, or a
+        node outside the cluster, is a 404.
         """
         if window not in METRICS_WINDOWS:
             raise ValueError(f"window must be one of {', '.join(METRICS_WINDOWS)}")
@@ -153,6 +159,8 @@ class FactoryMetricsClient:
             params: Dict[str, Any] = {"window": window}
             if node is not None:
                 params["node"] = node
+            if current_only:
+                params["current_only"] = "true"
             response = self.client.get(endpoint, params=params)
         except ValueError as exc:
             raise APIError("Cluster metrics API returned a malformed response body.") from exc

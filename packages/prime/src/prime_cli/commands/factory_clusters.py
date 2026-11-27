@@ -677,7 +677,7 @@ def cluster_metrics(
     trends = not current_only
 
     def fetch() -> ClusterNodeMetrics:
-        return client.get_node_metrics(cluster_id, window, node)
+        return client.get_node_metrics(cluster_id, window, node, current_only)
 
     try:
         metrics = fetch()

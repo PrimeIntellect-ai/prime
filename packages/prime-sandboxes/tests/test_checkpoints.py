@@ -950,11 +950,26 @@ def mock_disk_fork(client, monkeypatch, calls, payloads, wait_error=None):
     monkeypatch.setattr(client.client, "request", async_request if is_async else request)
 
 
+# A platform that predates POST /sandbox/{id}/snapshot answers FastAPI's bare 404.
+SNAPSHOT_ROUTE_MISSING = APIError("HTTP 404: Not Found")
+
+
 def mock_fork_http(
-    client, monkeypatch, calls, payloads, create_error=None, resume_error=None, pause_error=None
+    client,
+    monkeypatch,
+    calls,
+    payloads,
+    create_error=None,
+    resume_error=None,
+    pause_error=None,
+    snapshot_error=None,
 ):
     def handle(method, path, **kwargs):
         calls.append((method, path))
+        if path.endswith("/snapshot"):
+            if snapshot_error is not None:
+                raise snapshot_error
+            return {**checkpoint_response("PENDING"), "id": "snap-1"}
         if path.endswith("/pause"):
             if pause_error is not None:
                 raise pause_error
@@ -1419,10 +1434,86 @@ async def test_checkpoint_defaults_to_a_disk_checkpoint(checkpoint_client, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["FROZEN", "DURABLE"])
-async def test_snapshot_pauses_waits_and_resumes_the_source(checkpoint_client, monkeypatch, state):
+async def test_snapshot_waits_for_the_platform_snapshot_without_pausing(
+    checkpoint_client, monkeypatch, state
+):
     calls = []
     payloads = []
     mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+    mock_fork_polls(checkpoint_client, monkeypatch, calls, ["PENDING", state], [])
+
+    result = await snapshot_call(checkpoint_client)
+
+    assert result.id == "snap-1"
+    assert result.state == state
+    assert calls == [
+        ("POST", "/sandbox/sandbox-1/snapshot"),
+        ("checkpoint", "snap-1"),
+        ("checkpoint", "snap-1"),
+    ]
+    assert payloads == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_reports_a_failed_platform_snapshot(checkpoint_client, monkeypatch):
+    calls = []
+    payloads = []
+    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+    mock_fork_polls(
+        checkpoint_client, monkeypatch, calls, ["FAILED"], [], error="sandboxes with volumes"
+    )
+
+    with pytest.raises(RuntimeError, match="snap-1 cannot be restored") as raised:
+        await snapshot_call(checkpoint_client)
+
+    assert "sandboxes with volumes" in str(raised.value)
+    assert ("POST", "/sandbox/sandbox-1/pause") not in calls
+
+
+@pytest.mark.asyncio
+async def test_snapshot_does_not_fall_back_on_other_errors(checkpoint_client, monkeypatch):
+    calls = []
+    payloads = []
+    mock_fork_http(
+        checkpoint_client,
+        monkeypatch,
+        calls,
+        payloads,
+        snapshot_error=APIError("HTTP 404: Sandbox not found"),
+    )
+
+    with pytest.raises(APIError, match="Sandbox not found"):
+        await snapshot_call(checkpoint_client)
+
+    assert calls == [("POST", "/sandbox/sandbox-1/snapshot")]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_timeout_says_the_sandbox_keeps_running(
+    checkpoint_client, checkpoint_clock, monkeypatch
+):
+    calls = []
+    payloads = []
+    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+    mock_fork_polls(checkpoint_client, monkeypatch, calls, ["PENDING", "PENDING"], [])
+
+    with pytest.raises(TimeoutError, match="snap-1 was not captured") as raised:
+        await snapshot_call(checkpoint_client, timeout_seconds=2)
+
+    assert "keeps running" in str(raised.value)
+    assert ("POST", "/sandbox/sandbox-1/resume") not in calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["FROZEN", "DURABLE"])
+async def test_snapshot_without_the_endpoint_pauses_waits_and_resumes_the_source(
+    checkpoint_client, monkeypatch, state
+):
+    calls = []
+    payloads = []
+    mock_fork_http(
+        checkpoint_client, monkeypatch, calls, payloads, snapshot_error=SNAPSHOT_ROUTE_MISSING
+    )
     mock_fork_polls(checkpoint_client, monkeypatch, calls, [state], ["PAUSED"])
 
     result = await snapshot_call(checkpoint_client)
@@ -1430,6 +1521,7 @@ async def test_snapshot_pauses_waits_and_resumes_the_source(checkpoint_client, m
     assert result.id == "pause-1"
     assert result.state == state
     assert calls == [
+        ("POST", "/sandbox/sandbox-1/snapshot"),
         ("POST", "/sandbox/sandbox-1/pause"),
         ("checkpoint", "pause-1"),
         ("status", "sandbox-1"),
@@ -1460,7 +1552,12 @@ async def test_snapshot_names_the_captured_checkpoint_when_resume_fails(
     calls = []
     payloads = []
     mock_fork_http(
-        checkpoint_client, monkeypatch, calls, payloads, resume_error=APIError(RESUME_409)
+        checkpoint_client,
+        monkeypatch,
+        calls,
+        payloads,
+        resume_error=APIError(RESUME_409),
+        snapshot_error=SNAPSHOT_ROUTE_MISSING,
     )
     mock_fork_polls(checkpoint_client, monkeypatch, calls, ["FROZEN"], ["PAUSED"])
 
@@ -1471,6 +1568,7 @@ async def test_snapshot_names_the_captured_checkpoint_when_resume_fails(
     assert "sandbox sandbox-1 did not resume" in message
     assert "prime sandbox resume sandbox-1" in message
     assert calls == [
+        ("POST", "/sandbox/sandbox-1/snapshot"),
         ("POST", "/sandbox/sandbox-1/pause"),
         ("checkpoint", "pause-1"),
         ("status", "sandbox-1"),
@@ -1485,7 +1583,9 @@ async def test_snapshot_timeout_names_the_checkpoint(
 ):
     calls = []
     payloads = []
-    mock_fork_http(checkpoint_client, monkeypatch, calls, payloads)
+    mock_fork_http(
+        checkpoint_client, monkeypatch, calls, payloads, snapshot_error=SNAPSHOT_ROUTE_MISSING
+    )
     mock_fork_polls(checkpoint_client, monkeypatch, calls, ["PENDING", "PENDING"], [])
 
     with pytest.raises(TimeoutError, match="may still complete") as raised:
@@ -1493,6 +1593,7 @@ async def test_snapshot_timeout_names_the_checkpoint(
 
     assert "checkpoint pause-1" in str(raised.value)
     assert calls == [
+        ("POST", "/sandbox/sandbox-1/snapshot"),
         ("POST", "/sandbox/sandbox-1/pause"),
         ("checkpoint", "pause-1"),
         ("checkpoint", "pause-1"),
@@ -1554,6 +1655,21 @@ def test_account_wide_list_and_delete_follow_cursors(monkeypatch: pytest.MonkeyP
     assert calls[1][2]["cursor"] == "c1"
     assert result.deleted == ["a", "b"]
     assert [e.checkpoint_id for e in result.errors] == ["tip"]
+
+
+def test_list_all_checkpoints_limit_stops_paging(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str, params: dict) -> dict:
+        calls.append(dict(params))
+        return {"checkpoints": [checkpoint_response("DURABLE")] * 2, "next_cursor": "more"}
+
+    monkeypatch.setattr(client.client, "request", request)
+    listed = client.list_all_checkpoints(team_id="t", limit=3)
+    assert len(listed) == 3
+    assert len(calls) == 2
+    assert calls[0]["limit"] == 3
 
 
 def test_account_wide_calls_default_to_configured_team(monkeypatch: pytest.MonkeyPatch) -> None:

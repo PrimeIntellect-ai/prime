@@ -515,6 +515,8 @@ def test_watch_keeps_node_view_when_node_disappears(monkeypatch: pytest.MonkeyPa
     assert result.exit_code == 0, result.output
     assert "Node 'gpu-02' is not reporting metrics." in output
     assert "NODE" not in output
+    assert output.count("research-h100 · gpu-02") == 2
+    assert "1 node" not in output
 
 
 def _points(*values: Optional[float]) -> List[MetricPoint]:

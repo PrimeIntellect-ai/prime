@@ -412,12 +412,16 @@ def _duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def _header(metrics: ClusterNodeMetrics, node: Optional[NodeMetrics]) -> str:
+def _header(
+    metrics: ClusterNodeMetrics, node: Optional[NodeMetrics], node_name: Optional[str]
+) -> str:
     name = escape(metrics.cluster_display_name)
     parts = [f"[bold]{name}[/bold]"]
     if node is not None:
         gpus = f"{node.gpu_count}× {node.gpu_type}" if node.gpu_count and node.gpu_type else ""
         parts.append(f"[bold]{escape(node.name)}[/bold]" + (f" {escape(gpus)}" if gpus else ""))
+    elif node_name is not None:
+        parts.append(f"[bold]{escape(node_name)}[/bold]")
     elif metrics.nodes:
         count = len(metrics.nodes)
         gpus = sum(n.gpu_count or 0 for n in metrics.nodes)
@@ -437,7 +441,7 @@ def _inspection_legend() -> Text:
 def render_metrics(metrics: ClusterNodeMetrics, node_name: Optional[str]) -> List[RenderableType]:
     """Everything one refresh prints, as a list so plain mode can print it piecewise."""
     node = next((n for n in metrics.nodes if n.name == node_name), None) if node_name else None
-    out: List[RenderableType] = [Text.from_markup(_header(metrics, node))]
+    out: List[RenderableType] = [Text.from_markup(_header(metrics, node, node_name))]
     if not metrics.available:
         reason = escape(
             metrics.unavailable_reason

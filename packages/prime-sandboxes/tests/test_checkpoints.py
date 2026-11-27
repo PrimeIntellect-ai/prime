@@ -1657,6 +1657,21 @@ def test_account_wide_list_and_delete_follow_cursors(monkeypatch: pytest.MonkeyP
     assert [e.checkpoint_id for e in result.errors] == ["tip"]
 
 
+def test_list_all_checkpoints_limit_stops_paging(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = SandboxClient(APIClient(api_key="test-key"))
+    calls = []
+
+    def request(method: str, path: str, params: dict) -> dict:
+        calls.append(dict(params))
+        return {"checkpoints": [checkpoint_response("DURABLE")] * 2, "next_cursor": "more"}
+
+    monkeypatch.setattr(client.client, "request", request)
+    listed = client.list_all_checkpoints(team_id="t", limit=3)
+    assert len(listed) == 3
+    assert len(calls) == 2
+    assert calls[0]["limit"] == 3
+
+
 def test_account_wide_calls_default_to_configured_team(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PRIME_TEAM_ID", "configured-team")
     client = SandboxClient(APIClient(api_key="test-key"))

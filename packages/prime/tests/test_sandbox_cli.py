@@ -2204,6 +2204,38 @@ def test_sandbox_network_inject_header_conflicts_with_policy_file_host(
     assert "also set in --network-policy" in output
 
 
+def test_account_checkpoint_list_defaults_to_a_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_cli(monkeypatch)
+    now = datetime.now(timezone.utc)
+    rows = [
+        SandboxCheckpoint(
+            id=f"c{i}",
+            sandbox_id="s",
+            state="DURABLE",
+            depth=1,
+            docker_image="python:3.11-slim",
+            created_at=now,
+            updated_at=now,
+        )
+        for i in range(5)
+    ]
+    limits: list[Any] = []
+
+    def list_all(self: Any, **kwargs: Any) -> list[SandboxCheckpoint]:
+        limits.append(kwargs["limit"])
+        return rows if kwargs["limit"] is None else rows[: kwargs["limit"]]
+
+    monkeypatch.setattr("prime_cli.commands.sandbox.SandboxClient.list_all_checkpoints", list_all)
+
+    capped = runner.invoke(app, ["sandbox", "checkpoint", "list", "--limit", "2", "-o", "json"])
+    assert [c["id"] for c in json.loads(capped.output)["checkpoints"]] == ["c0", "c1"]
+    table = runner.invoke(app, ["sandbox", "checkpoint", "list", "--limit", "2"])
+    assert "Showing the oldest 2" in _flat(table.output)
+    everything = runner.invoke(app, ["sandbox", "checkpoint", "list", "--all", "-o", "json"])
+    assert len(json.loads(everything.output)["checkpoints"]) == 5
+    assert limits == [3, 3, None]
+
+
 def test_checkpoint_list_rejects_checkpoint_id_without_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

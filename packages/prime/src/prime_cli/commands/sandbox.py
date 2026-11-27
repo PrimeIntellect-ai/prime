@@ -824,6 +824,12 @@ def checkpoint_list(
     label: Optional[List[str]] = typer.Option(
         None, "--label", "-l", help="Only checkpoints of sandboxes with this label (repeatable)"
     ),
+    limit: int = typer.Option(
+        100, "--limit", min=1, help="Account-wide: show at most this many, oldest first"
+    ),
+    all_: bool = typer.Option(
+        False, "--all", help="Account-wide: list every checkpoint (slow for large accounts)"
+    ),
     output: str = typer.Option("table", "--output", "-o", help="Output format: table or json"),
 ) -> None:
     """List checkpoints of one sandbox, or of your whole account (incl. deleted sandboxes)."""
@@ -836,6 +842,7 @@ def checkpoint_list(
         )
         raise typer.Exit(1)
     client = SandboxClient(APIClient())
+    truncated = False
     try:
         if sandbox_id and not filtered:
             results = client.list_checkpoints(sandbox_id, checkpoint_id)
@@ -847,7 +854,11 @@ def checkpoint_list(
                 created_before=_older_than(older_than),
                 user_id=user_id,
                 labels=label,
+                # One extra tells whether more exist past the limit.
+                limit=None if all_ else limit + 1,
             )
+            truncated = len(results) > limit and not all_
+            results = results if all_ else results[:limit]
     except APIError as exc:
         console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
@@ -895,6 +906,11 @@ def checkpoint_list(
             escape(c.error or ""),
         )
     console.print(table)
+    if truncated:
+        console.print(
+            f"[yellow]Showing the oldest {limit}; narrow with --state/--older-than/--label, "
+            "or use --limit N / --all.[/yellow]"
+        )
 
 
 def _mib(size_bytes: Optional[int]) -> str:

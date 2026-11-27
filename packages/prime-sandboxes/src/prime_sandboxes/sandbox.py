@@ -3155,20 +3155,26 @@ class SandboxClient:
         created_before: Optional[datetime] = None,
         user_id: Optional[str] = None,
         labels: Optional[List[str]] = None,
+        limit: Optional[int] = None,
     ) -> List[SandboxCheckpoint]:
         """List every rootfs checkpoint of your account (or team_id), oldest first.
 
         Includes checkpoints of deleted sandboxes. user_id keeps one creator's
         checkpoints; labels keeps those whose sandbox had ALL these labels.
+        limit stops after that many (oldest first) instead of paging through all.
         """
         team_id = team_id if team_id is not None else self.client.config.team_id
         params = _owner_checkpoint_params(
             team_id, sandbox_id, states, created_before, user_id, labels
         )
+        if limit is not None:
+            params["limit"] = min(limit, 500)
         results: List[SandboxCheckpoint] = []
         while True:
             response = self.client.request("GET", "/sandbox/checkpoints", params=params)
             results += [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+            if limit is not None and len(results) >= limit:
+                return results[:limit]
             if not response.get("next_cursor"):
                 return results
             params["cursor"] = response["next_cursor"]
@@ -5354,16 +5360,21 @@ class AsyncSandboxClient:
         created_before: Optional[datetime] = None,
         user_id: Optional[str] = None,
         labels: Optional[List[str]] = None,
+        limit: Optional[int] = None,
     ) -> List[SandboxCheckpoint]:
         """List every rootfs checkpoint of your account (or team_id), oldest first."""
         team_id = team_id if team_id is not None else self.client.config.team_id
         params = _owner_checkpoint_params(
             team_id, sandbox_id, states, created_before, user_id, labels
         )
+        if limit is not None:
+            params["limit"] = min(limit, 500)
         results: List[SandboxCheckpoint] = []
         while True:
             response = await self.client.request("GET", "/sandbox/checkpoints", params=params)
             results += [SandboxCheckpoint.model_validate(c) for c in response["checkpoints"]]
+            if limit is not None and len(results) >= limit:
+                return results[:limit]
             if not response.get("next_cursor"):
                 return results
             params["cursor"] = response["next_cursor"]

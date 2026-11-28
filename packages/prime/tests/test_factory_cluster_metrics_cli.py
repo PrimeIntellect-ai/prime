@@ -574,6 +574,37 @@ def test_cluster_resolves_by_name_index_or_id(
     assert dummy.metrics_calls[0]["endpoint"] == METRICS_ENDPOINT
 
 
+def test_a_cluster_id_skips_the_status_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolving costs a `factory status` call; an id needs no resolving."""
+    cluster_id = "o9g4nhwfh9rfr84rnua0yotj"
+    dummy = _install(monkeypatch, _payload(), status=_status(), team_id="team-1")
+
+    result, _ = _run(cluster_id)
+
+    assert result.exit_code == 0, result.output
+    assert [c["endpoint"] for c in dummy.calls] == [
+        f"/model-factory/clusters/{cluster_id}/metrics/nodes"
+    ]
+
+
+def test_an_unknown_id_falls_back_to_the_status_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shape heuristic can be wrong; the 404 has to recover, not surface."""
+    status = _status({"id": "pc_123", "display_name": "abcdefghij0123456789"})
+    dummy = _install(
+        monkeypatch,
+        NotFoundError("HTTP 404: Not Found"),
+        _payload(),
+        status=status,
+        team_id="team-1",
+    )
+
+    result, _ = _run("abcdefghij0123456789")
+
+    assert result.exit_code == 0, result.output
+    assert STATUS_ENDPOINT in [c["endpoint"] for c in dummy.calls]
+    assert dummy.metrics_calls[-1]["endpoint"] == METRICS_ENDPOINT
+
+
 def test_unmatched_selector_or_no_team_is_used_as_id(monkeypatch: pytest.MonkeyPatch) -> None:
     dummy = _install(monkeypatch, _payload())
 

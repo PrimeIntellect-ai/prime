@@ -67,6 +67,10 @@ ERROR_EXIT_CODES = {
 }
 # A selector outside this shape (spaces, punctuation) or all digits can't be a cluster id.
 ID_LIKE = re.compile(r"[A-Za-z0-9_-]+")
+# A cuid: lowercase alphanumeric, no separators. Display names in the fleet all
+# carry hyphens, so this tells the two apart well enough to skip a lookup —
+# and a wrong guess only costs the 404 that `metrics` already handles.
+CLUSTER_ID = re.compile(r"[a-z0-9]{20,32}")
 
 SPARK_CHARS = "▁▂▃▄▅▆▇█"
 BAR_WIDTH = 8
@@ -672,15 +676,32 @@ def cluster_metrics(
         _fail(json_mode, "invalid_argument", "--watch cannot be combined with JSON output.")
 
     has_team = bool(team or Config().team_id)
-    cluster_id = _resolve_cluster_id(cluster, team, json_mode)
     client = FactoryMetricsClient(APIClient())
     trends = not current_only
+
+    # Resolving a name or index costs a `prime factory status` call (1.5s warm,
+    # 13s cold) on top of the metrics call. A cluster id needs no lookup at all,
+    # so spend it only on a selector that cannot already be one. The 404 below
+    # is the safety net if the guess is wrong, and it is cheap: the server
+    # rejects an unknown id before it queries anything.
+    cluster_id = (
+        cluster if CLUSTER_ID.fullmatch(cluster) else _resolve_cluster_id(cluster, team, json_mode)
+    )
 
     def fetch() -> ClusterNodeMetrics:
         return client.get_node_metrics(cluster_id, window, node, current_only)
 
     try:
         metrics = fetch()
+    except NotFoundError as e:
+        resolved = _resolve_cluster_id(cluster, team, json_mode)
+        if resolved == cluster_id:
+            _fail(json_mode, *_error_message(e, cluster, node, has_team))
+        cluster_id = resolved
+        try:
+            metrics = fetch()
+        except APIError as retry:
+            _fail(json_mode, *_error_message(retry, cluster, node, has_team))
     except APIError as e:
         _fail(json_mode, *_error_message(e, cluster, node, has_team))
 

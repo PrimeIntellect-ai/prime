@@ -605,6 +605,33 @@ def test_an_unknown_id_falls_back_to_the_status_lookup(monkeypatch: pytest.Monke
     assert dummy.metrics_calls[-1]["endpoint"] == METRICS_ENDPOINT
 
 
+def test_a_resolved_name_does_not_look_up_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name already cost a status call; a 404 after it is the answer, not a retry."""
+    status = _status({"id": "pc_123", "display_name": "research-h100"})
+    dummy = _install(
+        monkeypatch, NotFoundError("HTTP 404: Not Found"), status=status, team_id="team-1"
+    )
+
+    result, output = _run("research-h100", "--node", "gpu-99")
+
+    assert result.exit_code == 3
+    assert len([c for c in dummy.calls if c["endpoint"] == STATUS_ENDPOINT]) == 1
+    assert "node 'gpu-99'" in output
+
+
+def test_a_node_404_without_a_team_still_points_at_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cause is the same with --node: nothing can resolve a name without a team."""
+    _install(monkeypatch, NotFoundError("HTTP 404: Not Found"))
+
+    result, output = _run("dell-h100-nj", "--node", "gpu-01")
+
+    assert result.exit_code == 3
+    assert "No team is selected" in output
+    assert "gpu-01" in output
+
+
 def test_unmatched_selector_or_no_team_is_used_as_id(monkeypatch: pytest.MonkeyPatch) -> None:
     dummy = _install(monkeypatch, _payload())
 

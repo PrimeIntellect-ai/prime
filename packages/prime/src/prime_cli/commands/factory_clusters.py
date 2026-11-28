@@ -529,19 +529,23 @@ def _error_message(
     if code == "unauthorized":
         return code, f"{error} Cluster metrics need the factory read scope."
     if code == "not_found":
+        if not has_team:
+            # Without a team the selector went to the server as an id, because
+            # display names and indexes only exist in `prime factory status`.
+            # Say that, rather than leaving it reading as a permissions problem
+            # — and say it with `--node` too, where the cause is the same.
+            target = f"Cluster '{cluster}'"
+            if node is not None:
+                target += f" or its node '{node}'"
+            return code, (
+                f"{target} was not found. No team is selected, so a display name or "
+                "index can't be resolved — run `prime switch` to select a team, or "
+                "pass --team <team_id>."
+            )
         if node is not None:
             return code, (
                 f"Cluster '{cluster}' or its node '{node}' was not found, "
                 "or you are not a member of the cluster's team."
-            )
-        if not has_team:
-            # Without a team the selector went to the server as an id, because
-            # display names and indexes only exist in `prime factory status`.
-            # Say that, rather than leaving it reading as a permissions problem.
-            return code, (
-                f"Cluster '{cluster}' was not found. No team is selected, so a display "
-                "name or index can't be resolved — run `prime switch` to select a team, "
-                "or pass --team <team_id>."
             )
         return code, (
             f"Cluster '{cluster}' was not found, or you are not a member of its team. "
@@ -684,9 +688,8 @@ def cluster_metrics(
     # so spend it only on a selector that cannot already be one. The 404 below
     # is the safety net if the guess is wrong, and it is cheap: the server
     # rejects an unknown id before it queries anything.
-    cluster_id = (
-        cluster if CLUSTER_ID.fullmatch(cluster) else _resolve_cluster_id(cluster, team, json_mode)
-    )
+    guessed = bool(CLUSTER_ID.fullmatch(cluster))
+    cluster_id = cluster if guessed else _resolve_cluster_id(cluster, team, json_mode)
 
     def fetch() -> ClusterNodeMetrics:
         return client.get_node_metrics(cluster_id, window, node, current_only)
@@ -694,7 +697,11 @@ def cluster_metrics(
     try:
         metrics = fetch()
     except NotFoundError as e:
-        resolved = _resolve_cluster_id(cluster, team, json_mode)
+        # Only a guess is worth a second look. A selector that already went
+        # through the lookup would pay for `/factory/status` twice and surface
+        # a resolve error in place of this 404 — which is the real answer when
+        # the cluster is resolved and it is the `--node` that does not exist.
+        resolved = _resolve_cluster_id(cluster, team, json_mode) if guessed else cluster_id
         if resolved == cluster_id:
             _fail(json_mode, *_error_message(e, cluster, node, has_team))
         cluster_id = resolved
